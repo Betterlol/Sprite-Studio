@@ -1,0 +1,264 @@
+import Fastify from "fastify";
+import multipart from "@fastify/multipart";
+import staticFiles from "@fastify/static";
+import { z } from "zod";
+import {
+  mkdirSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  unlinkSync,
+  createReadStream,
+  realpathSync,
+} from "node:fs";
+import { resolve, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { timingSafeEqual } from "node:crypto";
+import { ProjectStore, StudioError } from "./store.ts";
+import { AgentHub } from "./agent.ts";
+import { roleSchema } from "./model.ts";
+
+const repo = fileURLToPath(new URL("../", import.meta.url));
+const dataRoot = resolve(
+  process.env.SPRITE_STUDIO_DATA_DIR || join(repo, ".local", "studio"),
+);
+mkdirSync(dataRoot, { recursive: true });
+const lockPath = join(dataRoot, "runtime.lock");
+if (existsSync(lockPath)) {
+  const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+  let alive = false;
+  try {
+    process.kill(lock.pid, 0);
+    alive = true;
+  } catch (error: any) {
+    if (error.code !== "ESRCH") alive = true;
+  }
+  if (alive) throw new Error("这个工作台数据目录已被另一个进程打开");
+  unlinkSync(lockPath);
+}
+writeFileSync(lockPath, JSON.stringify({ pid: process.pid }), { flag: "wx" });
+const port = Number(process.env.PORT || 8766);
+const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
+const store = new ProjectStore(join(dataRoot, "projects"));
+if (!store.projects.size) store.createProject("我的精灵工程");
+const agent = new AgentHub(store, `http://127.0.0.1:${port}`);
+const pid = (request: any) => z.string().uuid().parse(request.params.projectId);
+const aid = (request: any) => z.string().uuid().parse(request.params.assetId);
+await app.register(multipart, {
+  limits: { fileSize: 25 * 1024 * 1024, files: 1 },
+});
+app.addHook("onRequest", async (request, reply) => {
+  const origin = request.headers.origin;
+  if (
+    origin &&
+    origin !== `http://${request.headers.host}` &&
+    origin !== "http://127.0.0.1:5173" &&
+    origin !== "http://localhost:5173"
+  )
+    return reply.code(403).send({ error: "不接受来自其他网站的操作" });
+});
+app.setErrorHandler((error: any, request, reply) => {
+  const message =
+    error instanceof z.ZodError
+      ? error.issues.map((issue) => issue.message).join("；")
+      : error.message;
+  reply.code(error.statusCode || 400).send({ error: message || "操作失败" });
+});
+
+app.get("/api/status", async () => ({ ...agent.status, ready: true }));
+app.post("/api/connect", async () => {
+  await agent.bootstrapPromise;
+  agent.bootstrapPromise = agent.bootstrap();
+  await agent.bootstrapPromise;
+  return agent.status;
+});
+app.get("/api/projects", async () => [...store.projects.values()]);
+app.post("/api/projects", async (request) => {
+  const input = z
+    .object({ name: z.string().trim().min(1).max(100) })
+    .parse(request.body);
+  return store.createProject(input.name);
+});
+app.get("/api/projects/:projectId", async (request) =>
+  store.state(pid(request)),
+);
+app.post("/api/projects/:projectId/import", async (request) => {
+  const projectId = pid(request);
+  store.project(projectId);
+  const query = z
+    .object({ role: roleSchema.default("reference") })
+    .parse(request.query);
+  const part = await request.file();
+  if (!part) throw new StudioError("请选择图片");
+  const buffer = await part.toBuffer();
+  return store.importImage(projectId, part.filename, buffer, query.role);
+});
+app.get("/api/projects/:projectId/images/:assetId", async (request, reply) => {
+  const projectId = pid(request),
+    imageId = aid(request);
+  const asset = store.image(projectId, imageId);
+  const query = z.object({ v: z.string().optional() }).parse(request.query);
+  const path = store.imagePath(projectId, imageId, query.v);
+  reply
+    .type(asset.mime)
+    .header(
+      "Cache-Control",
+      query.v ? "private, max-age=31536000, immutable" : "no-cache",
+    );
+  return reply.send(createReadStream(path));
+});
+app.post("/api/projects/:projectId/assets/:assetId/adopt", async (request) => {
+  const input = z.object({ revision: z.string() }).parse(request.body);
+  return store.adopt(pid(request), aid(request), input.revision);
+});
+app.post(
+  "/api/projects/:projectId/assets/:assetId/transform",
+  async (request) => {
+    const input = z
+      .object({ revision: z.string(), transform: z.unknown() })
+      .parse(request.body);
+    return store.transform(
+      pid(request),
+      aid(request),
+      input.revision,
+      input.transform,
+    );
+  },
+);
+app.post("/api/projects/:projectId/assets/:assetId/slice", async (request) => {
+  const input = z
+    .object({ revision: z.string(), spec: z.unknown() })
+    .parse(request.body);
+  return store.slice(pid(request), aid(request), input.revision, input.spec);
+});
+app.patch("/api/projects/:projectId/clips/:assetId", async (request) =>
+  store.updateClip(pid(request), aid(request), request.body),
+);
+app.get(
+  "/api/projects/:projectId/clips/:assetId/export",
+  async (request, reply) => {
+    const exported = await store.exportClip(pid(request), aid(request));
+    return reply
+      .type("image/webp")
+      .header(
+        "Content-Disposition",
+        `attachment; filename*=UTF-8''${encodeURIComponent(exported.filename)}`,
+      )
+      .send(createReadStream(exported.path));
+  },
+);
+
+app.post("/api/projects/:projectId/sessions", async (request) =>
+  store.createSession(pid(request)),
+);
+app.get("/api/sessions/:sessionId", async (request: any) =>
+  store.session(request.params.sessionId),
+);
+app.post("/api/sessions/:sessionId/messages", async (request: any, reply) => {
+  const input = z
+    .object({
+      text: z.string().trim().min(1).max(12000),
+      assetIds: z.array(z.string().uuid()).max(5).default([]),
+      requestId: z.string().uuid(),
+    })
+    .parse(request.body);
+  const session = agent.send(
+    request.params.sessionId,
+    input.text,
+    input.assetIds,
+    input.requestId,
+  );
+  return reply.code(202).send(session);
+});
+app.post("/api/sessions/:sessionId/stop", async (request: any) => {
+  await agent.stop(request.params.sessionId);
+  return store.session(request.params.sessionId);
+});
+app.post("/api/sessions/:sessionId/answer", async (request: any) => {
+  const input = z
+    .object({ promptId: z.string(), answers: z.record(z.string(), z.string()) })
+    .parse(request.body);
+  agent.answer(request.params.sessionId, input.promptId, input.answers);
+  return store.session(request.params.sessionId);
+});
+app.post("/internal/tools/:sessionId", async (request: any) => {
+  const expected = agent.tokens.get(request.params.sessionId);
+  const actual = request.headers.authorization?.replace(/^Bearer /, "");
+  if (
+    !expected ||
+    typeof actual !== "string" ||
+    actual.length !== expected.length ||
+    !timingSafeEqual(Buffer.from(actual), Buffer.from(expected))
+  )
+    throw new StudioError("无效工具会话", 403);
+  const input = z
+    .object({
+      name: z.string(),
+      arguments: z.record(z.string(), z.unknown()).default({}),
+    })
+    .parse(request.body);
+  return agent.tool(request.params.sessionId, input.name, input.arguments);
+});
+
+app.get("/api/events", (request, reply) => {
+  reply.hijack();
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  const send = (type: string, data: unknown) => {
+    if (!reply.raw.destroyed)
+      reply.raw.write(`data: ${JSON.stringify({ type, data })}\n\n`);
+  };
+  const onAssets = (data: unknown) => send("assets", data);
+  const onSession = (data: unknown) => send("session", data);
+  const onStatus = (data: unknown) => send("status", data);
+  store.on("assets", onAssets);
+  store.on("session", onSession);
+  store.on("status", onStatus);
+  send("connected", { status: agent.status });
+  const interval = setInterval(() => {
+    if (!reply.raw.destroyed) reply.raw.write(": heartbeat\n\n");
+  }, 20_000);
+  reply.raw.on("close", () => {
+    clearInterval(interval);
+    store.off("assets", onAssets);
+    store.off("session", onSession);
+    store.off("status", onStatus);
+  });
+});
+const dist = join(repo, "dist");
+if (existsSync(dist))
+  await app.register(staticFiles, { root: dist, prefix: "/" });
+else
+  app.get("/", async (request, reply) =>
+    reply.type("text/plain").send("请先运行 npm run build，再启动工作台。"),
+  );
+
+let stopping = false;
+async function stop() {
+  if (stopping) return;
+  stopping = true;
+  await agent.close();
+  store.worker.close();
+  if (
+    existsSync(lockPath) &&
+    JSON.parse(readFileSync(lockPath, "utf8")).pid === process.pid
+  )
+    unlinkSync(lockPath);
+  process.exit(0);
+}
+process.on("SIGINT", () => void stop());
+process.on("SIGTERM", () => void stop());
+process.on("exit", () => {
+  if (existsSync(lockPath)) {
+    try {
+      if (JSON.parse(readFileSync(lockPath, "utf8")).pid === process.pid)
+        unlinkSync(lockPath);
+    } catch {}
+  }
+});
+await app.listen({ host: "127.0.0.1", port });
+console.log(`Sprite Studio: http://127.0.0.1:${port}`);

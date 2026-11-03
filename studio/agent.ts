@@ -11,6 +11,8 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { AppServer, type Message } from "./runtime/app-server.ts";
 import { ProjectStore, StudioError } from "./store.ts";
+import { interpolationPrompt } from "./interpolation.ts";
+import { interpolationSchema } from "./model.ts";
 import {
   transformSchema,
   sliceSchema,
@@ -188,7 +190,52 @@ export class AgentHub {
       throw error;
     }
   }
-  send(sessionId: string, text: string, assetIds: string[], requestId: string) {
+  startInterpolation(projectId: string, input: unknown) {
+    const spec = interpolationSchema.parse(input);
+    if (this.store.interpolations.jobs.has(spec.requestId))
+      return this.store.interpolations.get(projectId, spec.requestId);
+    if (
+      [...this.store.sessions.values()].some(
+        (session) =>
+          session.projectId === projectId &&
+          ["starting", "running"].includes(session.status),
+      )
+    )
+      throw new StudioError("当前工程有任务正在进行，请先等待或停止", 409);
+    const job = this.store.interpolations.create(projectId, spec);
+    try {
+      this.send(
+        job.sessionId,
+        interpolationPrompt(job),
+        [job.start.imageId, job.end.imageId],
+        job.id,
+        `以两张引用图片为首尾，生成 ${job.count} 张中间帧。${job.description}`,
+      );
+    } catch (error) {
+      job.status = "failed";
+      job.error = String(error);
+      this.store.interpolations.save(job);
+      throw error;
+    }
+    return job;
+  }
+  private interpolation(session: Session) {
+    return session.interpolationId &&
+      session.messages.filter((message) => message.role === "user").at(-1)
+        ?.id === session.interpolationId
+      ? this.store.interpolations.get(
+          session.projectId,
+          session.interpolationId,
+        )
+      : undefined;
+  }
+  send(
+    sessionId: string,
+    text: string,
+    assetIds: string[],
+    requestId: string,
+    displayText?: string,
+  ) {
     const session = this.store.session(sessionId);
     if (session.messages.some((message) => message.id === requestId))
       return session;
@@ -207,11 +254,14 @@ export class AgentHub {
     session.error = undefined;
     session.prompt = undefined;
     session.activities = [];
-    session.title = session.messages.length ? session.title : text.slice(0, 30);
+    session.title = session.messages.length
+      ? session.title
+      : (displayText || text).slice(0, 30);
     session.messages.push({
       id: requestId,
       role: "user",
       text,
+      displayText,
       assetIds: references.map((asset) => asset.id),
       createdAt: new Date().toISOString(),
     });
@@ -355,6 +405,17 @@ export class AgentHub {
           activity.status =
             params.turn.status === "completed" ? "completed" : "failed";
       this.flush(session);
+      const job = this.interpolation(session);
+      if (job && !job.sheetId) {
+        job.status =
+          session.status === "interrupted" ? "interrupted" : "failed";
+        job.error =
+          session.error ||
+          (session.status === "interrupted"
+            ? "补帧已停止，没有自动重试。"
+            : "本次任务没有返回可用图集，请查看对话；没有自动重试。");
+        this.store.interpolations.save(job);
+      }
     }
     if (message.method === "error") {
       session.error = params.error?.message || params.message;
@@ -363,6 +424,8 @@ export class AgentHub {
   }
   private async importGenerated(session: Session, item: any) {
     try {
+      const job = this.interpolation(session);
+      if (job?.sheetId) return;
       if (!item.savedPath || !existsSync(item.savedPath))
         throw new Error("生成已完成，但没有取得本地图片");
       if (statSync(item.savedPath).size > 25 * 1024 * 1024)
@@ -372,8 +435,15 @@ export class AgentHub {
         `生成候选-${new Date().toLocaleTimeString("zh-CN", { hour12: false }).replaceAll(":", "")}.png`,
         readFileSync(item.savedPath),
         "candidate",
-        { kind: "generation", runId: session.turnId },
+        { kind: "generation", runId: session.turnId, interpolationId: job?.id },
       );
+      if (job)
+        this.store.interpolations.receive(
+          session.projectId,
+          job.id,
+          asset.id,
+          item,
+        );
       let msg = session.messages
         .filter((message) => message.role === "assistant")
         .at(-1);
@@ -459,6 +529,12 @@ export class AgentHub {
     else {
       session.status = "interrupted";
       this.flush(session);
+      const job = this.interpolation(session);
+      if (job && !job.sheetId) {
+        job.status = "interrupted";
+        job.error = "补帧已停止，没有自动重试。";
+        this.store.interpolations.save(job);
+      }
     }
   }
   private fail(session: Session, error: unknown) {
@@ -467,6 +543,12 @@ export class AgentHub {
     for (const msg of session.messages)
       if (msg.status === "streaming") msg.status = "failed";
     this.flush(session);
+    const job = this.interpolation(session);
+    if (job && !job.sheetId) {
+      job.status = "failed";
+      job.error = session.error;
+      this.store.interpolations.save(job);
+    }
   }
   async tool(sessionId: string, name: string, input: any) {
     const session = this.store.session(sessionId);
@@ -477,20 +559,18 @@ export class AgentHub {
         content: [
           textContent(
             JSON.stringify(
-              this.store
-                .assets(pid)
-                .map((asset) =>
-                  asset.type === "image"
-                    ? {
-                        id: asset.id,
-                        name: asset.name,
-                        role: asset.role,
-                        width: asset.width,
-                        height: asset.height,
-                        revision: asset.revision,
-                      }
-                    : asset,
-                ),
+              this.store.assets(pid).map((asset) =>
+                asset.type === "image"
+                  ? {
+                      id: asset.id,
+                      name: asset.name,
+                      role: asset.role,
+                      width: asset.width,
+                      height: asset.height,
+                      revision: asset.revision,
+                    }
+                  : asset,
+              ),
             ),
           ),
         ],

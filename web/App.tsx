@@ -1,4 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { InterpolationPanel } from "./InterpolationPanel.tsx";
+import { NewClipDialog } from "./NewClipDialog.tsx";
+import { api } from "./api.ts";
 import {
   Upload,
   Plus,
@@ -38,25 +41,16 @@ import {
   type Project,
   type Session,
   type Transform,
+  type Interpolation,
 } from "../studio/model.ts";
 
-type State = { project: Project; assets: Asset[]; sessions: Session[] };
+type State = {
+  project: Project;
+  assets: Asset[];
+  sessions: Session[];
+  interpolations: Interpolation[];
+};
 type Connection = { connected: boolean; model?: string; error?: string };
-async function api<T = any>(
-  url: string,
-  options: RequestInit = {},
-): Promise<T> {
-  const response = await fetch(url, {
-    ...options,
-    headers:
-      options.body === undefined || options.body instanceof FormData
-        ? options.headers
-        : { "Content-Type": "application/json", ...options.headers },
-  });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "操作失败");
-  return result;
-}
 const roles = { reference: "参考图", source: "已采纳", candidate: "候选" };
 const emptyTransform: Transform = {
   scale: 1,
@@ -94,9 +88,17 @@ export function App() {
   const [filter, setFilter] = useState("all");
   const [frameIndex, setFrameIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [playbackRun, setPlaybackRun] = useState(0);
   const [zoom, setZoom] = useState<number | "fit">("fit");
   const [background, setBackground] = useState("checker");
-  const [tool, setTool] = useState<"slice" | "adjust">("slice");
+  const [tool, setTool] = useState<"slice" | "adjust" | "interpolate">(() => {
+    const saved = localStorage.getItem("studio.tool");
+    return saved === "adjust" || saved === "interpolate" ? saved : "slice";
+  });
+  const playbackIntent = useRef<string | null>(null);
+  useEffect(() => {
+    localStorage.setItem("studio.tool", tool);
+  }, [tool]);
   const [columns, setColumns] = useState(4);
   const [rows, setRows] = useState(1);
   const [fps, setFps] = useState(12);
@@ -109,6 +111,7 @@ export function App() {
     null,
   );
   const [newProject, setNewProject] = useState(false);
+  const [newClip, setNewClip] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [promptAnswers, setPromptAnswers] = useState<Record<string, string>>(
     {},
@@ -122,6 +125,14 @@ export function App() {
   const notify = (text: string, error = false) => setToast({ text, error });
   const selected = state?.assets.find((asset) => asset.id === selectedId);
   const clip = selected?.type === "clip" ? selected : undefined;
+  const originalClipId = state?.interpolations?.find(
+    (job) => job.prepared?.clipId === clip?.id,
+  )?.clipId;
+  const interpolationClip = (
+    originalClipId
+      ? state?.assets.find((asset) => asset.id === originalClipId)
+      : clip
+  ) as ClipAsset | undefined;
   const currentImage = (
     clip
       ? state?.assets.find(
@@ -226,10 +237,14 @@ export function App() {
   }, [projectId, state?.project.id, selectedId, sessionId, draft]);
   useEffect(() => {
     setFrameIndex(0);
-    setPlaying(false);
+    setPlaying(playbackIntent.current === selectedId);
+    playbackIntent.current = null;
     setTransform(emptyTransform);
     setZoom("fit");
   }, [selectedId]);
+  useEffect(() => {
+    if (selected?.type === "image" && tool === "interpolate") setTool("slice");
+  }, [selected?.type]);
   useEffect(() => {
     const element = stage.current;
     if (!element) return;
@@ -273,7 +288,7 @@ export function App() {
     };
     request = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(request);
-  }, [playing, clip?.revision]);
+  }, [playing, clip?.revision, playbackRun]);
 
   async function run(label: string, action: () => Promise<void>) {
     setOperation(label);
@@ -624,6 +639,18 @@ export function App() {
             )}
           </div>
           <div className="library-footer">
+            <button
+              className="import-button new-clip-button"
+              disabled={
+                (state?.assets.filter(
+                  (asset) => asset.type === "image" && asset.frameCount === 1,
+                ).length || 0) < 2
+              }
+              onClick={() => setNewClip(true)}
+            >
+              <Film size={15} />
+              新建动画<span>＋</span>
+            </button>
             <button
               className="import-button"
               disabled={!!operation}
@@ -1006,6 +1033,19 @@ export function App() {
                   <SlidersHorizontal size={14} />
                   调整{clip ? "当前帧" : "图片"}
                 </button>
+                {interpolationClip && (
+                  <button
+                    className={tool === "interpolate" ? "active" : ""}
+                    onClick={() => {
+                      setTool("interpolate");
+                      setPlaying(false);
+                      setTransform(emptyTransform);
+                    }}
+                  >
+                    <Sparkles size={14} />
+                    首尾补帧
+                  </button>
+                )}
                 {currentImage.role === "candidate" && (
                   <button
                     className="adopt-button"
@@ -1031,7 +1071,32 @@ export function App() {
                   </button>
                 )}
               </div>
-              {tool === "slice" ? (
+              {tool === "interpolate" && interpolationClip ? (
+                <InterpolationPanel
+                  key={`${projectId}-${interpolationClip.id}`}
+                  projectId={projectId}
+                  clip={interpolationClip}
+                  assets={state?.assets || []}
+                  jobs={state?.interpolations || []}
+                  sessions={state?.sessions || []}
+                  connected={connection.connected}
+                  busy={agentBusy}
+                  refresh={() => refreshRef.current()}
+                  onSession={(id) => {
+                    chooseSession(id);
+                    setChatVisible(true);
+                  }}
+                  onPreview={(id) => {
+                    setFrameIndex(0);
+                    setPlaybackRun((value) => value + 1);
+                    if (id === selectedId) setPlaying(true);
+                    else {
+                      playbackIntent.current = id;
+                      setSelectedId(id);
+                    }
+                  }}
+                />
+              ) : tool === "slice" ? (
                 <div className="tool-content">
                   <label>
                     列
@@ -1312,7 +1377,9 @@ export function App() {
                     )}
                   </div>
                   {message.text && (
-                    <div className="message-text">{message.text}</div>
+                    <div className="message-text">
+                      {message.displayText || message.text}
+                    </div>
                   )}
                   {message.assetIds.length > 0 && (
                     <div className="message-images">
@@ -1561,6 +1628,21 @@ export function App() {
             <X size={14} />
           </button>
         </div>
+      )}
+      {newClip && state && (
+        <NewClipDialog
+          projectId={projectId}
+          assets={state.assets}
+          initialImageId={currentImage?.id}
+          onClose={() => setNewClip(false)}
+          onCreated={async (clip) => {
+            await refreshRef.current();
+            setNewClip(false);
+            setSelectedId(clip.id);
+            setTool("interpolate");
+            setFilter("all");
+          }}
+        />
       )}
       {newProject && (
         <div

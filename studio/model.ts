@@ -26,6 +26,7 @@ export type ImageAsset = {
     revision?: string;
     operation?: unknown;
     runId?: string;
+    interpolationId?: string;
   };
 };
 export type ClipFrame = { id: string; imageId: string; durationUs: number };
@@ -38,12 +39,14 @@ export type ClipAsset = {
   frames: ClipFrame[];
   loop: boolean;
   origin?: { assetId: string; revision: string };
+  appliedInterpolationIds?: string[];
 };
 export type Asset = ImageAsset | ClipAsset;
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  displayText?: string;
   assetIds: string[];
   createdAt: string;
   status?: "streaming" | "completed" | "interrupted" | "failed";
@@ -75,7 +78,72 @@ export type Session = {
   prompt?: PendingPrompt;
   createdAt: string;
   updatedAt: string;
+  interpolationId?: string;
 };
+export type FrameReference = {
+  frameId: string;
+  imageId: string;
+  revision: string;
+  contentHash: string;
+};
+export type Interpolation = {
+  id: string;
+  projectId: string;
+  sessionId: string;
+  clipId: string;
+  clipRevision: string;
+  start: FrameReference;
+  end: FrameReference;
+  count: number;
+  fps: number;
+  description: string;
+  columns: number;
+  rows: number;
+  width: number;
+  height: number;
+  status:
+    | "running"
+    | "candidate"
+    | "preview"
+    | "applied"
+    | "failed"
+    | "interrupted";
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+  sheetId?: string;
+  generationItemId?: string;
+  referenceHashes?: string[];
+  referencesVerified?: boolean;
+  prepared?: {
+    clipId: string;
+    clipRevision: string;
+    spec: InterpolationLayout;
+  };
+};
+export const interpolationSchema = z.object({
+  requestId: z.string().uuid(),
+  clipId: z.string().uuid(),
+  revision: z.string(),
+  startFrameId: z.string().uuid(),
+  endFrameId: z.string().uuid(),
+  count: z.number().int().min(1).max(8),
+  fps: z.number().min(1).max(60).default(12),
+  description: z.string().trim().min(1).max(2000),
+});
+export const interpolationLayoutSchema = z.object({
+  columns: z.number().int().min(1).max(10),
+  rows: z.number().int().min(1).max(10),
+  includesEndpoints: z.boolean().default(true),
+  fps: z.number().min(1).max(60),
+});
+export type InterpolationLayout = z.infer<typeof interpolationLayoutSchema>;
+export function interpolationGrid(count: number) {
+  const cells = count + 2;
+  let rows = Math.floor(Math.sqrt(cells));
+  while (cells % rows) rows--;
+  return { columns: cells / rows, rows };
+}
 export const transformSchema = z.object({
   scale: z.number().min(0.05).max(4).default(1),
   offsetX: z.number().min(-4096).max(4096).default(0),

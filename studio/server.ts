@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, randomUUID } from "node:crypto";
 import { ProjectStore, StudioError } from "./store.ts";
 import { AgentHub } from "./agent.ts";
 import { roleSchema } from "./model.ts";
@@ -133,6 +133,46 @@ app.post("/api/projects/:projectId/assets/:assetId/slice", async (request) => {
 });
 app.patch("/api/projects/:projectId/clips/:assetId", async (request) =>
   store.updateClip(pid(request), aid(request), request.body),
+);
+app.post("/api/projects/:projectId/clips", async (request) => {
+  const spec = z
+    .object({
+      name: z.string().trim().min(1).max(100),
+      imageIds: z.array(z.string().uuid()).min(2).max(128),
+      fps: z.number().min(1).max(60),
+    })
+    .parse(request.body);
+  return store.createClip(
+    pid(request),
+    spec.name,
+    spec.imageIds.map((imageId, index) => ({
+      id: randomUUID(),
+      imageId,
+      durationUs:
+        Math.round(((index + 1) * 1_000_000) / spec.fps) -
+        Math.round((index * 1_000_000) / spec.fps),
+    })),
+  );
+});
+app.post("/api/projects/:projectId/interpolations", async (request, reply) =>
+  reply.code(202).send(agent.startInterpolation(pid(request), request.body)),
+);
+app.post(
+  "/api/projects/:projectId/interpolations/:interpolationId/prepare",
+  async (request: any) =>
+    store.interpolations.prepare(
+      pid(request),
+      z.string().uuid().parse(request.params.interpolationId),
+      request.body,
+    ),
+);
+app.post(
+  "/api/projects/:projectId/interpolations/:interpolationId/apply",
+  async (request: any) =>
+    store.interpolations.apply(
+      pid(request),
+      z.string().uuid().parse(request.params.interpolationId),
+    ),
 );
 app.get(
   "/api/projects/:projectId/clips/:assetId/export",

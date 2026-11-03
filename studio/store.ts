@@ -12,6 +12,7 @@ import {
 import { join, resolve, relative, extname, sep } from "node:path";
 import { EventEmitter } from "node:events";
 import { ImagingWorker } from "./worker.ts";
+import { InterpolationStore } from "./interpolation.ts";
 import {
   sliceSchema,
   transformSchema,
@@ -55,6 +56,7 @@ export class ProjectStore extends EventEmitter {
   projects = new Map<string, Project>();
   indexes = new Map<string, Map<string, Asset>>();
   sessions = new Map<string, Session>();
+  interpolations: InterpolationStore;
   constructor(root: string) {
     super();
     mkdirSync(root, { recursive: true });
@@ -89,6 +91,7 @@ export class ProjectStore extends EventEmitter {
           this.sessions.set(session.id, session);
         }
     }
+    this.interpolations = new InterpolationStore(this);
   }
   project(id: string) {
     const project = this.projects.get(id);
@@ -190,10 +193,12 @@ export class ProjectStore extends EventEmitter {
         frames: asset.frames,
         loop: asset.loop,
         origin: asset.origin,
+        appliedInterpolationIds: asset.appliedInterpolationIds,
       });
     const metadata =
       asset.type === "clip"
-        ? (({ frames, loop, origin, ...meta }) => meta)(asset)
+        ? (({ frames, loop, origin, appliedInterpolationIds, ...meta }) =>
+            meta)(asset)
         : asset;
     atomicJson(
       join(this.dir(projectId), "Assets", `${asset.id}.meta.json`),
@@ -328,7 +333,38 @@ export class ProjectStore extends EventEmitter {
     };
     return this.saveAsset(projectId, clip) as ClipAsset;
   }
-  updateClip(projectId: string, id: string, input: unknown) {
+  createClip(
+    projectId: string,
+    name: string,
+    frames: ClipAsset["frames"],
+    origin?: ClipAsset["origin"],
+    loop = true,
+  ) {
+    clipSchema.parse({ revision: "", frames, loop });
+    const images = frames.map((frame) => this.image(projectId, frame.imageId));
+    if (
+      images.some((image) => image.frameCount !== 1) ||
+      new Set(images.map((image) => `${image.width}x${image.height}`)).size !==
+        1
+    )
+      throw new StudioError("动画帧需要相同画布的静态图片");
+    return this.saveAsset(projectId, {
+      id: randomUUID(),
+      name: cleanName(name),
+      type: "clip",
+      revision: "",
+      createdAt: now(),
+      frames,
+      loop,
+      origin,
+    }) as ClipAsset;
+  }
+  updateClip(
+    projectId: string,
+    id: string,
+    input: unknown,
+    interpolationId?: string,
+  ) {
     const old = this.asset(projectId, id);
     if (old.type !== "clip") throw new StudioError("请选择动画资源");
     const spec = clipSchema.parse(input);
@@ -361,6 +397,9 @@ export class ProjectStore extends EventEmitter {
       ...old,
       frames: spec.frames,
       loop: spec.loop,
+      appliedInterpolationIds: interpolationId
+        ? [...(old.appliedInterpolationIds || []), interpolationId]
+        : old.appliedInterpolationIds,
     }) as ClipAsset;
   }
   async exportClip(projectId: string, id: string) {
@@ -422,6 +461,7 @@ export class ProjectStore extends EventEmitter {
     return {
       project: this.project(projectId),
       assets: this.assets(projectId),
+      interpolations: this.interpolations.list(projectId),
       sessions: [...this.sessions.values()]
         .filter((session) => session.projectId === projectId)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),

@@ -29,7 +29,7 @@ def run(method, params):
         return {'width': image.width, 'height': image.height, 'frameCount': count}
     folder = inside(params['outputDir'])
     folder.mkdir(parents=True, exist_ok=True)
-    if method == 'slice':
+    if method in ('slice', 'inbetween'):
         if count != 1: raise ValueError('目前仅支持切割静态图集')
         cols, rows = params['columns'], params['rows']
         if not isinstance(cols, int) or not isinstance(rows, int) or not 1 <= cols <= 32 or not 1 <= rows <= 32 or cols*rows > 128:
@@ -38,10 +38,18 @@ def run(method, params):
         result = []
         for y in range(rows):
             for x in range(cols):
+                index = y*cols+x
+                if method == 'inbetween' and params['includesEndpoints'] and index in (0, cols*rows-1): continue
                 box = (round(x*image.width/cols), round(y*image.height/rows), round((x+1)*image.width/cols), round((y+1)*image.height/rows))
                 target = folder / f'{len(result):03}.png'
                 frame = Image.new('RGBA', (math.ceil(image.width/cols), math.ceil(image.height/rows)))
                 frame.alpha_composite(image.crop(box))
+                if method == 'inbetween':
+                    width, height = params['width'], params['height']
+                    if not 1 <= width <= 4096 or not 1 <= height <= 4096: raise ValueError('无效动画画布')
+                    fitted = ImageOps.contain(frame, (width, height), Image.Resampling.LANCZOS)
+                    frame = Image.new('RGBA', (width, height))
+                    frame.alpha_composite(fitted, ((width-fitted.width)//2, (height-fitted.height)//2))
                 frame.save(target)
                 result.append(str(target))
         return {'files': result}

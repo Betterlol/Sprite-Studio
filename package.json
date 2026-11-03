@@ -1,0 +1,19 @@
+{
+  "name": "sprite-studio-integration-probes",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "protocol": "node probes/protocol.ts",
+    "fixtures": "python probes/fixtures.py",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test probes/*.test.ts",
+    "verify": "node probes/verify.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}

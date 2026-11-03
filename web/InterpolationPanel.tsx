@@ -448,7 +448,16 @@ export function InterpolationPanel(props: Props) {
                       void run("正在加入动画", async () => {
                         const updated = await api<ClipAsset>(
                           `/api/projects/${projectId}/interpolations/${job.id}/apply`,
-                          { method: "POST" },
+                          {
+                            method: "POST",
+                            body: JSON.stringify({
+                              previewRevision: (
+                                assets.find(
+                                  (asset) => asset.id === job.prepared?.clipId,
+                                ) as ClipAsset | undefined
+                              )?.revision,
+                            }),
+                          },
                         );
                         await props.refresh();
                         if (mounted.current) props.onPreview(updated.id);

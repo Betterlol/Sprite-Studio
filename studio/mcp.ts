@@ -10,6 +10,55 @@ const idProperty = {
 };
 const tools = [
   {
+    name: "inspect_clip",
+    description:
+      "Inspect an animation snapshot or current clip: returns actual ordered contact sheet, red/cyan adjacent onion skins including loop boundary, frame instance IDs, microsecond timings and alpha bounds. These are static evidence, not observed video playback. At most 16 selected frames per call; use frame IDs to inspect further ranges.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        snapshotId: { type: "string" },
+        clipId: idProperty,
+        revision: { type: "string" },
+        startFrameId: idProperty,
+        endFrameId: idProperty,
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "stage_frame_adjustment",
+    description:
+      "Prepare a reversible single-instance animation correction, preserving all other instances and original pixels. Returns a candidate animation, change ID and actual before/after contact sheets. Does not adopt the change. Human confirms or reverts in the webpage. Durations are integer microseconds.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        requestId: { type: "string" },
+        clipId: idProperty,
+        revision: { type: "string" },
+        frameId: idProperty,
+        transform: {
+          type: "object",
+          properties: {
+            scale: { type: "number", minimum: 0.05, maximum: 4 },
+            offsetX: { type: "number" },
+            offsetY: { type: "number" },
+            clip: { type: "boolean" },
+          },
+          additionalProperties: false,
+        },
+        durationUs: { type: "integer", minimum: 1000, maximum: 60000000 },
+      },
+      required: ["clipId", "revision", "frameId"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
     name: "list_assets",
     description:
       "List current project images and clips with stable resource IDs, roles and sizes.",

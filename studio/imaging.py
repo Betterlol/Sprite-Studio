@@ -1,10 +1,15 @@
 """Bounded image operations. The TypeScript host owns project writes."""
 from pathlib import Path
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw, ImageFont
 import sys, json, math
 
 ROOT = Path(sys.argv[1]).resolve()
 Image.MAX_IMAGE_PIXELS = 16_777_216
+
+def native(path):
+    # Pillow needs an extended Windows path when the data root is deeply nested.
+    # Keep protocol paths ordinary so the TypeScript host can resolve them normally.
+    return Path('//?/' + str(path).replace(chr(92), '/')) if sys.platform == 'win32' else path
 
 def inside(value):
     p = Path(value)
@@ -15,7 +20,7 @@ def inside(value):
 
 def image_at(value):
     path = inside(value)
-    with Image.open(path) as original:
+    with Image.open(native(path)) as original:
         if original.width * original.height > Image.MAX_IMAGE_PIXELS:
             raise ValueError('图片像素数超出当前上限')
         frame_count = getattr(original, 'n_frames', 1)
@@ -23,12 +28,55 @@ def image_at(value):
         image.load()
     return image, frame_count
 
+def review_images(params, folder):
+    frames, start, end = params['frames'], params['start'], params['end']
+    if not 0 <= start <= end < len(frames) or end-start+1 > 16: raise ValueError('检查区间最多 16 帧')
+    try: font = ImageFont.truetype('C:/Windows/Fonts/arial.ttf', 13)
+    except OSError: font = ImageFont.load_default()
+    def board():
+        result = Image.new('RGBA', (160,160), '#20292e')
+        draw = ImageDraw.Draw(result)
+        for y in range(0,160,10):
+            for x in range(0,160,10):
+                if (x//10+y//10)%2: draw.rectangle((x,y,x+9,y+9),fill='#2e3a40')
+        return result
+    def thumb(image): return ImageOps.contain(image,(160,160),Image.Resampling.NEAREST)
+    def place(canvas, image, index, text, detail):
+        x,y=(index%4)*180+10,(index//4)*206+30
+        tile=board(); small=thumb(image); tile.alpha_composite(small,((160-small.width)//2,(160-small.height)//2)); canvas.paste(tile.convert('RGB'),(x,y))
+        draw=ImageDraw.Draw(canvas);draw.text((x,y-22),text,font=font,fill='#d2e6df');draw.text((x,y+165),detail,font=font,fill='#9eb3b7')
+    count=end-start+1
+    contact=Image.new('RGB',(min(count,4)*180,math.ceil(count/4)*206),'#141c21')
+    observations=[]
+    for index in range(start,end+1):
+        frame=frames[index];image,n=image_at(frame['path'])
+        if n!=1: raise ValueError('检查动画帧需要静态图片')
+        bbox=image.getchannel('A').point(lambda value:255 if value>16 else 0).getbbox()
+        observations.append({'frameId':frame['id'],'index':index,'durationUs':frame['durationUs'],'bbox':bbox,'center':[(bbox[0]+bbox[2])/2,(bbox[1]+bbox[3])/2] if bbox else None,'width':bbox[2]-bbox[0] if bbox else 0,'height':bbox[3]-bbox[1] if bbox else 0})
+        place(contact,image,index-start,f'#{index+1}  {frame["durationUs"]/1000:g} ms',f'bounds {observations[-1]["width"]} x {observations[-1]["height"]}')
+    pairs=[]
+    if start>0: pairs.append((start-1,start,False))
+    pairs.extend((index,index+1,False) for index in range(start,end))
+    if end<len(frames)-1:pairs.append((end,end+1,False))
+    if params['loop'] and len(frames)>1:pairs.append((len(frames)-1,0,True))
+    onion=Image.new('RGB',(min(max(len(pairs),1),4)*180,math.ceil(max(len(pairs),1)/4)*206),'#141c21')
+    for i,(left,right,loop) in enumerate(pairs):
+        previous,_=image_at(frames[left]['path']); current,_=image_at(frames[right]['path'])
+        if previous.size!=current.size:raise ValueError('动画画布不一致')
+        overlay=Image.new('RGBA',previous.size)
+        for source,color,alpha in [(previous,(239,107,96),0.55),(current,(92,211,199),0.7)]:
+            tint=Image.new('RGBA',source.size,(*color,0));tint.putalpha(source.getchannel('A').point(lambda value:round(value*alpha)));overlay.alpha_composite(tint)
+        place(onion,overlay,i,f'#{left+1} > #{right+1}'+(' LOOP' if loop else ''),'red: previous / cyan: next')
+    contact_path=folder/'contact.png';onion_path=folder/'onion.png';contact.save(native(contact_path));onion.save(native(onion_path))
+    return {'contact':str(contact_path),'onion':str(onion_path),'frames':observations,'pairs':[{'from':left,'to':right,'loopBoundary':loop} for left,right,loop in pairs]}
+
 def run(method, params):
     image, count = image_at(params['path'])
     if method == 'inspect':
         return {'width': image.width, 'height': image.height, 'frameCount': count}
     folder = inside(params['outputDir'])
-    folder.mkdir(parents=True, exist_ok=True)
+    native(folder).mkdir(parents=True, exist_ok=True)
+    if method == 'review': return review_images(params, folder)
     if method in ('slice', 'inbetween'):
         if count != 1: raise ValueError('目前仅支持切割静态图集')
         cols, rows = params['columns'], params['rows']
@@ -50,7 +98,7 @@ def run(method, params):
                     fitted = ImageOps.contain(frame, (width, height), Image.Resampling.LANCZOS)
                     frame = Image.new('RGBA', (width, height))
                     frame.alpha_composite(fitted, ((width-fitted.width)//2, (height-fitted.height)//2))
-                frame.save(target)
+                frame.save(native(target))
                 result.append(str(target))
         return {'files': result}
     if method == 'transform':
@@ -69,7 +117,7 @@ def run(method, params):
         canvas = Image.new('RGBA', (width, height))
         canvas.alpha_composite(resized, (x, y))
         target = folder / 'adjusted.png'
-        canvas.save(target)
+        canvas.save(native(target))
         return {'files': [str(target)]}
     if method == 'export':
         frames = params['frames']
@@ -84,7 +132,7 @@ def run(method, params):
         if len({im.size for im in images}) != 1: raise ValueError('导出动画的帧画布必须一致')
         durations = [max(1, round(frame['durationUs']/1000)) for frame in frames]
         target = folder / 'animation.webp'
-        images[0].save(target, format='WEBP', save_all=True, append_images=images[1:], duration=durations, loop=0 if params.get('loop') else 1, lossless=True)
+        images[0].save(native(target), format='WEBP', save_all=True, append_images=images[1:], duration=durations, loop=0 if params.get('loop') else 1, lossless=True)
         return {'files': [str(target)], 'durationMs': sum(durations)}
     raise ValueError('未知图像操作')
 

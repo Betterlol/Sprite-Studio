@@ -245,7 +245,7 @@ export class InterpolationStore {
     job.status = "preview";
     return this.save(job);
   }
-  apply(projectId: string, id: string) {
+  apply(projectId: string, id: string, expectedPreviewRevision?: string) {
     const job = this.get(projectId, id),
       current = this.store.asset(projectId, job.clipId) as ClipAsset;
     if (current.appliedInterpolationIds?.includes(id)) {
@@ -260,9 +260,35 @@ export class InterpolationStore {
     const preview = this.store.asset(projectId, job.prepared.clipId);
     if (
       preview.type !== "clip" ||
-      preview.revision !== job.prepared.clipRevision
+      preview.revision !==
+        (expectedPreviewRevision || job.prepared.clipRevision)
     )
       throw new StudioError("预览动画已修改，请重新切割候选后确认", 409);
+    const start = clip.frames.findIndex(
+        (frame) => frame.id === job.start.frameId,
+      ),
+      end = clip.frames.findIndex((frame) => frame.id === job.end.frameId);
+    const equal = (a: any, b: any) =>
+      a?.id === b?.id &&
+      a?.imageId === b?.imageId &&
+      a?.durationUs === b?.durationUs;
+    if (
+      preview.frames.length !==
+        clip.frames.length - (end - start - 1) + job.count ||
+      clip.frames
+        .slice(0, start + 1)
+        .some((frame, index) => !equal(frame, preview.frames[index])) ||
+      clip.frames
+        .slice(end)
+        .some(
+          (frame, index) =>
+            !equal(frame, preview.frames[start + 1 + job.count + index]),
+        )
+    )
+      throw new StudioError(
+        "补帧预览必须保留原首尾和区间外帧，只能修改中间候选",
+        409,
+      );
     for (const frame of preview.frames)
       this.store.imagePath(projectId, frame.imageId);
     const updated = this.store.updateClip(

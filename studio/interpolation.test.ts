@@ -204,3 +204,16 @@ test("changed animation and edited previews cannot be silently applied; missing 
     store.worker.close();
   }
 });
+
+test('explicitly reviewed middle-frame edits can be adopted while original endpoints remain protected',async()=>{
+ const {store,pid,sheet,clip,spec}=await fixture();try{
+  const job=store.interpolations.create(pid,spec);store.interpolations.receive(pid,job.id,sheet.id,{id:'event'});
+  await store.interpolations.prepare(pid,job.id,{columns:2,rows:2,includesEndpoints:true,fps:8});
+  let preview=store.asset(pid,job.prepared!.clipId) as ClipAsset;
+  const invalid=store.updateClip(pid,preview.id,{revision:preview.revision,frames:preview.frames.map((frame,i)=>i===0?{...frame,durationUs:150000}:frame),loop:preview.loop});
+  assert.throws(()=>store.interpolations.apply(pid,job.id,invalid.revision),/必须保留原首尾/);
+  preview=store.updateClip(pid,preview.id,{revision:invalid.revision,frames:preview.frames.map((frame,i)=>i===1?{...frame,durationUs:175000}:frame),loop:preview.loop});
+  assert.throws(()=>store.interpolations.apply(pid,job.id),/预览动画已修改/);
+  const applied=store.interpolations.apply(pid,job.id,preview.revision);assert.equal(applied.frames[1]!.durationUs,175000);assert.deepEqual(applied.frames[0],clip.frames[0]);assert.deepEqual(applied.frames.at(-1),clip.frames.at(-1));
+ }finally{store.worker.close();}
+});

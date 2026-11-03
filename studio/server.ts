@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { ProjectStore, StudioError } from "./store.ts";
 import { AgentHub } from "./agent.ts";
-import { roleSchema } from "./model.ts";
+import { roleSchema, clipReferenceSchema } from "./model.ts";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const dataRoot = resolve(
@@ -134,6 +134,96 @@ app.post("/api/projects/:projectId/assets/:assetId/slice", async (request) => {
 app.patch("/api/projects/:projectId/clips/:assetId", async (request) =>
   store.updateClip(pid(request), aid(request), request.body),
 );
+app.post("/api/projects/:projectId/reviews", async (request) => {
+  const spec = z
+    .object({
+      snapshotId: z.string().uuid().optional(),
+      clipId: z.string().uuid().optional(),
+      revision: z.string().optional(),
+      startFrameId: z.string().uuid().optional(),
+      endFrameId: z.string().uuid().optional(),
+    })
+    .refine((input) => !!input.snapshotId || !!input.clipId)
+    .parse(request.body);
+  return store.animation.inspect(pid(request), spec);
+});
+app.get(
+  "/api/projects/:projectId/reviews/:reviewId/:kind",
+  async (request: any, reply) => {
+    const kind = z.enum(["contact", "onion"]).parse(request.params.kind),
+      path = store.animation.evidence(
+        pid(request),
+        z.string().uuid().parse(request.params.reviewId),
+        kind,
+      );
+    return reply
+      .type("image/png")
+      .header("Cache-Control", "private, max-age=31536000, immutable")
+      .send(createReadStream(path));
+  },
+);
+app.get(
+  "/api/projects/:projectId/snapshots/:snapshotId/images/:frameId",
+  async (request: any, reply) => {
+    const { path, image } = store.animation.imagePath(
+      pid(request),
+      z.string().uuid().parse(request.params.snapshotId),
+      z.string().uuid().parse(request.params.frameId),
+    );
+    return reply
+      .type(image.mime)
+      .header("Cache-Control", "private, max-age=31536000, immutable")
+      .send(createReadStream(path));
+  },
+);
+app.post("/api/projects/:projectId/frame-changes", async (request) =>
+  store.animation.propose(pid(request), request.body),
+);
+app.post(
+  "/api/projects/:projectId/frame-changes/:changeId/compare",
+  async (request: any) => {
+    const input = z
+      .object({ candidateRevision: z.string().optional() })
+      .parse(request.body || {});
+    return store.animation.compare(
+      pid(request),
+      z.string().uuid().parse(request.params.changeId),
+      input.candidateRevision,
+    );
+  },
+);
+app.post(
+  "/api/projects/:projectId/frame-changes/:changeId/apply",
+  async (request: any) => {
+    const input = z
+      .object({ candidateRevision: z.string() })
+      .parse(request.body);
+    return store.animation.apply(
+      pid(request),
+      z.string().uuid().parse(request.params.changeId),
+      input.candidateRevision,
+    );
+  },
+);
+app.post(
+  "/api/projects/:projectId/frame-changes/:changeId/revert",
+  async (request: any) => {
+    const input = z.object({ revision: z.string() }).parse(request.body);
+    return store.animation.revert(
+      pid(request),
+      z.string().uuid().parse(request.params.changeId),
+      input.revision,
+    );
+  },
+);
+app.post(
+  "/api/projects/:projectId/frame-changes/:changeId/discard",
+  async (request: any) =>
+    store.animation.discard(
+      pid(request),
+      z.string().uuid().parse(request.params.changeId),
+    ),
+);
 app.post("/api/projects/:projectId/clips", async (request) => {
   const spec = z
     .object({
@@ -172,6 +262,9 @@ app.post(
     store.interpolations.apply(
       pid(request),
       z.string().uuid().parse(request.params.interpolationId),
+      z
+        .object({ previewRevision: z.string().optional() })
+        .parse(request.body || {}).previewRevision,
     ),
 );
 app.get(
@@ -200,6 +293,7 @@ app.post("/api/sessions/:sessionId/messages", async (request: any, reply) => {
       text: z.string().trim().min(1).max(12000),
       assetIds: z.array(z.string().uuid()).max(5).default([]),
       requestId: z.string().uuid(),
+      clipReferences: z.array(clipReferenceSchema).max(3).default([]),
     })
     .parse(request.body);
   const session = agent.send(
@@ -207,6 +301,8 @@ app.post("/api/sessions/:sessionId/messages", async (request: any, reply) => {
     input.text,
     input.assetIds,
     input.requestId,
+    undefined,
+    input.clipReferences,
   );
   return reply.code(202).send(session);
 });

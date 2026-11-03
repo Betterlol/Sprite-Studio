@@ -13,6 +13,7 @@ import { join, resolve, relative, extname, sep } from "node:path";
 import { EventEmitter } from "node:events";
 import { ImagingWorker } from "./worker.ts";
 import { InterpolationStore } from "./interpolation.ts";
+import { AnimationStore } from "./animation.ts";
 import {
   sliceSchema,
   transformSchema,
@@ -57,6 +58,7 @@ export class ProjectStore extends EventEmitter {
   indexes = new Map<string, Map<string, Asset>>();
   sessions = new Map<string, Session>();
   interpolations: InterpolationStore;
+  animation: AnimationStore;
   constructor(root: string) {
     super();
     mkdirSync(root, { recursive: true });
@@ -92,6 +94,7 @@ export class ProjectStore extends EventEmitter {
         }
     }
     this.interpolations = new InterpolationStore(this);
+    this.animation = new AnimationStore(this);
   }
   project(id: string) {
     const project = this.projects.get(id);
@@ -191,14 +194,24 @@ export class ProjectStore extends EventEmitter {
     if (asset.type === "clip")
       atomicJson(join(this.dir(projectId), "Assets", `${asset.id}.clip.json`), {
         frames: asset.frames,
+        revision: asset.revision,
         loop: asset.loop,
         origin: asset.origin,
         appliedInterpolationIds: asset.appliedInterpolationIds,
+        appliedFrameChangeIds: asset.appliedFrameChangeIds,
+        revertedFrameChangeIds: asset.revertedFrameChangeIds,
       });
     const metadata =
       asset.type === "clip"
-        ? (({ frames, loop, origin, appliedInterpolationIds, ...meta }) =>
-            meta)(asset)
+        ? (({
+            frames,
+            loop,
+            origin,
+            appliedInterpolationIds,
+            appliedFrameChangeIds,
+            revertedFrameChangeIds,
+            ...meta
+          }) => meta)(asset)
         : asset;
     atomicJson(
       join(this.dir(projectId), "Assets", `${asset.id}.meta.json`),
@@ -364,6 +377,7 @@ export class ProjectStore extends EventEmitter {
     id: string,
     input: unknown,
     interpolationId?: string,
+    frameChange?: { id: string; action: "apply" | "revert" },
   ) {
     const old = this.asset(projectId, id);
     if (old.type !== "clip") throw new StudioError("请选择动画资源");
@@ -400,6 +414,14 @@ export class ProjectStore extends EventEmitter {
       appliedInterpolationIds: interpolationId
         ? [...(old.appliedInterpolationIds || []), interpolationId]
         : old.appliedInterpolationIds,
+      appliedFrameChangeIds:
+        frameChange?.action === "apply"
+          ? [...(old.appliedFrameChangeIds || []), frameChange.id]
+          : old.appliedFrameChangeIds,
+      revertedFrameChangeIds:
+        frameChange?.action === "revert"
+          ? [...(old.revertedFrameChangeIds || []), frameChange.id]
+          : old.revertedFrameChangeIds,
     }) as ClipAsset;
   }
   async exportClip(projectId: string, id: string) {
@@ -462,6 +484,8 @@ export class ProjectStore extends EventEmitter {
       project: this.project(projectId),
       assets: this.assets(projectId),
       interpolations: this.interpolations.list(projectId),
+      reviews: this.animation.listReviews(projectId),
+      frameChanges: this.animation.listChanges(projectId),
       sessions: [...this.sessions.values()]
         .filter((session) => session.projectId === projectId)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),

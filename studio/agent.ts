@@ -133,6 +133,7 @@ export class AgentHub {
         'mcp_servers.sprite_studio.env_vars=["SPRITE_STUDIO_TOOL_TOKEN"]',
         'mcp_servers.sprite_studio.tools.slice_sheet.approval_mode="approve"',
         'mcp_servers.sprite_studio.tools.adjust_image.approval_mode="approve"',
+        'mcp_servers.sprite_studio.tools.stage_frame_adjustment.approval_mode="approve"',
       ],
       this.disabled,
       undefined,
@@ -159,6 +160,8 @@ export class AgentHub {
         developerInstructions:
           "你是 Sprite Studio 中的精灵图制作助手，使用中文交流。只操作当前项目提供的资源工具。先用 list_assets 查找稳定资源 ID，再用 view_image 查看真实图片。位置、尺寸调整使用 adjust_image，规则网格切割使用 slice_sheet，不要通过图片生成替代确定性处理。需要生成/重绘时必须使用内置 image_gen，并实际提供用户引用的参考图，每次用户请求默认最多生成一个候选；没有明确要求生成就不要生成。输出图会自动作为候选出现在资源区，不覆盖原图。你可以在当前任务目录中准备临时文件，但不要探索其他文件、运行程序、安装依赖或使用其他服务。不要声称已经验收动画连贯性；目前可以看静态图、播放编排和逐帧信息，动态评估需结合用户实际观看。工具受限时如实说明，不伪造成果。用户消息中的“资源引用”给出身份、版本与快照路径，引用图片才是视觉输入。",
       };
+      params.developerInstructions +=
+        "动画引用含 snapshotId、clipId、版本、帧实例和时长。检查动画必须调用 inspect_clip 查看实际逐帧和相邻叠图证据；每次最多16帧，需要时分区间。单帧大小、位置、时长修正用 stage_frame_adjustment，只准备候选，交给用户在网页对比采纳或撤回。不要改动其他帧实例，不用生成图片替代确定性修正。边界框变化只是线索，不能把有意运动自动拉平。向用户使用第几帧交流，UUID只在工具调用中使用。静态图和叠图不代表你已观看真实速度播放，不可声称动态验收通过。";
       const result = session.threadId
         ? await client.request("thread/resume", {
             ...params,
@@ -235,6 +238,7 @@ export class AgentHub {
     assetIds: string[],
     requestId: string,
     displayText?: string,
+    clipInputs: unknown[] = [],
   ) {
     const session = this.store.session(sessionId);
     if (session.messages.some((message) => message.id === requestId))
@@ -250,6 +254,9 @@ export class AgentHub {
     const references = assetIds.map((id) =>
       this.store.image(session.projectId, id),
     );
+    const clipReferences = clipInputs.map((input) =>
+      this.store.animation.reference(session.projectId, input),
+    );
     session.status = "starting";
     session.error = undefined;
     session.prompt = undefined;
@@ -263,6 +270,7 @@ export class AgentHub {
       text,
       displayText,
       assetIds: references.map((asset) => asset.id),
+      clipReferences,
       createdAt: new Date().toISOString(),
     });
     this.flush(session);
@@ -279,6 +287,24 @@ export class AgentHub {
     const client = await this.client(session);
     if (session.status !== "starting") return;
     const inputs: any[] = [{ type: "text", text, text_elements: [] }];
+    for (const ref of session.messages
+      .filter((message) => message.role === "user")
+      .at(-1)?.clipReferences || []) {
+      const snapshot = this.store.animation.snapshot(
+          session.projectId,
+          ref.snapshotId,
+        ),
+        range = this.store.animation.range(
+          snapshot,
+          ref.startFrameId,
+          ref.endFrameId,
+        );
+      inputs.push({
+        type: "text",
+        text: `动画引用（固定快照，须用 inspect_clip 取得真实图像证据）：${JSON.stringify({ ...ref, loop: snapshot.clip.loop, totalFrames: snapshot.clip.frames.length, frames: snapshot.clip.frames.slice(range.start, range.end + 1).map((frame, index) => ({ ...frame, frameNumber: range.start + index + 1 })) })}`,
+        text_elements: [],
+      });
+    }
     for (const asset of references) {
       const source = this.store.imagePath(
         session.projectId,
@@ -352,6 +378,8 @@ export class AgentHub {
         view_image: "查看图片",
         slice_sheet: "切割图集",
         adjust_image: "调整图片",
+        inspect_clip: "检查动画证据",
+        stage_frame_adjustment: "准备单帧修正",
       };
       const status =
         message.method === "item/started"
@@ -554,6 +582,97 @@ export class AgentHub {
     const session = this.store.session(sessionId);
     const pid = session.projectId;
     const assetId = () => z.string().uuid().parse(input.assetId);
+    const attach = (kind: "reviewIds" | "changeIds", id: string) => {
+      let msg = session.messages
+        .filter((message) => message.role === "assistant")
+        .at(-1);
+      if (!msg) {
+        msg = this.assistant(session, `tool-result-${id}`);
+        msg.status = "completed";
+      }
+      msg[kind] ??= [];
+      if (!msg[kind]!.includes(id)) msg[kind]!.push(id);
+      this.flush(session);
+    };
+    const evidence = (review: any) => [
+      {
+        type: "text",
+        text: JSON.stringify({
+          ...review,
+          files: undefined,
+          hashes: undefined,
+          observation:
+            "Static evidence only. Frame index is zero based; onion red=previous, cyan=next. Alpha bounds use alpha > 16. Motion is not inherently a defect.",
+        }),
+      },
+      ...(["contact", "onion"] as const).map((kind) => ({
+        type: "image",
+        mimeType: "image/png",
+        data: readFileSync(
+          this.store.animation.evidence(pid, review.id, kind),
+        ).toString("base64"),
+      })),
+    ];
+    if (name === "inspect_clip") {
+      const spec = z
+        .object({
+          snapshotId: z.string().uuid().optional(),
+          clipId: z.string().uuid().optional(),
+          revision: z.string().optional(),
+          startFrameId: z.string().uuid().optional(),
+          endFrameId: z.string().uuid().optional(),
+        })
+        .refine(
+          (input) => !!input.snapshotId || !!input.clipId,
+          "请提供快照或动画身份",
+        )
+        .parse(input);
+      const review = await this.store.animation.inspect(pid, spec);
+      attach("reviewIds", review.id);
+      return { content: evidence(review) };
+    }
+    if (name === "stage_frame_adjustment") {
+      const change = await this.store.animation.propose(
+        pid,
+        { ...input, requestId: input.requestId || randomUUID() },
+        "agent",
+      );
+      attach("changeIds", change.id);
+      const candidate = this.store.animation.clip(pid, change.candidateClipId),
+        index = candidate.frames.findIndex(
+          (frame) => frame.id === change.frameId,
+        ),
+        start = candidate.frames[Math.max(0, index - 1)]!.id,
+        end =
+          candidate.frames[Math.min(candidate.frames.length - 1, index + 1)]!
+            .id;
+      const before = await this.store.animation.inspect(pid, {
+          snapshotId: change.baseSnapshotId,
+          startFrameId: start,
+          endFrameId: end,
+        }),
+        after = await this.store.animation.inspect(pid, {
+          clipId: candidate.id,
+          revision: candidate.revision,
+          startFrameId: start,
+          endFrameId: end,
+        });
+      return {
+        content: [
+          textContent(
+            JSON.stringify({
+              change,
+              candidateRevision: candidate.revision,
+              requiresHumanAdoption: true,
+            }),
+          ),
+          textContent("Before correction"),
+          ...evidence(before).slice(0, 2),
+          textContent("Candidate after correction"),
+          ...evidence(after).slice(0, 2),
+        ],
+      };
+    }
     if (name === "list_assets")
       return {
         content: [

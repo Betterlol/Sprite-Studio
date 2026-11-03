@@ -40,6 +40,8 @@ export type ClipAsset = {
   loop: boolean;
   origin?: { assetId: string; revision: string };
   appliedInterpolationIds?: string[];
+  appliedFrameChangeIds?: string[];
+  revertedFrameChangeIds?: string[];
 };
 export type Asset = ImageAsset | ClipAsset;
 export type ChatMessage = {
@@ -48,6 +50,9 @@ export type ChatMessage = {
   text: string;
   displayText?: string;
   assetIds: string[];
+  clipReferences?: ClipAttachment[];
+  reviewIds?: string[];
+  changeIds?: string[];
   createdAt: string;
   status?: "streaming" | "completed" | "interrupted" | "failed";
   phase?: string;
@@ -153,6 +158,89 @@ export const transformSchema = z.object({
   clip: z.boolean().default(false),
 });
 export type Transform = z.infer<typeof transformSchema>;
+export const clipReferenceSchema = z.object({
+  clipId: z.string().uuid(),
+  revision: z.string(),
+  startFrameId: z.string().uuid().optional(),
+  endFrameId: z.string().uuid().optional(),
+});
+export type ClipReference = z.infer<typeof clipReferenceSchema>;
+export type ClipAttachment = ClipReference & {
+  snapshotId: string;
+  name: string;
+};
+export type ClipSnapshot = {
+  id: string;
+  projectId: string;
+  createdAt: string;
+  clip: ClipAsset;
+  images: Record<
+    string,
+    Pick<ImageAsset, "id" | "mime" | "contentHash" | "width" | "height">
+  >;
+};
+export type FrameObservation = {
+  frameId: string;
+  index: number;
+  durationUs: number;
+  bbox: [number, number, number, number] | null;
+  center: [number, number] | null;
+  width: number;
+  height: number;
+};
+export type ClipReview = {
+  id: string;
+  projectId: string;
+  snapshotId: string;
+  clipId: string;
+  clipRevision: string;
+  createdAt: string;
+  startFrameId: string;
+  endFrameId: string;
+  frames: FrameObservation[];
+  pairs: { from: number; to: number; loopBoundary: boolean }[];
+  files: { contact: string; onion: string };
+  hashes: { contact: string; onion: string };
+  stale?: boolean;
+};
+export type FrameChange = {
+  id: string;
+  projectId: string;
+  clipId: string;
+  frameId: string;
+  baseSnapshotId: string;
+  candidateClipId: string;
+  createdAt: string;
+  updatedAt: string;
+  source: "agent" | "human";
+  status: "draft" | "applied" | "reverted" | "discarded";
+  transform?: Transform;
+  durationUs?: number;
+  appliedSnapshotId?: string;
+};
+export const frameAdjustmentSchema = z
+  .object({
+    requestId: z.string().uuid(),
+    clipId: z.string().uuid(),
+    revision: z.string(),
+    frameId: z.string().uuid(),
+    transform: transformSchema
+      .omit({ width: true, height: true })
+      .strict()
+      .optional(),
+    durationUs: z.number().int().min(1000).max(60_000_000).optional(),
+  })
+  .refine(
+    (input) => input.transform !== undefined || input.durationUs !== undefined,
+    "请提供位置、缩放或时长调整",
+  );
+export function snapshotFrameUrl(
+  projectId: string,
+  snapshotId: string,
+  frameId: string,
+) {
+  return `/api/projects/${projectId}/snapshots/${snapshotId}/images/${frameId}`;
+}
 export const sliceSchema = z
   .object({
     columns: z.number().int().min(1).max(32),

@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { InterpolationPanel } from "./InterpolationPanel.tsx";
 import { NewClipDialog } from "./NewClipDialog.tsx";
+import { AnimationPanel } from "./AnimationPanel.tsx";
+import { ComparisonPlayer } from "./ComparisonPlayer.tsx";
 import { api } from "./api.ts";
 import {
   Upload,
@@ -32,6 +34,7 @@ import {
   FolderOpen,
   AlertCircle,
   PanelRightClose,
+  ScanEye,
 } from "lucide-react";
 import {
   assetUrl,
@@ -42,6 +45,10 @@ import {
   type Session,
   type Transform,
   type Interpolation,
+  type ClipReference,
+  type ClipReview,
+  type FrameChange,
+  type ClipSnapshot,
 } from "../studio/model.ts";
 
 type State = {
@@ -49,6 +56,8 @@ type State = {
   assets: Asset[];
   sessions: Session[];
   interpolations: Interpolation[];
+  reviews: ClipReview[];
+  frameChanges: FrameChange[];
 };
 type Connection = { connected: boolean; model?: string; error?: string };
 const roles = { reference: "参考图", source: "已采纳", candidate: "候选" };
@@ -91,11 +100,21 @@ export function App() {
   const [playbackRun, setPlaybackRun] = useState(0);
   const [zoom, setZoom] = useState<number | "fit">("fit");
   const [background, setBackground] = useState("checker");
-  const [tool, setTool] = useState<"slice" | "adjust" | "interpolate">(() => {
+  const [tool, setTool] = useState<
+    "slice" | "adjust" | "interpolate" | "review"
+  >(() => {
     const saved = localStorage.getItem("studio.tool");
-    return saved === "adjust" || saved === "interpolate" ? saved : "slice";
+    return saved === "adjust" || saved === "interpolate" || saved === "review"
+      ? saved
+      : "slice";
   });
   const playbackIntent = useRef<string | null>(null);
+  const frameIntent = useRef<{ clipId: string; frameId: string } | null>(null);
+  const [comparison, setComparison] = useState<{
+    before: ClipSnapshot;
+    after: ClipSnapshot;
+    nonce: number;
+  } | null>(null);
   useEffect(() => {
     localStorage.setItem("studio.tool", tool);
   }, [tool]);
@@ -106,6 +125,9 @@ export function App() {
   const [transform, setTransform] = useState<Transform>(emptyTransform);
   const [draft, setDraft] = useState("");
   const [references, setReferences] = useState<string[]>([]);
+  const [clipReferences, setClipReferences] = useState<ClipReference[]>([]);
+  const [focusedReviewId, setFocusedReviewId] = useState(""),
+    [focusedChangeId, setFocusedChangeId] = useState("");
   const [operation, setOperation] = useState("");
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(
     null,
@@ -125,13 +147,24 @@ export function App() {
   const notify = (text: string, error = false) => setToast({ text, error });
   const selected = state?.assets.find((asset) => asset.id === selectedId);
   const clip = selected?.type === "clip" ? selected : undefined;
+  const comparing =
+    comparison &&
+    [comparison.before.clip.id, comparison.after.clip.id].includes(selectedId)
+      ? comparison
+      : null;
+  const repairBaseId = state?.frameChanges?.find(
+    (change) => change.candidateClipId === clip?.id,
+  )?.clipId;
+  const interpolationPreviewId = repairBaseId || clip?.id;
   const originalClipId = state?.interpolations?.find(
-    (job) => job.prepared?.clipId === clip?.id,
+    (job) => job.prepared?.clipId === interpolationPreviewId,
   )?.clipId;
   const interpolationClip = (
     originalClipId
       ? state?.assets.find((asset) => asset.id === originalClipId)
-      : clip
+      : repairBaseId
+        ? state?.assets.find((asset) => asset.id === repairBaseId)
+        : clip
   ) as ClipAsset | undefined;
   const currentImage = (
     clip
@@ -169,6 +202,7 @@ export function App() {
       setSessionId(nextSession);
       setDraft(localStorage.getItem(`studio.draft.${id}.${nextSession}`) || "");
       setReferences([]);
+      setClipReferences([]);
       setFrameIndex(0);
       setPlaying(false);
     }
@@ -236,14 +270,32 @@ export function App() {
     }
   }, [projectId, state?.project.id, selectedId, sessionId, draft]);
   useEffect(() => {
-    setFrameIndex(0);
+    setFrameIndex(
+      frameIntent.current?.clipId === selectedId
+        ? Math.max(
+            0,
+            (
+              state?.assets.find((asset) => asset.id === selectedId) as
+                | ClipAsset
+                | undefined
+            )?.frames.findIndex(
+              (frame) => frame.id === frameIntent.current?.frameId,
+            ) ?? 0,
+          )
+        : 0,
+    );
+    frameIntent.current = null;
     setPlaying(playbackIntent.current === selectedId);
     playbackIntent.current = null;
     setTransform(emptyTransform);
     setZoom("fit");
   }, [selectedId]);
   useEffect(() => {
-    if (selected?.type === "image" && tool === "interpolate") setTool("slice");
+    if (
+      selected?.type === "image" &&
+      (tool === "interpolate" || tool === "review")
+    )
+      setTool("slice");
   }, [selected?.type]);
   useEffect(() => {
     const element = stage.current;
@@ -301,6 +353,8 @@ export function App() {
     }
   }
   function chooseProject(id: string) {
+    setComparison(null);
+    setClipReferences([]);
     projectRef.current = id;
     setProjectId(id);
     setState(null);
@@ -312,6 +366,7 @@ export function App() {
     setSessionId(id);
     setDraft(localStorage.getItem(`studio.draft.${projectId}.${id}`) || "");
     setReferences([]);
+    setClipReferences([]);
     setPromptAnswers({});
   }
   async function makeSession() {
@@ -334,7 +389,70 @@ export function App() {
           : [...old, id],
     );
   }
+  function addClipReference(ref: ClipReference) {
+    setClipReferences((old) =>
+      old.some((item) => item.clipId === ref.clipId)
+        ? old.map((item) => (item.clipId === ref.clipId ? ref : item))
+        : old.length < 3
+          ? [...old, ref]
+          : (notify("一次最多引用 3 段动画"), old),
+    );
+    setChatVisible(true);
+  }
+  function previewClip(id: string, frameId?: string, play = true) {
+    if (
+      frameId &&
+      !(
+        state?.assets.find((asset) => asset.id === id) as ClipAsset | undefined
+      )?.frames.some((frame) => frame.id === frameId)
+    ) {
+      notify("该帧实例已不在当前动画中，请查看旧快照或重新检查", true);
+      return;
+    }
+    setComparison(null);
+    setTool("review");
+    setPlaying(false);
+    if (id === selectedId) {
+      setFrameIndex(
+        frameId
+          ? Math.max(
+              0,
+              clip?.frames.findIndex((frame) => frame.id === frameId) ?? 0,
+            )
+          : 0,
+      );
+      setPlaybackRun((value) => value + 1);
+      setPlaying(play);
+    } else {
+      if (frameId) frameIntent.current = { clipId: id, frameId };
+      playbackIntent.current = play ? id : null;
+      setSelectedId(id);
+    }
+  }
+  async function compareChange(id: string) {
+    setFocusedChangeId(id);
+    const change = state?.frameChanges?.find((change) => change.id === id);
+    if (!change) throw new Error("候选正在同步，请稍后再试");
+    const candidate = state?.assets.find(
+      (asset) => asset.id === change.candidateClipId,
+    ) as ClipAsset;
+    const originalProject = projectId;
+    setPlaying(false);
+    setTool("review");
+    if (![change.clipId, change.candidateClipId].includes(selectedId))
+      setSelectedId(change.clipId);
+    const result = await api<{ before: ClipSnapshot; after: ClipSnapshot }>(
+      `/api/projects/${projectId}/frame-changes/${id}/compare`,
+      {
+        method: "POST",
+        body: JSON.stringify({ candidateRevision: candidate.revision }),
+      },
+    );
+    if (projectRef.current === originalProject)
+      setComparison({ ...result, nonce: Date.now() });
+  }
   async function importFiles(files: FileList | File[]) {
+    setComparison(null);
     files = Array.from(files);
     const originalProject = projectId;
     await run("正在导入图片", async () => {
@@ -360,11 +478,13 @@ export function App() {
     if (!draft.trim() || agentBusy) return;
     const text = draft.trim(),
       attached = [...references],
+      attachedClips = [...clipReferences],
       originalProject = projectId;
     try {
       const target = session || (await makeSession());
       setDraft("");
       setReferences([]);
+      setClipReferences([]);
       const updated = await api<Session>(
         `/api/sessions/${target.id}/messages`,
         {
@@ -372,6 +492,7 @@ export function App() {
           body: JSON.stringify({
             text,
             assetIds: attached,
+            clipReferences: attachedClips,
             requestId: crypto.randomUUID(),
           }),
         },
@@ -385,6 +506,7 @@ export function App() {
     } catch (error) {
       setDraft((old) => old || text);
       setReferences(attached);
+      setClipReferences(attachedClips);
       notify((error as Error).message, true);
     }
   }
@@ -425,6 +547,32 @@ export function App() {
   async function applyTransform() {
     if (!currentImage) return;
     await run("正在生成调整候选", async () => {
+      if (
+        clip &&
+        !state?.frameChanges?.some(
+          (change) =>
+            change.candidateClipId === clip.id && change.status === "draft",
+        )
+      ) {
+        const change = await api<FrameChange>(
+          `/api/projects/${projectId}/frame-changes`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              requestId: crypto.randomUUID(),
+              clipId: clip.id,
+              revision: clip.revision,
+              frameId: clip.frames[frameIndex]!.id,
+              transform,
+            }),
+          },
+        );
+        await refreshRef.current();
+        previewClip(change.candidateClipId, change.frameId, false);
+        setFocusedChangeId(change.id);
+        notify("单帧修正候选已准备，原动画未覆盖");
+        return;
+      }
       const result = await api<ImageAsset>(
         `/api/projects/${projectId}/assets/${currentImage.id}/transform`,
         {
@@ -595,7 +743,10 @@ export function App() {
               <button
                 key={asset.id}
                 className={`asset-row ${asset.id === selectedId ? "selected" : ""}`}
-                onClick={() => setSelectedId(asset.id)}
+                onClick={() => {
+                  setComparison(null);
+                  setSelectedId(asset.id);
+                }}
                 draggable={asset.type === "image"}
                 onDragStart={(event) => {
                   event.dataTransfer.setData(
@@ -685,9 +836,14 @@ export function App() {
               {currentImage && (
                 <button
                   className="text-button"
-                  title="引用当前图片到聊天"
+                  title={clip ? "引用当前动画到聊天" : "引用当前图片到聊天"}
                   onClick={() => {
-                    addReference(currentImage.id);
+                    if (clip)
+                      addClipReference({
+                        clipId: clip.id,
+                        revision: clip.revision,
+                      });
+                    else addReference(currentImage.id);
                     setChatVisible(true);
                   }}
                 >
@@ -712,7 +868,14 @@ export function App() {
             </div>
           </div>
           <div className={`stage ${background}`} ref={stage}>
-            {currentImage ? (
+            {comparing ? (
+              <ComparisonPlayer
+                key={comparing.nonce}
+                before={comparing.before}
+                after={comparing.after}
+                onClose={() => setComparison(null)}
+              />
+            ) : currentImage ? (
               <div
                 className="artboard"
                 style={{
@@ -774,7 +937,7 @@ export function App() {
                 <small>原图保留，每次调整都可以生成独立候选</small>
               </div>
             )}
-            {currentImage && (
+            {currentImage && !comparing && (
               <div className="stage-status">
                 <span>
                   {currentImage.width} × {currentImage.height}
@@ -789,49 +952,51 @@ export function App() {
                 </span>
               </div>
             )}
-            <div className="view-controls">
-              <div className="backgrounds">
-                {["checker", "dark", "light"].map((value) => (
-                  <button
-                    key={value}
-                    title={
-                      {
-                        checker: "棋盘背景",
-                        dark: "深色背景",
-                        light: "浅色背景",
-                      }[value]
-                    }
-                    className={`background-swatch ${value} ${background === value ? "active" : ""}`}
-                    onClick={() => setBackground(value)}
-                  />
-                ))}
+            {!comparing && (
+              <div className="view-controls">
+                <div className="backgrounds">
+                  {["checker", "dark", "light"].map((value) => (
+                    <button
+                      key={value}
+                      title={
+                        {
+                          checker: "棋盘背景",
+                          dark: "深色背景",
+                          light: "浅色背景",
+                        }[value]
+                      }
+                      className={`background-swatch ${value} ${background === value ? "active" : ""}`}
+                      onClick={() => setBackground(value)}
+                    />
+                  ))}
+                </div>
+                <span className="control-divider" />
+                <button
+                  className="icon-button"
+                  title="缩小"
+                  onClick={() => setZoom(Math.max(0.1, scale / 1.25))}
+                >
+                  <ZoomOut size={15} />
+                </button>
+                <button className="zoom-label" onClick={() => setZoom(1)}>
+                  {Math.round(scale * 100)}%
+                </button>
+                <button
+                  className="icon-button"
+                  title="放大"
+                  onClick={() => setZoom(Math.min(8, scale * 1.25))}
+                >
+                  <ZoomIn size={15} />
+                </button>
+                <button
+                  className={`icon-button ${zoom === "fit" ? "is-active" : ""}`}
+                  title="适应画布"
+                  onClick={() => setZoom("fit")}
+                >
+                  <Maximize2 size={15} />
+                </button>
               </div>
-              <span className="control-divider" />
-              <button
-                className="icon-button"
-                title="缩小"
-                onClick={() => setZoom(Math.max(0.1, scale / 1.25))}
-              >
-                <ZoomOut size={15} />
-              </button>
-              <button className="zoom-label" onClick={() => setZoom(1)}>
-                {Math.round(scale * 100)}%
-              </button>
-              <button
-                className="icon-button"
-                title="放大"
-                onClick={() => setZoom(Math.min(8, scale * 1.25))}
-              >
-                <ZoomIn size={15} />
-              </button>
-              <button
-                className={`icon-button ${zoom === "fit" ? "is-active" : ""}`}
-                title="适应画布"
-                onClick={() => setZoom("fit")}
-              >
-                <Maximize2 size={15} />
-              </button>
-            </div>
+            )}
           </div>
           {clip && (
             <div className="timeline">
@@ -850,7 +1015,10 @@ export function App() {
                   <button
                     className={`play-button ${playing ? "playing" : ""}`}
                     aria-label={playing ? "暂停动画" : "播放动画"}
-                    onClick={() => setPlaying(!playing)}
+                    onClick={() => {
+                      setComparison(null);
+                      setPlaying(!playing);
+                    }}
                   >
                     {playing ? <Pause size={16} /> : <Play size={16} />}
                   </button>
@@ -910,6 +1078,7 @@ export function App() {
                       onClick={() => {
                         setPlaying(false);
                         setFrameIndex(index);
+                        setComparison(null);
                         setTransform(emptyTransform);
                       }}
                     >
@@ -935,7 +1104,10 @@ export function App() {
                     aria-label="当前帧停留毫秒"
                     type="number"
                     min="1"
-                    onFocus={() => setPlaying(false)}
+                    onFocus={() => {
+                      setPlaying(false);
+                      setComparison(null);
+                    }}
                     key={`${clip.revision}-${frameIndex}`}
                     defaultValue={
                       (clip.frames[frameIndex]?.durationUs || 1000) / 1000
@@ -948,6 +1120,35 @@ export function App() {
                           clip.frames[frameIndex]?.durationUs
                       )
                         void run("保存时长", async () => {
+                          if (
+                            !state?.frameChanges?.some(
+                              (change) =>
+                                change.candidateClipId === clip.id &&
+                                change.status === "draft",
+                            )
+                          ) {
+                            const change = await api<FrameChange>(
+                              `/api/projects/${projectId}/frame-changes`,
+                              {
+                                method: "POST",
+                                body: JSON.stringify({
+                                  requestId: crypto.randomUUID(),
+                                  clipId: clip.id,
+                                  revision: clip.revision,
+                                  frameId: clip.frames[frameIndex]!.id,
+                                  durationUs: Math.round(duration * 1000),
+                                }),
+                              },
+                            );
+                            await refreshRef.current();
+                            previewClip(
+                              change.candidateClipId,
+                              change.frameId,
+                              false,
+                            );
+                            setFocusedChangeId(change.id);
+                            return;
+                          }
                           await saveClip({
                             ...clip,
                             frames: clip.frames.map((frame, index) =>
@@ -1046,6 +1247,19 @@ export function App() {
                     首尾补帧
                   </button>
                 )}
+                {clip && (
+                  <button
+                    className={tool === "review" ? "active" : ""}
+                    onClick={() => {
+                      setTool("review");
+                      setPlaying(false);
+                      setTransform(emptyTransform);
+                    }}
+                  >
+                    <ScanEye size={14} />
+                    动画检查
+                  </button>
+                )}
                 {currentImage.role === "candidate" && (
                   <button
                     className="adopt-button"
@@ -1071,7 +1285,30 @@ export function App() {
                   </button>
                 )}
               </div>
-              {tool === "interpolate" && interpolationClip ? (
+              {tool === "review" && clip ? (
+                <AnimationPanel
+                  key={`${projectId}-${repairBaseId || clip.id}`}
+                  projectId={projectId}
+                  clip={clip}
+                  assets={state?.assets || []}
+                  reviews={state?.reviews || []}
+                  focusReviewId={focusedReviewId}
+                  focusChangeId={focusedChangeId}
+                  changes={state?.frameChanges || []}
+                  onRefresh={() => refreshRef.current()}
+                  onReference={addClipReference}
+                  onFrame={(clipId, frameId) =>
+                    previewClip(clipId, frameId, false)
+                  }
+                  onAdjust={() => {
+                    setTool("adjust");
+                    setComparison(null);
+                    setPlaying(false);
+                  }}
+                  onCompare={compareChange}
+                  onPreview={(id) => previewClip(id)}
+                />
+              ) : tool === "interpolate" && interpolationClip ? (
                 <InterpolationPanel
                   key={`${projectId}-${interpolationClip.id}`}
                   projectId={projectId}
@@ -1087,6 +1324,7 @@ export function App() {
                     setChatVisible(true);
                   }}
                   onPreview={(id) => {
+                    setComparison(null);
                     setFrameIndex(0);
                     setPlaybackRun((value) => value + 1);
                     if (id === selectedId) setPlaying(true);
@@ -1229,7 +1467,7 @@ export function App() {
                       ) : (
                         <Check size={14} />
                       )}{" "}
-                      {clip ? "应用到当前帧" : "另存调整候选"}
+                      {clip ? "准备单帧修正候选" : "另存调整候选"}
                     </button>
                   </div>
                   <div className="adjust-note">
@@ -1381,6 +1619,67 @@ export function App() {
                       {message.displayText || message.text}
                     </div>
                   )}
+                  {!!message.clipReferences?.length && (
+                    <div className="message-clip-refs">
+                      {message.clipReferences.map((ref) => (
+                        <button
+                          key={ref.snapshotId}
+                          onClick={() => {
+                            setComparison(null);
+                            setSelectedId(ref.clipId);
+                            setTool("review");
+                          }}
+                        >
+                          <Film size={13} />
+                          {ref.name}
+                          {ref.startFrameId ? " · 已选区间" : " · 动画引用"}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {!!message.reviewIds?.length && (
+                    <div className="message-clip-refs">
+                      {message.reviewIds.map((id) => {
+                        const review = state?.reviews?.find(
+                          (review) => review.id === id,
+                        );
+                        return review ? (
+                          <button
+                            key={id}
+                            onClick={() => {
+                              setComparison(null);
+                              setSelectedId(review.clipId);
+                              setFocusedReviewId(id);
+                              setTool("review");
+                            }}
+                          >
+                            <ScanEye size={13} />
+                            查看动画检查证据
+                          </button>
+                        ) : null;
+                      })}
+                    </div>
+                  )}
+                  {!!message.changeIds?.length && (
+                    <div className="message-clip-refs">
+                      {message.changeIds.map((id) => {
+                        const change = state?.frameChanges?.find(
+                          (change) => change.id === id,
+                        );
+                        return change ? (
+                          <button
+                            key={id}
+                            onClick={() =>
+                              void run("载入修改对比", () => compareChange(id))
+                            }
+                          >
+                            <Play size={13} />
+                            查看单帧修正与前后对比
+                          </button>
+                        ) : null;
+                      })}
+                    </div>
+                  )}
                   {message.assetIds.length > 0 && (
                     <div className="message-images">
                       {message.assetIds.map((id) => {
@@ -1501,6 +1800,31 @@ export function App() {
             </div>
             <div className="composer-area">
               <div className="composer">
+                {!!clipReferences.length && (
+                  <div className="reference-chips">
+                    {clipReferences.map((ref) => (
+                      <div className="reference-chip" key={ref.clipId}>
+                        <Film size={15} />
+                        <span>
+                          {state?.assets.find(
+                            (asset) => asset.id === ref.clipId,
+                          )?.name || "动画"}
+                          {ref.startFrameId ? " · 已选区间" : ""}
+                        </span>
+                        <button
+                          aria-label="移除动画引用"
+                          onClick={() =>
+                            setClipReferences((old) =>
+                              old.filter((item) => item.clipId !== ref.clipId),
+                            )
+                          }
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {!!references.length && (
                   <div className="reference-chips">
                     {references.map((id) => {
@@ -1548,9 +1872,16 @@ export function App() {
                 <div className="composer-controls">
                   <button
                     className="icon-button"
-                    title="引用当前图片"
+                    title={clip ? "引用当前动画" : "引用当前图片"}
                     disabled={!currentImage}
-                    onClick={() => addReference(currentImage?.id)}
+                    onClick={() =>
+                      clip
+                        ? addClipReference({
+                            clipId: clip.id,
+                            revision: clip.revision,
+                          })
+                        : addReference(currentImage?.id)
+                    }
                   >
                     <Link2 size={15} />
                   </button>

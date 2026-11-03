@@ -239,10 +239,13 @@ export class AgentHub {
     requestId: string,
     displayText?: string,
     clipInputs: unknown[] = [],
+    outputFolder?: string,
   ) {
     const session = this.store.session(sessionId);
     if (session.messages.some((message) => message.id === requestId))
       return session;
+    if (outputFolder !== undefined)
+      this.store.library.folder(session.projectId, outputFolder);
     if (
       [...this.store.sessions.values()].some(
         (other) =>
@@ -258,6 +261,7 @@ export class AgentHub {
       this.store.animation.reference(session.projectId, input),
     );
     session.status = "starting";
+    session.outputFolder = outputFolder;
     session.error = undefined;
     session.prompt = undefined;
     session.activities = [];
@@ -464,6 +468,9 @@ export class AgentHub {
         readFileSync(item.savedPath),
         "candidate",
         { kind: "generation", runId: session.turnId, interpolationId: job?.id },
+        job
+          ? this.store.asset(session.projectId, job.clipId).folder || ""
+          : session.outputFolder || "",
       );
       if (job)
         this.store.interpolations.receive(
@@ -683,6 +690,7 @@ export class AgentHub {
                   ? {
                       id: asset.id,
                       name: asset.name,
+                      folder: asset.folder || "",
                       role: asset.role,
                       width: asset.width,
                       height: asset.height,

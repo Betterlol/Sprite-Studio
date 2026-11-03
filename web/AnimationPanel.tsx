@@ -43,7 +43,11 @@ export function AnimationPanel(props: Props) {
   const baseId =
     changes.find((change) => change.candidateClipId === clip.id)?.clipId ||
     clip.id;
-  const related = changes.filter((change) => change.clipId === baseId),
+  const related = changes.filter(
+      (change) =>
+        change.clipId === baseId &&
+        assets.some((asset) => asset.id === change.candidateClipId),
+    ),
     clipIds = new Set([
       baseId,
       ...related.map((change) => change.candidateClipId),

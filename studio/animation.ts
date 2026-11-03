@@ -39,6 +39,7 @@ export class AnimationStore {
         }
       }
     for (const change of this.changes.values()) {
+      if (!store.indexes.get(change.projectId)?.has(change.clipId)) continue;
       const clip = this.clip(change.projectId, change.clipId);
       if (clip.revertedFrameChangeIds?.includes(change.id))
         change.status = "reverted";

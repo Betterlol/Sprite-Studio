@@ -11,12 +11,14 @@ export function NewClipDialog({
   projectId,
   assets,
   initialImageId,
+  folder,
   onClose,
   onCreated,
 }: {
   projectId: string;
   assets: Asset[];
   initialImageId?: string;
+  folder: string;
   onClose: () => void;
   onCreated: (clip: ClipAsset) => Promise<void>;
 }) {
@@ -86,7 +88,12 @@ export function NewClipDialog({
           setError("");
           void api<ClipAsset>(`/api/projects/${projectId}/clips`, {
             method: "POST",
-            body: JSON.stringify({ name, imageIds: [first, last], fps }),
+            body: JSON.stringify({
+              name,
+              imageIds: [first, last],
+              fps,
+              folder,
+            }),
           })
             .then(onCreated)
             .catch((error) => {
@@ -108,6 +115,7 @@ export function NewClipDialog({
           </button>
         </div>
         <p>选择相同画布的两张静态图片，创建后可在“首尾补帧”中生成过渡。</p>
+        <p>保存到：资源{folder ? "/" + folder : ""}</p>
         <label>
           动画名称
           <input

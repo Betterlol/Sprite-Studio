@@ -65,6 +65,70 @@ app.setErrorHandler((error: any, request, reply) => {
   reply.code(error.statusCode || 400).send({ error: message || "操作失败" });
 });
 
+const librarySelection = z.object({
+  assetIds: z.array(z.string().uuid()).max(500).default([]),
+  folders: z.array(z.string()).max(100).default([]),
+});
+app.post("/api/projects/:projectId/folders", async (request) => {
+  const input = z
+    .object({
+      parent: z.string(),
+      name: z.string(),
+      libraryRevision: z.string(),
+    })
+    .parse(request.body);
+  return {
+    folder: store.library.createFolder(
+      pid(request),
+      input.parent,
+      input.name,
+      input.libraryRevision,
+    ),
+  };
+});
+app.post("/api/projects/:projectId/library/move", async (request) => {
+  const input = z
+    .object({
+      selection: librarySelection,
+      target: z.string(),
+      name: z.string().optional(),
+      libraryRevision: z.string(),
+    })
+    .parse(request.body);
+  return store.library.relocate(
+    pid(request),
+    input.selection,
+    input.target,
+    input.libraryRevision,
+    input.name,
+  );
+});
+app.post("/api/projects/:projectId/library/delete-plan", async (request) =>
+  store.library.planDelete(pid(request), librarySelection.parse(request.body)),
+);
+app.post("/api/projects/:projectId/library/delete", async (request) => {
+  const input = z
+    .object({ selection: librarySelection, libraryRevision: z.string() })
+    .parse(request.body);
+  return store.library.delete(
+    pid(request),
+    input.selection,
+    input.libraryRevision,
+  );
+});
+app.post("/api/projects/:projectId/library/restore", async (request) => {
+  const input = z
+    .object({ id: z.string().uuid(), libraryRevision: z.string() })
+    .parse(request.body);
+  return {
+    assetIds: store.library.restore(
+      pid(request),
+      input.id,
+      input.libraryRevision,
+    ),
+  };
+});
+
 app.get("/api/status", async () => ({ ...agent.status, ready: true }));
 app.post("/api/connect", async () => {
   await agent.bootstrapPromise;
@@ -86,12 +150,22 @@ app.post("/api/projects/:projectId/import", async (request) => {
   const projectId = pid(request);
   store.project(projectId);
   const query = z
-    .object({ role: roleSchema.default("reference") })
+    .object({
+      role: roleSchema.default("reference"),
+      folder: z.string().default(""),
+    })
     .parse(request.query);
   const part = await request.file();
   if (!part) throw new StudioError("请选择图片");
   const buffer = await part.toBuffer();
-  return store.importImage(projectId, part.filename, buffer, query.role);
+  return store.importImage(
+    projectId,
+    part.filename,
+    buffer,
+    query.role,
+    undefined,
+    query.folder,
+  );
 });
 app.get("/api/projects/:projectId/images/:assetId", async (request, reply) => {
   const projectId = pid(request),
@@ -230,6 +304,7 @@ app.post("/api/projects/:projectId/clips", async (request) => {
       name: z.string().trim().min(1).max(100),
       imageIds: z.array(z.string().uuid()).min(2).max(128),
       fps: z.number().min(1).max(60),
+      folder: z.string().optional(),
     })
     .parse(request.body);
   return store.createClip(
@@ -242,6 +317,9 @@ app.post("/api/projects/:projectId/clips", async (request) => {
         Math.round(((index + 1) * 1_000_000) / spec.fps) -
         Math.round((index * 1_000_000) / spec.fps),
     })),
+    undefined,
+    true,
+    spec.folder,
   );
 });
 app.post("/api/projects/:projectId/interpolations", async (request, reply) =>
@@ -294,6 +372,7 @@ app.post("/api/sessions/:sessionId/messages", async (request: any, reply) => {
       assetIds: z.array(z.string().uuid()).max(5).default([]),
       requestId: z.string().uuid(),
       clipReferences: z.array(clipReferenceSchema).max(3).default([]),
+      outputFolder: z.string().optional(),
     })
     .parse(request.body);
   const session = agent.send(
@@ -303,6 +382,7 @@ app.post("/api/sessions/:sessionId/messages", async (request: any, reply) => {
     input.requestId,
     undefined,
     input.clipReferences,
+    input.outputFolder,
   );
   return reply.code(202).send(session);
 });

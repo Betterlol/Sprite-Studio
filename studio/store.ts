@@ -8,12 +8,14 @@ import {
   renameSync,
   realpathSync,
   statSync,
+  lstatSync,
 } from "node:fs";
 import { join, resolve, relative, extname, sep } from "node:path";
 import { EventEmitter } from "node:events";
 import { ImagingWorker } from "./worker.ts";
 import { InterpolationStore } from "./interpolation.ts";
 import { AnimationStore } from "./animation.ts";
+import { ResourceLibrary, assetFolder } from "./library.ts";
 import {
   sliceSchema,
   transformSchema,
@@ -41,7 +43,7 @@ export function atomicJson(path: string, value: unknown) {
   renameSync(temp, path);
 }
 const revision = (value: any) => {
-  const { revision: _, ...body } = value;
+  const { revision: _, name, folder, file, ...body } = value;
   return sha256(JSON.stringify(body));
 };
 const now = () => new Date().toISOString();
@@ -59,11 +61,15 @@ export class ProjectStore extends EventEmitter {
   sessions = new Map<string, Session>();
   interpolations: InterpolationStore;
   animation: AnimationStore;
+  library: ResourceLibrary;
+  metadataPaths = new Map<string, Map<string, string>>();
+  resourceReaders = new Map<string, number>();
   constructor(root: string) {
     super();
     mkdirSync(root, { recursive: true });
     this.root = realpathSync(root);
     this.worker = new ImagingWorker(this.root);
+    this.library = new ResourceLibrary(this);
     for (const name of readdirSync(this.root)) {
       const dir = join(this.root, name);
       if (!existsSync(join(dir, "project.json"))) continue;
@@ -72,6 +78,7 @@ export class ProjectStore extends EventEmitter {
       ) as Project;
       if (project.version !== 1 || project.id !== name) continue;
       this.projects.set(project.id, project);
+      this.library.recover(project.id);
       this.loadAssets(project.id);
       const sessionDir = join(dir, ".studio", "sessions");
       if (existsSync(sessionDir))
@@ -113,6 +120,12 @@ export class ProjectStore extends EventEmitter {
       (existsSync(path) && realpathSync(path) !== path)
     )
       throw new StudioError("无效资源路径");
+    let parent = path;
+    while (parent !== root) {
+      if (existsSync(parent) && lstatSync(parent).isSymbolicLink())
+        throw new StudioError("资源路径不能经过链接");
+      parent = resolve(parent, "..");
+    }
     return path;
   }
   createProject(name: string) {
@@ -135,29 +148,53 @@ export class ProjectStore extends EventEmitter {
     atomicJson(join(dir, "project.json"), project);
     this.projects.set(project.id, project);
     this.indexes.set(project.id, new Map());
+    this.metadataPaths.set(project.id, new Map());
     this.changed(project.id);
     return project;
   }
-  private loadAssets(id: string) {
+  loadAssets(id: string) {
     const assets = new Map<string, Asset>();
-    for (const file of readdirSync(join(this.dir(id), "Assets")).filter(
-      (file) => file.endsWith(".meta.json"),
-    )) {
-      const asset = JSON.parse(
-        readFileSync(join(this.dir(id), "Assets", file), "utf8"),
-      ) as Asset;
-      if (asset.type === "clip") {
-        const body = JSON.parse(
-          readFileSync(
-            join(this.dir(id), "Assets", `${asset.id}.clip.json`),
-            "utf8",
-          ),
-        );
-        Object.assign(asset, body);
+    const metadata = new Map<string, string>();
+    for (const folder of this.library.folders(id)) {
+      const base = `Assets${folder ? "/" + folder : ""}`;
+      for (const file of readdirSync(this.safePath(id, base)).filter((file) =>
+        file.endsWith(".meta.json"),
+      )) {
+        const asset = JSON.parse(
+          readFileSync(this.safePath(id, `${base}/${file}`), "utf8"),
+        ) as Asset;
+        asset.folder = folder;
+        if (asset.type === "clip")
+          asset.file ||= `${base}/${asset.id}.clip.json`;
+        if (assets.has(asset.id))
+          throw new StudioError(
+            "同一资源身份出现在多个位置，请保留文件并处理冲突",
+          );
+        metadata.set(asset.id, `${base}/${file}`);
+        if (asset.type === "clip") {
+          const body = JSON.parse(
+            readFileSync(this.safePath(id, asset.file!), "utf8"),
+          );
+          Object.assign(asset, body);
+        }
+        assets.set(asset.id, asset);
       }
-      assets.set(asset.id, asset);
     }
     this.indexes.set(id, assets);
+    this.metadataPaths.set(id, metadata);
+  }
+  metaPath(pid: string, id: string) {
+    const path = this.metadataPaths.get(pid)?.get(id);
+    if (!path) throw new StudioError("资源元数据不存在", 404);
+    return path;
+  }
+  async reading<T>(pid: string, task: () => Promise<T>): Promise<T> {
+    this.resourceReaders.set(pid, (this.resourceReaders.get(pid) || 0) + 1);
+    try {
+      return await task();
+    } finally {
+      this.resourceReaders.set(pid, this.resourceReaders.get(pid)! - 1);
+    }
   }
   assets(projectId: string) {
     this.project(projectId);
@@ -190,9 +227,26 @@ export class ProjectStore extends EventEmitter {
     return path;
   }
   private saveAsset(projectId: string, asset: Asset) {
+    if (!asset.file) {
+      const folder =
+        asset.folder ??
+        (asset.origin?.assetId
+          ? assetFolder(this.asset(projectId, asset.origin.assetId))
+          : "");
+      Object.assign(
+        asset,
+        this.library.uniqueName(
+          projectId,
+          folder,
+          cleanName(asset.name),
+          asset.type === "image",
+        ),
+        { folder },
+      );
+    }
     asset.revision = revision(asset);
     if (asset.type === "clip")
-      atomicJson(join(this.dir(projectId), "Assets", `${asset.id}.clip.json`), {
+      atomicJson(this.safePath(projectId, asset.file!), {
         frames: asset.frames,
         revision: asset.revision,
         loop: asset.loop,
@@ -213,10 +267,11 @@ export class ProjectStore extends EventEmitter {
             ...meta
           }) => meta)(asset)
         : asset;
-    atomicJson(
-      join(this.dir(projectId), "Assets", `${asset.id}.meta.json`),
-      metadata,
-    );
+    const metaPath =
+      this.metadataPaths.get(projectId)?.get(asset.id) ||
+      `${asset.file}.meta.json`;
+    atomicJson(this.safePath(projectId, metaPath), metadata);
+    this.metadataPaths.get(projectId)!.set(asset.id, metaPath);
     this.indexes.get(projectId)!.set(asset.id, asset);
     this.changed(projectId);
     return asset;
@@ -227,41 +282,62 @@ export class ProjectStore extends EventEmitter {
     bytes: Buffer,
     role: AssetRole = "reference",
     origin?: ImageAsset["origin"],
+    folder?: string,
   ) {
-    if (bytes.length > 25 * 1024 * 1024)
-      throw new StudioError("单张图片不能超过 25 MB");
-    const extension = extname(filename).toLowerCase();
-    const mime: Record<string, string> = {
-      ".png": "image/png",
-      ".jpg": "image/jpeg",
-      ".jpeg": "image/jpeg",
-      ".webp": "image/webp",
-      ".gif": "image/gif",
-    };
-    if (!mime[extension]) throw new StudioError("支持 PNG、JPEG、WebP 和 GIF");
-    const stage = this.stage(projectId);
-    const temp = join(stage, "input" + extension);
-    writeFileSync(temp, bytes);
-    const info = await this.worker.run("inspect", { path: temp });
-    const id = randomUUID();
-    const file = `Assets/${id}${extension}`;
-    const contentHash = sha256(bytes);
-    const object = join(this.dir(projectId), ".studio", "objects", contentHash);
-    if (!existsSync(object)) writeFileSync(object, bytes, { flag: "wx" });
-    writeFileSync(this.safePath(projectId, file), bytes, { flag: "wx" });
-    return this.saveAsset(projectId, {
-      id,
-      name: cleanName(filename),
-      type: "image",
-      role,
-      revision: "",
-      createdAt: now(),
-      file,
-      contentHash,
-      mime: mime[extension]!,
-      ...info,
-      origin,
-    } as ImageAsset) as ImageAsset;
+    return this.reading(projectId, async () => {
+      folder ??= origin?.assetId
+        ? assetFolder(this.asset(projectId, origin.assetId))
+        : "";
+      this.library.folder(projectId, folder);
+      if (bytes.length > 25 * 1024 * 1024)
+        throw new StudioError("单张图片不能超过 25 MB");
+      const extension = extname(filename).toLowerCase();
+      const mime: Record<string, string> = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+      };
+      if (!mime[extension])
+        throw new StudioError("支持 PNG、JPEG、WebP 和 GIF");
+      const stage = this.stage(projectId);
+      const temp = join(stage, "input" + extension);
+      writeFileSync(temp, bytes);
+      const info = await this.worker.run("inspect", { path: temp });
+      const id = randomUUID();
+      const location = this.library.uniqueName(
+        projectId,
+        folder,
+        cleanName(filename.slice(0, -extension.length)).slice(0, 80) +
+          extension,
+        true,
+      );
+      const file = location.file;
+      const contentHash = sha256(bytes);
+      const object = join(
+        this.dir(projectId),
+        ".studio",
+        "objects",
+        contentHash,
+      );
+      if (!existsSync(object)) writeFileSync(object, bytes, { flag: "wx" });
+      writeFileSync(this.safePath(projectId, file), bytes, { flag: "wx" });
+      return this.saveAsset(projectId, {
+        id,
+        name: location.name,
+        folder,
+        type: "image",
+        role,
+        revision: "",
+        createdAt: now(),
+        file,
+        contentHash,
+        mime: mime[extension]!,
+        ...info,
+        origin,
+      } as ImageAsset) as ImageAsset;
+    });
   }
   adopt(projectId: string, id: string, expected: string) {
     const old = this.image(projectId, id);
@@ -284,67 +360,78 @@ export class ProjectStore extends EventEmitter {
     expected: string,
     input: unknown,
   ) {
-    const source = this.image(projectId, id);
-    const path = this.imagePath(projectId, id, expected);
-    const spec = transformSchema.parse(input);
-    const outputDir = this.stage(projectId);
-    const result = await this.worker.run("transform", {
-      path,
-      outputDir,
-      transform: spec,
+    return this.reading(projectId, async () => {
+      const source = this.image(projectId, id);
+      const path = this.imagePath(projectId, id, expected);
+      const spec = transformSchema.parse(input);
+      const outputDir = this.stage(projectId);
+      const result = await this.worker.run("transform", {
+        path,
+        outputDir,
+        transform: spec,
+      });
+      this.imagePath(projectId, id, expected);
+      return this.importImage(
+        projectId,
+        `${source.name.replace(/\.[^.]+$/, "")}-调整.png`,
+        readFileSync(result.files[0]),
+        "candidate",
+        { kind: "transform", assetId: id, revision: expected, operation: spec },
+      );
     });
-    this.imagePath(projectId, id, expected);
-    return this.importImage(
-      projectId,
-      `${source.name.replace(/\.[^.]+$/, "")}-调整.png`,
-      readFileSync(result.files[0]),
-      "candidate",
-      { kind: "transform", assetId: id, revision: expected, operation: spec },
-    );
   }
   async slice(projectId: string, id: string, expected: string, input: unknown) {
-    const source = this.image(projectId, id);
-    const path = this.imagePath(projectId, id, expected);
-    const spec = sliceSchema.parse(input);
-    const result = await this.worker.run("slice", {
-      path,
-      outputDir: this.stage(projectId),
-      ...spec,
-    });
-    this.imagePath(projectId, id, expected);
-    const images: ImageAsset[] = [];
-    for (const [i, file] of (result.files as string[]).entries())
-      images.push(
-        await this.importImage(
-          projectId,
-          `${source.name.replace(/\.[^.]+$/, "")}-${String(i + 1).padStart(2, "0")}.png`,
-          readFileSync(file),
-          "candidate",
-          {
-            kind: "slice",
-            assetId: id,
-            revision: expected,
-            operation: { columns: spec.columns, rows: spec.rows, index: i },
-          },
-        ),
+    return this.reading(projectId, async () => {
+      const source = this.image(projectId, id);
+      const path = this.imagePath(projectId, id, expected);
+      const spec = sliceSchema.parse(input);
+      const result = await this.worker.run("slice", {
+        path,
+        outputDir: this.stage(projectId),
+        ...spec,
+      });
+      this.imagePath(projectId, id, expected);
+      const folder = this.library.outputFolder(
+        projectId,
+        assetFolder(source),
+        `${source.name.replace(/\.[^.]+$/, "")} · 切片`,
       );
-    const clip: ClipAsset = {
-      id: randomUUID(),
-      name: spec.name || `${source.name.replace(/\.[^.]+$/, "")} · 动画`,
-      type: "clip",
-      revision: "",
-      createdAt: now(),
-      loop: true,
-      origin: { assetId: id, revision: expected },
-      frames: images.map((image, i) => ({
+      const images: ImageAsset[] = [];
+      for (const [i, file] of (result.files as string[]).entries())
+        images.push(
+          await this.importImage(
+            projectId,
+            `${source.name.replace(/\.[^.]+$/, "")}-${String(i + 1).padStart(2, "0")}.png`,
+            readFileSync(file),
+            "candidate",
+            {
+              kind: "slice",
+              assetId: id,
+              revision: expected,
+              operation: { columns: spec.columns, rows: spec.rows, index: i },
+            },
+            folder,
+          ),
+        );
+      const clip: ClipAsset = {
         id: randomUUID(),
-        imageId: image.id,
-        durationUs:
-          Math.round(((i + 1) * 1_000_000) / spec.fps) -
-          Math.round((i * 1_000_000) / spec.fps),
-      })),
-    };
-    return this.saveAsset(projectId, clip) as ClipAsset;
+        name: spec.name || `${source.name.replace(/\.[^.]+$/, "")} · 动画`,
+        type: "clip",
+        folder,
+        revision: "",
+        createdAt: now(),
+        loop: true,
+        origin: { assetId: id, revision: expected },
+        frames: images.map((image, i) => ({
+          id: randomUUID(),
+          imageId: image.id,
+          durationUs:
+            Math.round(((i + 1) * 1_000_000) / spec.fps) -
+            Math.round((i * 1_000_000) / spec.fps),
+        })),
+      };
+      return this.saveAsset(projectId, clip) as ClipAsset;
+    });
   }
   createClip(
     projectId: string,
@@ -352,6 +439,7 @@ export class ProjectStore extends EventEmitter {
     frames: ClipAsset["frames"],
     origin?: ClipAsset["origin"],
     loop = true,
+    folder?: string,
   ) {
     clipSchema.parse({ revision: "", frames, loop });
     const images = frames.map((frame) => this.image(projectId, frame.imageId));
@@ -370,6 +458,11 @@ export class ProjectStore extends EventEmitter {
       frames,
       loop,
       origin,
+      folder:
+        folder ??
+        (origin?.assetId
+          ? assetFolder(this.asset(projectId, origin.assetId))
+          : assetFolder(images[0]!)),
     }) as ClipAsset;
   }
   updateClip(
@@ -425,22 +518,24 @@ export class ProjectStore extends EventEmitter {
     }) as ClipAsset;
   }
   async exportClip(projectId: string, id: string) {
-    const clip = this.asset(projectId, id);
-    if (clip.type !== "clip") throw new StudioError("请选择动画资源");
-    const frames = clip.frames.map((frame) => ({
-      ...frame,
-      path: this.imagePath(projectId, frame.imageId),
-    }));
-    const result = await this.worker.run("export", {
-      path: frames[0]!.path,
-      outputDir: this.stage(projectId),
-      frames,
-      loop: clip.loop,
+    return this.reading(projectId, async () => {
+      const clip = this.asset(projectId, id);
+      if (clip.type !== "clip") throw new StudioError("请选择动画资源");
+      const frames = clip.frames.map((frame) => ({
+        ...frame,
+        path: this.imagePath(projectId, frame.imageId),
+      }));
+      const result = await this.worker.run("export", {
+        path: frames[0]!.path,
+        outputDir: this.stage(projectId),
+        frames,
+        loop: clip.loop,
+      });
+      return {
+        path: result.files[0] as string,
+        filename: cleanName(clip.name) + ".webp",
+      };
     });
-    return {
-      path: result.files[0] as string,
-      filename: cleanName(clip.name) + ".webp",
-    };
   }
   createSession(projectId: string) {
     this.project(projectId);
@@ -483,6 +578,9 @@ export class ProjectStore extends EventEmitter {
     return {
       project: this.project(projectId),
       assets: this.assets(projectId),
+      folders: this.library.folders(projectId),
+      libraryRevision: this.library.revision(projectId),
+      trash: this.library.trash(projectId),
       interpolations: this.interpolations.list(projectId),
       reviews: this.animation.listReviews(projectId),
       frameChanges: this.animation.listChanges(projectId),

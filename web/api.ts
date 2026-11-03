@@ -10,6 +10,7 @@ export async function api<T = any>(
         : { "Content-Type": "application/json", ...options.headers },
   });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "操作失败");
+  if (!response.ok)
+    throw new Error(result.message || result.error || "操作失败");
   return result;
 }

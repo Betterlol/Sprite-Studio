@@ -8,6 +8,7 @@ export type Project = {
   version: 1;
 };
 export type ImageAsset = {
+  folder?: string;
   id: string;
   type: "image";
   name: string;
@@ -31,6 +32,8 @@ export type ImageAsset = {
 };
 export type ClipFrame = { id: string; imageId: string; durationUs: number };
 export type ClipAsset = {
+  folder?: string;
+  file?: string;
   id: string;
   type: "clip";
   name: string;
@@ -44,6 +47,22 @@ export type ClipAsset = {
   revertedFrameChangeIds?: string[];
 };
 export type Asset = ImageAsset | ClipAsset;
+export type LibrarySelection = { assetIds: string[]; folders: string[] };
+export type TrashEntry = {
+  id: string;
+  label: string;
+  deletedAt: string;
+  status: "trashed" | "restored";
+  assets: Asset[];
+  folders: string[];
+  roots: { from: string; to: string }[];
+};
+export type DeletePlan = {
+  selection: LibrarySelection;
+  assetIds: string[];
+  folders: string[];
+  blockers: { name: string; reason: string }[];
+};
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -70,6 +89,7 @@ export type PromptQuestion = {
 };
 export type PendingPrompt = { id: string; questions: PromptQuestion[] };
 export type Session = {
+  outputFolder?: string;
   id: string;
   projectId: string;
   title: string;

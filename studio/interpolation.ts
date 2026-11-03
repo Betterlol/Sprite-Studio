@@ -30,8 +30,10 @@ export class InterpolationStore {
           readFileSync(join(dir, file), "utf8"),
         ) as Interpolation;
         if (job.projectId !== projectId || file !== `${job.id}.json`) continue;
-        const clip = store.asset(projectId, job.clipId) as ClipAsset;
-        if (clip.appliedInterpolationIds?.includes(job.id))
+        const clip = store.indexes.get(projectId)?.get(job.clipId) as
+          | ClipAsset
+          | undefined;
+        if (clip?.appliedInterpolationIds?.includes(job.id))
           job.status = "applied";
         else if (job.status === "running") {
           job.status = "interrupted";
@@ -176,9 +178,9 @@ export class InterpolationStore {
         throw new StudioError("这个候选正在处理，请稍后再试", 409);
       return running.promise;
     }
-    const promise = this.buildPreview(job, spec).finally(() =>
-      this.preparing.delete(id),
-    );
+    const promise = this.store
+      .reading(projectId, () => this.buildPreview(job, spec))
+      .finally(() => this.preparing.delete(id));
     this.preparing.set(id, { key, promise });
     return promise;
   }

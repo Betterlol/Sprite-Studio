@@ -4,6 +4,7 @@ import { NewClipDialog } from "./NewClipDialog.tsx";
 import { AnimationPanel } from "./AnimationPanel.tsx";
 import { ComparisonPlayer } from "./ComparisonPlayer.tsx";
 import { api } from "./api.ts";
+import { ResourceLibrary } from "./ResourceLibrary.tsx";
 import {
   Upload,
   Plus,
@@ -49,6 +50,7 @@ import {
   type ClipReview,
   type FrameChange,
   type ClipSnapshot,
+  type TrashEntry,
 } from "../studio/model.ts";
 
 type State = {
@@ -58,6 +60,9 @@ type State = {
   interpolations: Interpolation[];
   reviews: ClipReview[];
   frameChanges: FrameChange[];
+  folders: string[];
+  libraryRevision: string;
+  trash: TrashEntry[];
 };
 type Connection = { connected: boolean; model?: string; error?: string };
 const roles = { reference: "参考图", source: "已采纳", candidate: "候选" };
@@ -93,8 +98,24 @@ export function App() {
     connected: false,
   });
   const [online, setOnline] = useState(false);
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("all");
+  const [folder, setFolder] = useState("");
+  useEffect(() => {
+    if (state?.project.id === projectId)
+      localStorage.setItem(`studio.folder.${projectId}`, folder);
+  }, [folder, projectId, state?.project.id]);
+  useEffect(() => {
+    if (state && selectedId && !state.assets.some((a) => a.id === selectedId)) {
+      setSelectedId("");
+      setPlaying(false);
+      setComparison(null);
+      setReferences((old) =>
+        old.filter((id) => state.assets.some((a) => a.id === id)),
+      );
+      setClipReferences((old) =>
+        old.filter((ref) => state.assets.some((a) => a.id === ref.clipId)),
+      );
+    }
+  }, [state?.libraryRevision]);
   const [frameIndex, setFrameIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [playbackRun, setPlaybackRun] = useState(0);
@@ -187,6 +208,8 @@ export function App() {
         : next,
     );
     if (initial) {
+      const storedFolder = localStorage.getItem(`studio.folder.${id}`) || "";
+      setFolder(next.folders.includes(storedFolder) ? storedFolder : "");
       const storedAsset = localStorage.getItem(`studio.asset.${id}`);
       setSelectedId(
         next.assets.some((asset) => asset.id === storedAsset)
@@ -358,8 +381,7 @@ export function App() {
     projectRef.current = id;
     setProjectId(id);
     setState(null);
-    setSearch("");
-    setFilter("all");
+    setFolder("");
     void loadProject(id, true).catch((error) => notify(error.message, true));
   }
   function chooseSession(id: string) {
@@ -461,7 +483,7 @@ export function App() {
         const body = new FormData();
         body.append("file", file);
         const asset = await api<ImageAsset>(
-          `/api/projects/${originalProject}/import?role=reference`,
+          `/api/projects/${originalProject}/import?role=reference&folder=${encodeURIComponent(folder)}`,
           { method: "POST", body },
         );
         latest = asset.id;
@@ -469,7 +491,6 @@ export function App() {
       if (projectRef.current === originalProject) {
         await refreshRef.current();
         setSelectedId(latest);
-        setFilter("all");
       }
       notify(`已导入 ${files.length} 张图片`);
     });
@@ -492,6 +513,7 @@ export function App() {
           body: JSON.stringify({
             text,
             assetIds: attached,
+            outputFolder: folder,
             clipReferences: attachedClips,
             requestId: crypto.randomUUID(),
           }),
@@ -540,7 +562,6 @@ export function App() {
       );
       await refreshRef.current();
       setSelectedId(result.id);
-      setFilter("all");
       notify(`已创建 ${result.frames.length} 帧动画，原图已保留`);
     });
   }
@@ -599,14 +620,6 @@ export function App() {
       );
     });
   }
-  const visibleAssets =
-    state?.assets.filter(
-      (asset) =>
-        (!search || asset.name.toLowerCase().includes(search.toLowerCase())) &&
-        (filter === "all" || filter === "clip"
-          ? filter !== "clip" || asset.type === "clip"
-          : asset.type === "image" && asset.role === filter),
-    ) || [];
   const fit = currentImage
     ? Math.max(
         0.05,
@@ -707,116 +720,22 @@ export function App() {
         </div>
       </header>
       <main className={`workspace ${chatVisible ? "" : "without-chat"}`}>
-        <aside className="library">
-          <div className="panel-heading">
-            <h2>项目资源</h2>
-            <span>{state?.assets.length || 0}</span>
-          </div>
-          <div className="search-box">
-            <Search size={14} />
-            <input
-              aria-label="搜索资源"
-              placeholder="搜索资源…"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-            <kbd>/</kbd>
-          </div>
-          <div className="resource-tabs">
-            {[
-              ["all", "全部"],
-              ["reference", "参考"],
-              ["candidate", "候选"],
-              ["clip", "动画"],
-            ].map(([value, label]) => (
-              <button
-                key={value}
-                className={filter === value ? "active" : ""}
-                onClick={() => setFilter(value!)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <div className="asset-list">
-            {visibleAssets.map((asset) => (
-              <button
-                key={asset.id}
-                className={`asset-row ${asset.id === selectedId ? "selected" : ""}`}
-                onClick={() => {
-                  setComparison(null);
-                  setSelectedId(asset.id);
-                }}
-                draggable={asset.type === "image"}
-                onDragStart={(event) => {
-                  event.dataTransfer.setData(
-                    "application/x-sprite-asset",
-                    asset.id,
-                  );
-                }}
-              >
-                <span
-                  className={`asset-thumb ${asset.type === "clip" ? "clip-thumb" : ""}`}
-                >
-                  {asset.type === "image" ? (
-                    <img
-                      src={assetUrl(projectId, asset.id, asset.revision)}
-                      alt=""
-                      loading="lazy"
-                    />
-                  ) : (
-                    <Film size={22} />
-                  )}
-                </span>
-                <span className="asset-info">
-                  <strong>{asset.name}</strong>
-                  <small>
-                    {asset.type === "image"
-                      ? `${roles[asset.role]} · ${asset.width} × ${asset.height}`
-                      : `${asset.frames.length} 帧 · 动画片段`}
-                  </small>
-                </span>
-                {asset.type === "image" && asset.role === "candidate" && (
-                  <span className="candidate-dot" />
-                )}
-              </button>
-            ))}
-            {!visibleAssets.length && (
-              <div className="library-empty">
-                <ImageIcon size={23} />
-                <span>{search ? "没有匹配的资源" : "还没有资源"}</span>
-                <small>导入图片，开始一次制作</small>
-              </div>
-            )}
-          </div>
-          <div className="library-footer">
-            <button
-              className="import-button new-clip-button"
-              disabled={
-                (state?.assets.filter(
-                  (asset) => asset.type === "image" && asset.frameCount === 1,
-                ).length || 0) < 2
-              }
-              onClick={() => setNewClip(true)}
-            >
-              <Film size={15} />
-              新建动画<span>＋</span>
-            </button>
-            <button
-              className="import-button"
-              disabled={!!operation}
-              onClick={() => upload.current?.click()}
-            >
-              {operation === "正在导入图片" ? (
-                <LoaderCircle size={15} className="spin" />
-              ) : (
-                <Upload size={15} />
-              )}
-              导入图片<span>＋</span>
-            </button>
-            <p>PNG、JPEG、WebP、GIF · 拖入即可</p>
-          </div>
-        </aside>
+        <ResourceLibrary
+          key={projectId}
+          projectId={projectId}
+          state={state}
+          selectedId={selectedId}
+          folder={folder}
+          onFolder={setFolder}
+          onSelect={(id) => {
+            setComparison(null);
+            setSelectedId(id);
+          }}
+          onChanged={() => refreshRef.current()}
+          onImport={() => upload.current?.click()}
+          onNewClip={() => setNewClip(true)}
+          disabled={!!operation || agentBusy}
+        />
         <section className="editor">
           <div className="editor-toolbar">
             <div className="asset-title">
@@ -1916,7 +1835,12 @@ export function App() {
                   )}
                 </div>
               </div>
-              <p className="composer-note">生成结果先作为候选，原图保留</p>
+              <p
+                className="composer-note generation-location"
+                title={`资源${folder ? "/" + folder : ""}`}
+              >
+                生成位置：资源{folder ? "/" + folder : ""} · 原图保留
+              </p>
             </div>
           </aside>
         )}
@@ -1964,6 +1888,7 @@ export function App() {
         <NewClipDialog
           projectId={projectId}
           assets={state.assets}
+          folder={folder}
           initialImageId={currentImage?.id}
           onClose={() => setNewClip(false)}
           onCreated={async (clip) => {
@@ -1971,7 +1896,6 @@ export function App() {
             setNewClip(false);
             setSelectedId(clip.id);
             setTool("interpolate");
-            setFilter("all");
           }}
         />
       )}

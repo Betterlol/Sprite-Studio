@@ -127,11 +127,7 @@ test("animation evidence identifies the correct instance and correction adopts/r
       store.animation.compare(pid, change.id).before.clip.frames,
       shared.frames,
     );
-    const metadataPath = join(
-        store.dir(pid),
-        "Assets",
-        `${shared.id}.meta.json`,
-      ),
+    const metadataPath = store.safePath(pid, store.metaPath(pid, shared.id)),
       oldMetadata = readFileSync(metadataPath);
     const applied = store.animation.apply(pid, change.id, candidate.revision);
     assert.deepEqual(applied.frames, candidate.frames);

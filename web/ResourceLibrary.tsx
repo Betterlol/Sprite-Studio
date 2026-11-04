@@ -15,9 +15,14 @@ import {
   LoaderCircle,
   Upload,
   Plus,
+  Image as ImageIcon,
+  Images,
 } from "lucide-react";
 import {
   assetUrl,
+  resourceCategories,
+  folderCategory,
+  resourceCategory,
   type Asset,
   type DeletePlan,
   type LibrarySelection,
@@ -60,10 +65,9 @@ export function ResourceLibrary({
   onNewClip: () => void;
   disabled: boolean;
 }) {
-  const [search, setSearch] = useState(""),
-    [filter, setFilter] = useState("all");
+  const [search, setSearch] = useState("");
   const [checked, setChecked] = useState<string[]>([]),
-    [expanded, setExpanded] = useState<string[]>([""]);
+    [expanded, setExpanded] = useState<string[]>([...resourceCategories]);
   const [dialog, setDialog] = useState<
     "folder" | "rename" | "move" | "delete" | "trash" | null
   >(null);
@@ -134,27 +138,26 @@ export function ResourceLibrary({
     const asset = assets.find((a) => a.id === selectedId);
     if (asset) {
       onFolder(asset.folder || "");
-      setFilter("all");
     }
   }, [selectedId]);
   useEffect(() => {
-    if (state && !folders.includes(folder)) onFolder("");
+    if (state && !folders.includes(folder)) onFolder("参考图");
   }, [state?.libraryRevision]);
-  const visible = assets.filter(
-    (a) =>
-      (!search
+  const visible = assets
+    .filter((a) =>
+      !search
         ? (a.folder || "") === folder
         : `${a.name} ${a.folder || ""}`
             .toLowerCase()
-            .includes(search.toLowerCase())) &&
-      (filter === "all" ||
-        (filter === "clip"
-          ? a.type === "clip"
-          : a.type === "image" && a.kind === filter)),
-  );
-  const children = folders.filter((f) => f && parent(f) === folder && !search);
+            .includes(search.toLowerCase()),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
+  const children =
+    !folder && !search
+      ? [...resourceCategories]
+      : folders.filter((f) => f && parent(f) === folder && !search);
   const keys = [
-    ...children.map((f) => `f:${f}`),
+    ...children.filter((f) => folderCategory(f) !== f).map((f) => `f:${f}`),
     ...visible.map((a) => `a:${a.id}`),
   ];
   const selectedKeys = checked.filter((key) =>
@@ -170,6 +173,19 @@ export function ResourceLibrary({
       .filter((k) => k.startsWith("f:"))
       .map((k) => k.slice(2)),
   };
+  const categories = new Set([
+    ...selection.assetIds.map((id) =>
+      resourceCategory(assets.find((a) => a.id === id)!),
+    ),
+    ...selection.folders.map((path) => folderCategory(path)),
+  ]);
+  const destinations = folders.filter(
+    (path) =>
+      !!folderCategory(path) &&
+      categories.size === 1 &&
+      categories.has(folderCategory(path)) &&
+      !selection.folders.some((root) => inside(path, root)),
+  );
   function toggle(key: string) {
     setChecked((old) =>
       old.includes(key) ? old.filter((k) => k !== key) : [...old, key],
@@ -184,7 +200,7 @@ export function ResourceLibrary({
     setError("");
     setPlan(null);
     setName("");
-    setTarget(folder);
+    setTarget(destinations.includes(folder) ? folder : destinations[0] || "");
     setDialog(next);
     if (next === "rename")
       setName(
@@ -271,15 +287,31 @@ export function ResourceLibrary({
   }
   const tree = (path: string) => {
     const kids = folders.filter((f) => f && parent(f) === path);
+    const category = folderCategory(path) === path;
+    const count = assets.filter((asset) =>
+      inside(asset.folder || "", path),
+    ).length;
+    const Icon = category
+      ? path === "动画"
+        ? Film
+        : path === "参考图"
+          ? ImageIcon
+          : Images
+      : folder === path
+        ? FolderOpen
+        : Folder;
     return (
       <div key={path}>
         <div
-          className={`directory-line ${folder === path && dialog !== "trash" ? "active" : ""}`}
-          style={{ paddingLeft: 8 + (path ? path.split("/").length : 0) * 12 }}
+          className={`directory-line ${category ? "category-line" : ""} ${folder === path && dialog !== "trash" ? "active" : ""}`}
+          style={{
+            paddingLeft: 8 + Math.max(0, path.split("/").length - 1) * 12,
+          }}
         >
           <button
             className="directory-toggle"
             aria-label={`${expanded.includes(path) ? "收起" : "展开"}${basename(path)}`}
+            aria-expanded={expanded.includes(path)}
             disabled={!kids.length}
             onClick={() =>
               setExpanded((old) =>
@@ -295,9 +327,17 @@ export function ResourceLibrary({
               <ChevronRight size={12} />
             )}
           </button>
-          <button onClick={() => onFolder(path)} title={path || "项目资源"}>
-            {folder === path ? <FolderOpen size={14} /> : <Folder size={14} />}
+          <button
+            onClick={() => {
+              onFolder(path);
+              setSearch("");
+            }}
+            title={path || "项目资源"}
+            aria-current={folder === path ? "location" : undefined}
+          >
+            <Icon size={14} />
             <span>{basename(path)}</span>
+            {category && <small className="directory-count">{count}</small>}
           </button>
         </div>
         {expanded.includes(path) && kids.map(tree)}
@@ -313,8 +353,8 @@ export function ResourceLibrary({
           <button
             className="icon-button"
             aria-label="新建文件夹"
-            title="新建文件夹"
-            disabled={disabled}
+            title={folder ? "新建文件夹" : "请先选择资源分类"}
+            disabled={disabled || !folderCategory(folder)}
             onClick={() => open("folder")}
           >
             <FolderPlus size={16} />
@@ -330,7 +370,7 @@ export function ResourceLibrary({
         </div>
       </div>
       <div className="directory-tree" aria-label="目录树">
-        {tree("")}
+        {resourceCategories.map(tree)}
       </div>
       <nav className="directory-breadcrumb" aria-label="当前目录">
         <button onClick={() => onFolder("")}>资源</button>
@@ -366,25 +406,6 @@ export function ResourceLibrary({
           </button>
         )}
       </div>
-      <div className="resource-tabs">
-        {[
-          ["all", "全部"],
-          ["reference", "参考"],
-          ["image", "图片"],
-          ["clip", "动画"],
-        ].map(([value, label]) => (
-          <button
-            key={value}
-            className={filter === value ? "active" : ""}
-            onClick={() => {
-              setFilter(value!);
-              setChecked([]);
-            }}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
       <div className="library-selection">
         <label>
           <input
@@ -406,8 +427,10 @@ export function ResourceLibrary({
           </button>
           <button
             aria-label="移动所选项目"
-            title="移动到…"
-            disabled={disabled || !selectedKeys.length}
+            title={
+              categories.size > 1 ? "请选择同一分类内的资源进行移动" : "移动到…"
+            }
+            disabled={disabled || !selectedKeys.length || !destinations.length}
             onClick={() => open("move")}
           >
             <FolderInput size={15} />
@@ -428,6 +451,7 @@ export function ResourceLibrary({
             <input
               type="checkbox"
               aria-label={`选择文件夹 ${basename(path)}`}
+              disabled={folderCategory(path) === path}
               checked={checked.includes(`f:${path}`)}
               onChange={() => toggle(`f:${path}`)}
             />
@@ -435,7 +459,11 @@ export function ResourceLibrary({
               <Folder size={24} />
               <span className="asset-info">
                 <strong>{basename(path)}</strong>
-                <small>文件夹</small>
+                <small>
+                  {folderCategory(path) === path
+                    ? `${assets.filter((asset) => inside(asset.folder || "", path)).length} 项资源 · 固定分类`
+                    : "文件夹"}
+                </small>
               </span>
               <ChevronRight size={13} />
             </button>
@@ -494,7 +522,11 @@ export function ResourceLibrary({
             <FolderOpen size={25} />
             <span>{search ? "没有匹配的资源" : "这个目录还是空的"}</span>
             <small>
-              {search ? "试试资源名称或目录名称" : "导入图片，或新建文件夹"}
+              {search
+                ? "试试资源名称或目录名称"
+                : folderCategory(folder) === "动画"
+                  ? "新建动画，或从原图素材切割生成"
+                  : "导入图片，或新建文件夹"}
             </small>
           </div>
         )}
@@ -519,7 +551,11 @@ export function ResourceLibrary({
           onClick={onImport}
         >
           <Upload size={15} />
-          导入到此目录
+          {folderCategory(folder) === "参考图"
+            ? "导入参考图"
+            : folderCategory(folder) === "原图素材"
+              ? "导入原图素材"
+              : "导入原图素材…"}
           <Plus size={13} />
         </button>
       </div>
@@ -603,16 +639,11 @@ export function ResourceLibrary({
                     value={target}
                     onChange={(e) => setTarget(e.target.value)}
                   >
-                    {folders
-                      .filter(
-                        (f) =>
-                          !selection.folders.some((root) => inside(f, root)),
-                      )
-                      .map((f) => (
-                        <option key={f} value={f}>
-                          资源{f ? "/" + f : ""}
-                        </option>
-                      ))}
+                    {destinations.map((f) => (
+                      <option key={f} value={f}>
+                        资源{f ? "/" + f : ""}
+                      </option>
+                    ))}
                   </select>
                 </label>
               </>

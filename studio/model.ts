@@ -1,11 +1,31 @@
 import { z } from "zod";
 export const imageKindSchema = z.enum(["reference", "image"]);
 export type ImageKind = z.infer<typeof imageKindSchema>;
+export const resourceCategories = ["参考图", "原图素材", "动画"] as const;
+export type ResourceCategory = (typeof resourceCategories)[number];
+export const folderCategory = (folder: string) =>
+  resourceCategories.find(
+    (root) => folder === root || folder.startsWith(root + "/"),
+  );
+export const resourceCategory = (
+  asset: Pick<Asset, "type"> & { kind?: ImageKind },
+): ResourceCategory =>
+  asset.type === "clip"
+    ? "动画"
+    : asset.kind === "reference"
+      ? "参考图"
+      : "原图素材";
+export function categoryFolder(category: ResourceCategory, folder = "") {
+  const root = folderCategory(folder);
+  const suffix = root ? folder.slice(root.length) : folder ? "/" + folder : "";
+  return category + suffix;
+}
 export type Project = {
   id: string;
   name: string;
   createdAt: string;
   version: 1;
+  resourceLayout?: 1;
 };
 export type ImageAsset = {
   folder?: string;
@@ -49,6 +69,7 @@ export type ClipAsset = {
 export type Asset = ImageAsset | ClipAsset;
 export type LibrarySelection = { assetIds: string[]; folders: string[] };
 export type TrashEntry = {
+  resourceLayout?: 1;
   id: string;
   label: string;
   deletedAt: string;

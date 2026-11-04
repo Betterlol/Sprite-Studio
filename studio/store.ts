@@ -16,7 +16,10 @@ import { ImagingWorker } from "./worker.ts";
 import { InterpolationStore } from "./interpolation.ts";
 import { AnimationStore } from "./animation.ts";
 import { ResourceLibrary, assetFolder } from "./library.ts";
+import { recoverResourceLayout, organizeResourceLayout } from "./layout.ts";
 import {
+  resourceCategories,
+  resourceCategory,
   sliceSchema,
   transformSchema,
   clipSchema,
@@ -78,8 +81,10 @@ export class ProjectStore extends EventEmitter {
       ) as Project;
       if (project.version !== 1 || project.id !== name) continue;
       this.projects.set(project.id, project);
+      recoverResourceLayout(this, project.id);
       this.library.recover(project.id);
       this.loadAssets(project.id);
+      organizeResourceLayout(this, project.id);
       const sessionDir = join(dir, ".studio", "sessions");
       if (existsSync(sessionDir))
         for (const file of readdirSync(sessionDir).filter((file) =>
@@ -134,10 +139,12 @@ export class ProjectStore extends EventEmitter {
       name: cleanName(name),
       createdAt: now(),
       version: 1,
+      resourceLayout: 1,
     };
     const dir = join(this.root, project.id);
     for (const folder of [
       "Assets",
+      ...resourceCategories.map((root) => `Assets/${root}`),
       ".studio/objects",
       ".studio/staging",
       ".studio/sessions",
@@ -233,11 +240,14 @@ export class ProjectStore extends EventEmitter {
   }
   private saveAsset(projectId: string, asset: Asset) {
     if (!asset.file) {
-      const folder =
+      const folder = this.library.destination(
+        projectId,
+        resourceCategory(asset),
         asset.folder ??
-        (asset.origin?.assetId
-          ? assetFolder(this.asset(projectId, asset.origin.assetId))
-          : "");
+          (asset.origin?.assetId
+            ? assetFolder(this.asset(projectId, asset.origin.assetId))
+            : ""),
+      );
       Object.assign(
         asset,
         this.library.uniqueName(
@@ -293,7 +303,11 @@ export class ProjectStore extends EventEmitter {
       folder ??= origin?.assetId
         ? assetFolder(this.asset(projectId, origin.assetId))
         : "";
-      this.library.folder(projectId, folder);
+      folder = this.library.destination(
+        projectId,
+        kind === "reference" ? "参考图" : "原图素材",
+        folder,
+      );
       if (bytes.length > 25 * 1024 * 1024)
         throw new StudioError("单张图片不能超过 25 MB");
       const extension = extname(filename).toLowerCase();
@@ -383,7 +397,7 @@ export class ProjectStore extends EventEmitter {
       this.imagePath(projectId, id, expected);
       const folder = this.library.outputFolder(
         projectId,
-        assetFolder(source),
+        this.library.destination(projectId, "原图素材", assetFolder(source)),
         `${source.name.replace(/\.[^.]+$/, "")} · 切片`,
       );
       const images: ImageAsset[] = [];

@@ -67,15 +67,22 @@ test("real directories preserve IDs, snapshot validity and direct frame editing/
     job.sheetId = sheet.id;
     job.status = "generated";
     store.interpolations.save(job);
-    store.library.createFolder(pid, "", "角色", rev());
-    store.library.createFolder(pid, "角色", "空目录", rev());
+    store.library.createFolder(pid, "动画", "角色", rev());
+    store.library.createFolder(pid, "参考图", "角色", rev());
+    store.library.createFolder(pid, "动画/角色", "空目录", rev());
     const oldRevision = rev();
-    store.library.relocate(pid, folders(clip.folder!), "角色", rev());
+    store.library.relocate(pid, folders(clip.folder!), "动画/角色", rev());
     assert.throws(
-      () => store.library.createFolder(pid, "", "旧列表", oldRevision),
+      () => store.library.createFolder(pid, "动画", "旧列表", oldRevision),
       /列表已变化/,
     );
-    store.library.relocate(pid, assets(sheet.id), "角色", rev(), "角色图.png");
+    store.library.relocate(
+      pid,
+      assets(sheet.id),
+      "参考图/角色",
+      rev(),
+      "角色图.png",
+    );
     store.library.relocate(
       pid,
       assets(clip.id),
@@ -86,7 +93,7 @@ test("real directories preserve IDs, snapshot validity and direct frame editing/
     assert.equal(store.asset(pid, clip.id).revision, clip.revision);
     assert.equal(store.image(pid, sheet.id).revision, sheet.revision);
     assert.equal(store.animation.review(pid, review.id).stale, false);
-    store.library.relocate(pid, folders("角色"), "", rev(), "主角");
+    store.library.relocate(pid, folders("动画/角色"), "动画", rev(), "主角");
     const appliedInterpolation = await store.interpolations.insert(
       pid,
       job.id,
@@ -104,11 +111,11 @@ test("real directories preserve IDs, snapshot validity and direct frame editing/
       },
       "human",
     );
-    store.library.relocate(pid, assets(clip.id), "主角", rev());
+    store.library.relocate(pid, assets(clip.id), "动画/主角", rev());
     const modified = store.asset(pid, clip.id) as ClipAsset;
     store.worker.close();
     reloaded = new ProjectStore(join(root, "projects"));
-    assert.ok(reloaded.library.folders(pid).includes("主角/空目录"));
+    assert.ok(reloaded.library.folders(pid).includes("动画/主角/空目录"));
     assert.equal(reloaded.asset(pid, clip.id).name, "待机");
     assert.deepEqual(
       (reloaded.asset(pid, clip.id) as ClipAsset).frames,
@@ -140,6 +147,7 @@ test("batch deletion protects outside references and undo dependencies; trash re
   let reloaded: ProjectStore | undefined;
   try {
     const frameIds = clip.frames.map((f) => f.imageId);
+    const frameFolder = store.image(pid, frameIds[0]!).folder!;
     assert.ok(
       store.library
         .planDelete(pid, assets(frameIds[0]!))
@@ -154,7 +162,7 @@ test("batch deletion protects outside references and undo dependencies; trash re
       "",
     );
     assert.throws(
-      () => store.library.delete(pid, folders(clip.folder!), rev()),
+      () => store.library.delete(pid, folders(frameFolder), rev()),
       /复用动画/,
     );
     store.library.delete(pid, assets(reused.id), rev());
@@ -175,7 +183,7 @@ test("batch deletion protects outside references and undo dependencies; trash re
         .blockers.some((b) => b.reason.includes("撤回")),
     );
     store.animation.revert(pid, change.id, store.asset(pid, clip.id).revision);
-    const selection = { assetIds: [], folders: [clip.folder!] };
+    const selection = { assetIds: [], folders: [clip.folder!, frameFolder] };
     store.library.createFolder(pid, clip.folder!, "空", rev());
     const snapshot = store.animation.capture(pid, clip.id);
     const trash = store.library.delete(pid, selection, rev());
@@ -192,8 +200,8 @@ test("batch deletion protects outside references and undo dependencies; trash re
     // Original directory conflict must not overwrite even an empty folder.
     reloaded.library.createFolder(
       pid,
-      "",
-      clip.folder!,
+      "动画",
+      clip.folder!.slice("动画/".length),
       reloaded.library.revision(pid),
     );
     assert.throws(
@@ -208,7 +216,7 @@ test("batch deletion protects outside references and undo dependencies; trash re
     reloaded.library.relocate(
       pid,
       folders(clip.folder!),
-      "",
+      "动画",
       reloaded.library.revision(pid),
       "保留目录",
     );
@@ -260,7 +268,7 @@ test("batch deletion protects outside references and undo dependencies; trash re
   }
 });
 
-test("legacy flat sidecars load without rewriting and organization rejects invalid names, descendants and active work", async () => {
+test("legacy flat sidecars are organized with original backups and organization rejects invalid names, descendants and active work", async () => {
   const { root, store, pid, sheet, rev } = await fixture();
   let reloaded: ProjectStore | undefined;
   try {
@@ -275,9 +283,24 @@ test("legacy flat sidecars load without rewriting and organization rejects inval
       file: legacyFile,
     });
     const bytes = readFileSync(store.safePath(pid, legacyMeta));
+    const project = { ...store.project(pid) };
+    delete project.resourceLayout;
+    atomicJson(join(store.dir(pid), "project.json"), project);
     store.worker.close();
     reloaded = new ProjectStore(join(root, "projects"));
-    assert.deepEqual(readFileSync(reloaded.safePath(pid, legacyMeta)), bytes);
+    const operation = JSON.parse(
+      readFileSync(
+        join(store.dir(pid), ".studio/resource-layout-operation.json"),
+        "utf8",
+      ),
+    );
+    assert.deepEqual(
+      readFileSync(
+        reloaded.safePath(pid, `${operation.backup}/${sheet.id}.meta.json`),
+      ),
+      bytes,
+    );
+    assert.equal(reloaded.image(pid, sheet.id).folder, "参考图");
     assert.equal(reloaded.image(pid, sheet.id).revision, sheet.revision);
     const duplicate = await reloaded.importImage(
       pid,
@@ -295,11 +318,30 @@ test("legacy flat sidecars load without rewriting and organization rejects inval
     const lib = reloaded.library,
       current = () => lib.revision(pid);
     for (const name of ["..", "CON", "folder.", "a/b", "a\\b", " bad"])
-      assert.throws(() => lib.createFolder(pid, "", name, current()));
-    lib.createFolder(pid, "", "角色", current());
-    lib.createFolder(pid, "角色", "动作", current());
+      assert.throws(() => lib.createFolder(pid, "参考图", name, current()));
     assert.throws(
-      () => lib.relocate(pid, folders("角色"), "角色/动作", current()),
+      () => lib.createFolder(pid, "", "自定义顶层", current()),
+      /分类/,
+    );
+    for (const category of ["参考图", "原图素材", "动画"])
+      assert.throws(
+        () => lib.delete(pid, folders(category), current()),
+        /固定分类/,
+      );
+    assert.throws(
+      () => lib.relocate(pid, assets(sheet.id), "原图素材", current()),
+      /同一资源分类/,
+    );
+    lib.createFolder(pid, "参考图", "角色", current());
+    lib.createFolder(pid, "参考图/角色", "动作", current());
+    assert.throws(
+      () =>
+        lib.relocate(
+          pid,
+          folders("参考图/角色"),
+          "参考图/角色/动作",
+          current(),
+        ),
       /自身或子目录/,
     );
     assert.throws(
@@ -323,12 +365,12 @@ test("legacy flat sidecars load without rewriting and organization rejects inval
         }),
     );
     assert.throws(
-      () => lib.relocate(pid, assets(sheet.id), "角色", current()),
+      () => lib.relocate(pid, assets(sheet.id), "参考图/角色", current()),
       /正在处理/,
     );
     release();
     await reading;
-    lib.relocate(pid, assets(sheet.id), "角色", current());
+    lib.relocate(pid, assets(sheet.id), "参考图/角色", current());
     assert.equal(reloaded.image(pid, sheet.id).revision, sheet.revision);
     assert.ok(existsSync(reloaded.imagePath(pid, sheet.id)));
   } finally {
@@ -342,7 +384,7 @@ test("unfinished directory moves roll back metadata and bytes on startup; commit
   let reloaded: ProjectStore | undefined;
   try {
     const oldFolder = clip.folder!,
-      newFolder = "中断移动",
+      newFolder = "动画/中断移动",
       original = store.assets(pid).filter((a) => a.folder === oldFolder);
     const writes = original.map((a) => {
       const oldMeta = store.metaPath(pid, a.id),
@@ -395,16 +437,16 @@ test("unfinished directory moves roll back metadata and bytes on startup; commit
     reloaded.library.relocate(
       pid,
       folders(oldFolder),
-      "",
+      "动画",
       reloaded.library.revision(pid),
       "已提交",
     );
     reloaded.library.recover(pid);
     reloaded.loadAssets(pid);
-    assert.equal(reloaded.asset(pid, clip.id).folder, "已提交");
+    assert.equal(reloaded.asset(pid, clip.id).folder, "动画/已提交");
     // Simulate a write failure after the file move; synchronous rollback restores the source.
     const source = reloaded.asset(pid, clip.frames[0]!.imageId),
-      destination = "Assets/回滚图片.png";
+      destination = "Assets/原图素材/回滚图片.png";
     const originalPath = reloaded.library.path.bind(reloaded.library);
     let failed = false;
     reloaded.library.path = (project, path) => {
@@ -425,7 +467,7 @@ test("unfinished directory moves roll back metadata and bytes on startup; commit
         reloaded!.library.relocate(
           pid,
           assets(source.id),
-          "",
+          "原图素材",
           reloaded!.library.revision(pid),
           "回滚图片.png",
         ),

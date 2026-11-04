@@ -39,6 +39,8 @@ import {
 } from "lucide-react";
 import {
   assetUrl,
+  categoryFolder,
+  folderCategory,
   type Asset,
   type ImageAsset,
   type ClipAsset,
@@ -98,7 +100,7 @@ export function App() {
     connected: false,
   });
   const [online, setOnline] = useState(false);
-  const [folder, setFolder] = useState("");
+  const [folder, setFolder] = useState("参考图");
   useEffect(() => {
     if (state?.project.id === projectId)
       localStorage.setItem(`studio.folder.${projectId}`, folder);
@@ -195,13 +197,16 @@ export function App() {
         : next,
     );
     if (initial) {
-      const storedFolder = localStorage.getItem(`studio.folder.${id}`) || "";
-      setFolder(next.folders.includes(storedFolder) ? storedFolder : "");
+      const storedFolder =
+        localStorage.getItem(`studio.folder.${id}`) || "参考图";
       const storedAsset = localStorage.getItem(`studio.asset.${id}`);
-      setSelectedId(
-        next.assets.some((asset) => asset.id === storedAsset)
-          ? storedAsset!
-          : next.assets[0]?.id || "",
+      const nextSelected =
+        next.assets.find((asset) => asset.id === storedAsset) || next.assets[0];
+      setSelectedId(nextSelected?.id || "");
+      setFolder(
+        next.folders.includes(storedFolder)
+          ? storedFolder
+          : nextSelected?.folder || "参考图",
       );
       const storedSession = localStorage.getItem(`studio.session.${id}`);
       const nextSession = next.sessions.some(
@@ -460,13 +465,14 @@ export function App() {
     setComparison(null);
     files = Array.from(files);
     const originalProject = projectId;
+    const kind = folderCategory(folder) === "参考图" ? "reference" : "image";
     await run("正在导入图片", async () => {
       let latest = "";
       for (const file of Array.from(files)) {
         const body = new FormData();
         body.append("file", file);
         const asset = await api<ImageAsset>(
-          `/api/projects/${originalProject}/import?kind=reference&folder=${encodeURIComponent(folder)}`,
+          `/api/projects/${originalProject}/import?kind=${kind}&folder=${encodeURIComponent(folder)}`,
           { method: "POST", body },
         );
         latest = asset.id;
@@ -1755,9 +1761,9 @@ export function App() {
               </div>
               <p
                 className="composer-note generation-location"
-                title={`资源${folder ? "/" + folder : ""}`}
+                title={`资源/${categoryFolder("原图素材", folder)}`}
               >
-                生成位置：资源{folder ? "/" + folder : ""} · 原图保留
+                生成位置：{categoryFolder("原图素材", folder)} · 原图保留
               </p>
             </div>
           </aside>

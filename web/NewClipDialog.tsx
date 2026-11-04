@@ -2,6 +2,7 @@ import { useState } from "react";
 import { X, Film, LoaderCircle } from "lucide-react";
 import {
   assetUrl,
+  categoryFolder,
   type Asset,
   type ImageAsset,
   type ClipAsset,
@@ -115,7 +116,7 @@ export function NewClipDialog({
           </button>
         </div>
         <p>选择相同画布的两张静态图片，创建后可在“首尾补帧”中生成过渡。</p>
-        <p>保存到：资源{folder ? "/" + folder : ""}</p>
+        <p>保存到：{categoryFolder("动画", folder)}</p>
         <label>
           动画名称
           <input

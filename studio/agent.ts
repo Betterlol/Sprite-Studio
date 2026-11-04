@@ -261,7 +261,11 @@ export class AgentHub {
       this.store.animation.reference(session.projectId, input),
     );
     session.status = "starting";
-    session.outputFolder = outputFolder;
+    session.outputFolder = this.store.library.destination(
+      session.projectId,
+      "原图素材",
+      outputFolder,
+    );
     session.error = undefined;
     session.prompt = undefined;
     session.activities = [];

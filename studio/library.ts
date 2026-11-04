@@ -17,6 +17,12 @@ import type {
   LibrarySelection,
   TrashEntry,
 } from "./model.ts";
+import {
+  categoryFolder,
+  folderCategory,
+  resourceCategory,
+  type ResourceCategory,
+} from "./model.ts";
 
 type Move = { from: string; to: string };
 type Journal = {
@@ -83,6 +89,17 @@ export class ResourceLibrary {
     };
     visit("");
     return folders.sort((a, b) => a.localeCompare(b, "zh-CN"));
+  }
+  destination(pid: string, category: ResourceCategory, source = "") {
+    this.folder(pid, source);
+    const folder = categoryFolder(category, source);
+    mkdirSync(this.path(pid, `Assets/${folder}`), { recursive: true });
+    return this.folder(pid, folder);
+  }
+  private managedFolder(pid: string, folder: string) {
+    this.folder(pid, folder);
+    if (!folderCategory(folder))
+      throw new StudioError("请在参考图、原图素材或动画分类内管理目录");
   }
   revision(pid: string) {
     return sha256(
@@ -271,7 +288,7 @@ export class ResourceLibrary {
   }
   createFolder(pid: string, parent: string, name: string, expected: string) {
     this.assertIdle(pid, expected);
-    this.folder(pid, parent);
+    this.managedFolder(pid, parent);
     entryName(name);
     this.collision(pid, parent, name);
     const folder = parent ? `${parent}/${name}` : name;
@@ -301,7 +318,8 @@ export class ResourceLibrary {
     const roots = [...new Set(selection.folders)]
       .map((f) => this.folder(pid, f))
       .sort((a, b) => a.length - b.length);
-    if (roots.includes("")) throw new StudioError("不能移动或删除资源根目录");
+    if (roots.some((root) => !root || folderCategory(root) === root))
+      throw new StudioError("不能移动、重命名或删除资源根目录及固定分类");
     const folders = roots.filter(
       (f, index) => !roots.slice(0, index).some((root) => within(f, root)),
     );
@@ -333,8 +351,17 @@ export class ResourceLibrary {
     newName?: string,
   ) {
     this.assertIdle(pid, expected);
-    this.folder(pid, target);
+    this.managedFolder(pid, target);
     const chosen = this.selected(pid, selection);
+    if (
+      chosen.folders.some(
+        (folder) => folderCategory(folder) !== folderCategory(target),
+      ) ||
+      chosen.direct.some(
+        (asset) => resourceCategory(asset) !== folderCategory(target),
+      )
+    )
+      throw new StudioError("请在同一资源分类内移动，图片与动画通过引用关联");
     if (newName && chosen.folders.length + chosen.direct.length !== 1)
       throw new StudioError("每次只能重命名一个项目");
     const moves: Move[] = [],
@@ -484,6 +511,7 @@ export class ResourceLibrary {
       for (const path of [asset.file!, this.store.metaPath(pid, asset.id)])
         roots.push({ from: path, to: prefix + path.slice(7) });
     const entry: TrashEntry = {
+      resourceLayout: 1,
       id,
       label:
         chosen.folders.length === 1 && !chosen.direct.length
@@ -506,6 +534,7 @@ export class ResourceLibrary {
     this.assertIdle(pid, expected);
     const entry = this.trash(pid).find((e) => e.id === id);
     if (!entry) throw new StudioError("回收站记录不存在或已恢复", 404);
+    if (!entry.resourceLayout) return this.restoreLegacy(pid, entry);
     const ids = new Set(entry.assets.map((a) => a.id));
     for (const asset of entry.assets) {
       if (this.store.indexes.get(pid)?.has(asset.id))
@@ -532,5 +561,83 @@ export class ResourceLibrary {
       ],
     );
     return entry.assets.map((a) => a.id);
+  }
+  private restoreLegacy(pid: string, entry: TrashEntry) {
+    const restored = entry.assets.map((asset) => {
+      const root = resourceCategory(
+        asset.type === "image"
+          ? {
+              ...asset,
+              kind:
+                asset.kind ||
+                ((asset as any).role === "reference" ? "reference" : "image"),
+            }
+          : asset,
+      );
+      return {
+        ...asset,
+        ...(asset.type === "image"
+          ? {
+              kind:
+                root === "参考图" ? ("reference" as const) : ("image" as const),
+            }
+          : {}),
+        folder: root + (asset.folder ? "/" + asset.folder : ""),
+        file: `Assets/${root}/${asset.file!.slice(7)}`,
+      };
+    });
+    const ids = new Set(restored.map((asset) => asset.id));
+    for (const asset of restored) {
+      if (this.store.indexes.get(pid)?.has(asset.id))
+        throw new StudioError("资源身份已存在，无法恢复覆盖", 409);
+      if (
+        asset.type === "clip" &&
+        asset.frames.some(
+          (frame) =>
+            !ids.has(frame.imageId) &&
+            !this.store.indexes.get(pid)?.has(frame.imageId),
+        )
+      )
+        throw new StudioError("请先恢复此动画使用的图片，再恢复动画", 409);
+      if (existsSync(this.path(pid, `Assets/${asset.folder}`)))
+        this.collision(pid, asset.folder!, asset.name);
+    }
+    const moves: Move[] = [],
+      values: { path: string; value: unknown; beforePath?: string }[] = [],
+      directories: string[] = [];
+    const files = new Map(
+      entry.assets.map((asset, i) => [asset.file!, restored[i]!.file!]),
+    );
+    const visit = (from: string, original: string) => {
+      if (lstatSync(this.path(pid, from)).isDirectory()) {
+        const children = readdirSync(this.path(pid, from));
+        if (!children.length)
+          directories.push(`Assets/原图素材/${original.slice(7)}`);
+        for (const child of children)
+          visit(`${from}/${child}`, `${original}/${child}`);
+        return;
+      }
+      let to = files.get(original) || `Assets/原图素材/${original.slice(7)}`;
+      if (original.endsWith(".meta.json")) {
+        const metadata = JSON.parse(readFileSync(this.path(pid, from), "utf8")),
+          asset = restored.find((a) => a.id === metadata.id);
+        if (asset) {
+          to = `Assets/${resourceCategory(asset)}/${original.slice(7)}`;
+          values.push({
+            path: to,
+            beforePath: from,
+            value: { ...metadata, folder: asset.folder, file: asset.file },
+          });
+        }
+      }
+      moves.push({ from, to });
+    };
+    for (const root of entry.roots) visit(root.to, root.from);
+    values.push({
+      path: `.studio/trash/${entry.id}/entry.json`,
+      value: { ...entry, status: "restored" },
+    });
+    this.transaction(pid, moves, values, directories);
+    return restored.map((asset) => asset.id);
   }
 }

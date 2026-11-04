@@ -430,7 +430,7 @@ export class ResourceLibrary {
       )
         blockers.push({
           name: this.store.asset(pid, change.clipId).name,
-          reason: "已采纳修正的撤回仍需要所选图片",
+          reason: "修改历史的撤回仍需要所选图片",
         });
     }
     for (const job of this.store.interpolations.list(pid)) {
@@ -441,17 +441,14 @@ export class ResourceLibrary {
       )
         continue;
       if (
-        [
-          job.sheetId,
-          job.prepared?.clipId,
-          job.start.imageId,
-          job.end.imageId,
-        ].some((id) => id && ids.has(id))
+        [job.sheetId, job.start.imageId, job.end.imageId].some(
+          (id) => id && ids.has(id),
+        )
       )
         blockers.push({
           name:
             this.store.indexes.get(pid)?.get(job.clipId)?.name || "补帧任务",
-          reason: "待采纳的补帧任务仍需要所选资源",
+          reason: "未完成的补帧任务仍需要所选资源",
         });
     }
     return { selection, assetIds: [...ids], folders: chosen.folders, blockers };

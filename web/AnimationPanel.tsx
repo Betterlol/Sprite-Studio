@@ -33,26 +33,16 @@ type Props = {
   onPreview: (id: string) => void;
 };
 const labels = {
-  draft: "待采纳",
-  applied: "已采纳",
+  pending: "正在修改",
+  applied: "已修改",
   reverted: "已撤回",
-  discarded: "已放弃",
+  archived: "历史记录",
 };
 export function AnimationPanel(props: Props) {
   const { projectId, clip, assets, reviews, changes } = props;
-  const baseId =
-    changes.find((change) => change.candidateClipId === clip.id)?.clipId ||
-    clip.id;
-  const related = changes.filter(
-      (change) =>
-        change.clipId === baseId &&
-        assets.some((asset) => asset.id === change.candidateClipId),
-    ),
-    clipIds = new Set([
-      baseId,
-      ...related.map((change) => change.candidateClipId),
-    ]);
-  const evidence = reviews.filter((review) => clipIds.has(review.clipId));
+  const baseId = clip.id;
+  const related = changes.filter((change) => change.clipId === clip.id);
+  const evidence = reviews.filter((review) => review.clipId === clip.id);
   const [start, setStart] = useState(0),
     [end, setEnd] = useState(Math.min(clip.frames.length - 1, 15));
   const [reviewId, setReviewId] = useState(""),
@@ -77,12 +67,7 @@ export function AnimationPanel(props: Props) {
     )
       setChangeId(props.focusChangeId);
   }, [props.focusChangeId]);
-  const base = assets.find((asset) => asset.id === change?.clipId) as
-      | ClipAsset
-      | undefined,
-    candidate = assets.find((asset) => asset.id === change?.candidateClipId) as
-      | ClipAsset
-      | undefined;
+  const base = clip;
   const mounted = useRef(true);
   useEffect(
     () => () => {
@@ -196,7 +181,7 @@ export function AnimationPanel(props: Props) {
             >
               {evidence.map((item) => (
                 <option key={item.id} value={item.id}>
-                  {item.clipId === baseId ? "原版" : "候选"} · 第{" "}
+                  {item.clipId === baseId ? "当前动画" : "历史动画"} · 第{" "}
                   {item.frames[0]!.index + 1}–{item.frames.at(-1)!.index + 1} 帧
                   {item.stale ? " · 已过期" : ""}
                 </option>
@@ -258,10 +243,10 @@ export function AnimationPanel(props: Props) {
           </p>
         </div>
       )}
-      {change && candidate && base && (
+      {change && (
         <div className="frame-change">
           <div className="review-heading">
-            <strong>单帧修正</strong>
+            <strong>修改历史</strong>
             <select
               aria-label="单帧修改记录"
               value={change.id}
@@ -269,14 +254,9 @@ export function AnimationPanel(props: Props) {
             >
               {related.map((item) => (
                 <option key={item.id} value={item.id}>
-                  {labels[item.status]} · 第{" "}
-                  {(
-                    assets.find(
-                      (asset) => asset.id === item.candidateClipId,
-                    ) as ClipAsset | undefined
-                  )?.frames.findIndex((frame) => frame.id === item.frameId)! +
-                    1}{" "}
-                  帧 · {item.source === "agent" ? "助手" : "手动"}
+                  {labels[item.status]} ·{" "}
+                  {new Date(item.createdAt).toLocaleTimeString("zh-CN")} ·{" "}
+                  {item.source === "agent" ? "助手" : "手动"}
                 </option>
               ))}
             </select>
@@ -284,7 +264,9 @@ export function AnimationPanel(props: Props) {
           <div className="change-actions">
             <button
               className="secondary"
-              disabled={!!operation}
+              disabled={
+                !!operation || (!change.afterSnapshotId && !change.legacyClipId)
+              }
               onClick={() =>
                 void run("载入对比", () => props.onCompare(change.id))
               }
@@ -292,54 +274,6 @@ export function AnimationPanel(props: Props) {
               <Play size={14} />
               播放修改前后对比
             </button>
-            <button
-              className="text-button"
-              onClick={() => props.onPreview(candidate.id)}
-            >
-              查看候选动画
-            </button>
-            {change.status === "draft" && (
-              <>
-                <button
-                  className="primary"
-                  disabled={!!operation}
-                  onClick={() =>
-                    void run("采纳修改", async () => {
-                      const result = await api<ClipAsset>(
-                        `/api/projects/${projectId}/frame-changes/${change.id}/apply`,
-                        {
-                          method: "POST",
-                          body: JSON.stringify({
-                            candidateRevision: candidate.revision,
-                          }),
-                        },
-                      );
-                      await props.onRefresh();
-                      if (mounted.current) props.onPreview(result.id);
-                    })
-                  }
-                >
-                  <Check size={14} />
-                  采纳此修改
-                </button>
-                <button
-                  className="text-button"
-                  disabled={!!operation}
-                  onClick={() =>
-                    void run("放弃候选", async () => {
-                      await api(
-                        `/api/projects/${projectId}/frame-changes/${change.id}/discard`,
-                        { method: "POST" },
-                      );
-                      await props.onRefresh();
-                    })
-                  }
-                >
-                  <X size={13} />
-                  放弃候选
-                </button>
-              </>
-            )}
             {change.status === "applied" && (
               <button
                 className="secondary"
@@ -354,28 +288,24 @@ export function AnimationPanel(props: Props) {
                       },
                     );
                     await props.onRefresh();
-                    if (mounted.current) props.onPreview(result.id);
+                    if (mounted.current)
+                      props.onFrame(result.id, change.frameId);
                   })
                 }
               >
                 <Undo2 size={14} />
-                撤回此次采纳
+                撤回此次修改
               </button>
             )}
             {change.status === "reverted" && (
-              <span className="review-note">
-                本次采纳已撤回，原帧与时长已恢复；候选仍保留。
-              </span>
+              <span className="review-note">此次修改已撤回。</span>
             )}
           </div>
-          <p className="review-note">
-            采纳以当前候选的已保存修改为准；撤回只作用于本次采纳的目标动画。
-          </p>
         </div>
       )}
       {!review && !change && (
         <p className="review-note">
-          检查一段动画，或引用给助手定位问题。调整只生成候选，确认采纳后才改变原动画。
+          检查动画或引用给助手。调整会直接更新当前动画，并保留比较与撤回记录。
         </p>
       )}
       {error && (

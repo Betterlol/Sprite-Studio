@@ -53,7 +53,7 @@ test("image operations preserve sources, frame identity and revision conflicts a
       image.revision,
       { scale: 0.5, offsetX: 2 },
     );
-    assert.equal(variant.role, "candidate");
+    assert.equal(variant.kind, "image");
     assert.equal(variant.origin?.assetId, image.id);
     assert.notEqual(variant.contentHash, image.contentHash);
     assert.equal(
@@ -165,7 +165,7 @@ test("worker rejects paths outside its data root and refuses accidental clipping
       source.revision,
       { offsetX: 4, clip: true },
     );
-    assert.equal(clipped.role, "candidate");
+    assert.equal(clipped.kind, "image");
   } finally {
     store.worker.close();
   }

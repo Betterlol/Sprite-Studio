@@ -5,10 +5,10 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { ProjectStore } from "./store.ts";
+import { ProjectStore, atomicJson } from "./store.ts";
 import type { ClipAsset } from "./model.ts";
 const pythonExecutable = process.env.SPRITE_STUDIO_PYTHON || "python";
-
+const layout = { columns: 2, rows: 2, includesEndpoints: true, fps: 8 };
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(), "sprite-interpolation-")),
     file = join(root, "grid.png");
@@ -47,173 +47,129 @@ async function fixture() {
   return { root, store, pid: project.id, sheet, clip, spec };
 }
 
-test("endpoint interpolation previews retain original endpoints and apply exactly once across recovery", async () => {
-  const { store, pid, sheet, clip: sourceClip, spec } = await fixture();
-  const clip = store.createClip(pid, "带区间外帧的动画", [
-    {
-      id: randomUUID(),
-      imageId: sourceClip.frames[0]!.imageId,
-      durationUs: 300000,
-    },
-    ...sourceClip.frames,
-    {
-      id: randomUUID(),
-      imageId: sourceClip.frames[3]!.imageId,
-      durationUs: 400000,
-    },
-  ]);
-  spec.clipId = clip.id;
-  spec.revision = clip.revision;
+test("one insertion directly updates the original animation, preserves endpoints and survives retries/restart", async () => {
+  const { root, store, pid, sheet, clip, spec } = await fixture();
+  let restored: ProjectStore | undefined;
   try {
     const job = store.interpolations.create(pid, spec);
-    assert.equal(store.interpolations.create(pid, spec).id, job.id);
-    assert.equal(store.sessions.size, 1);
     store.interpolations.receive(pid, job.id, sheet.id, {
-      id: "actual-event",
+      id: "fixture",
       inputImages: [
         { sha256: job.start.contentHash },
         { sha256: job.end.contentHash },
       ],
     });
+    assert.equal(job.status, "generated");
     assert.equal(job.referencesVerified, true);
-    await assert.rejects(
-      async () =>
-        store.interpolations.prepare(pid, job.id, {
-          columns: 3,
-          rows: 1,
-          includesEndpoints: true,
-          fps: 8,
-        }),
-      /网格数量/,
-    );
-    const layout = { columns: 2, rows: 2, includesEndpoints: true, fps: 8 };
-    const [prepared, duplicate] = await Promise.all([
-      store.interpolations.prepare(pid, job.id, layout),
-      store.interpolations.prepare(pid, job.id, layout),
+    const assets = store.assets(pid).length;
+    const [updated, repeated] = await Promise.all([
+      store.interpolations.insert(pid, job.id, layout),
+      store.interpolations.insert(pid, job.id, layout),
     ]);
-    assert.equal(prepared.prepared!.clipId, duplicate.prepared!.clipId);
-    assert.equal(store.asset(pid, clip.id).revision, clip.revision);
-    const preview = store.asset(pid, prepared.prepared!.clipId) as ClipAsset;
-    assert.deepEqual(preview.frames[0], clip.frames[0]);
-    assert.deepEqual(preview.frames[1], clip.frames[1]);
-    assert.deepEqual(preview.frames[4], clip.frames[4]);
-    assert.deepEqual(preview.frames[5], clip.frames[5]);
-    assert.equal(preview.frames[2]!.durationUs, 125000);
-    assert.notEqual(preview.frames[2]!.imageId, clip.frames[2]!.imageId);
-    const pixels = spawnSync(
-      pythonExecutable,
-      [
-        "-c",
-        "from PIL import Image; import sys,json; print(json.dumps([Image.open(p).getpixel((16,16)) for p in sys.argv[1:]]))",
-        ...preview.frames.map((f) => store.imagePath(pid, f.imageId)),
-      ],
-      { windowsHide: true },
+    assert.equal(updated.id, clip.id);
+    assert.deepEqual(updated.frames, repeated.frames);
+    assert.equal(store.assets(pid).length, assets + 2);
+    assert.equal(store.assets(pid).filter((a) => a.type === "clip").length, 1);
+    assert.deepEqual(updated.frames[0], clip.frames[0]);
+    assert.deepEqual(updated.frames.at(-1), clip.frames.at(-1));
+    assert.deepEqual(
+      updated.frames.slice(1, -1).map((f) => f.durationUs),
+      [125000, 125000],
     );
-    assert.deepEqual(JSON.parse(pixels.stdout.toString()), [
-      [255, 0, 0, 255],
-      [255, 0, 0, 255],
-      [0, 128, 0, 255],
-      [0, 0, 255, 255],
-      [255, 255, 0, 255],
-      [255, 255, 0, 255],
-    ]);
-    const applied = store.interpolations.apply(pid, job.id);
-    assert.deepEqual(applied.frames, preview.frames);
     assert.equal(
-      store.interpolations.apply(pid, job.id).revision,
-      applied.revision,
+      (await store.interpolations.insert(pid, job.id, layout)).revision,
+      updated.revision,
     );
-    // Simulate a process loss after the clip commit but before the job status write.
-    writeFileSync(
+    assert.deepEqual(
+      store.animation.snapshot(pid, job.beforeSnapshotId!).clip.frames,
+      clip.frames,
+    );
+    assert.deepEqual(
+      store.animation.snapshot(pid, job.afterSnapshotId!).clip.frames,
+      updated.frames,
+    );
+    atomicJson(
       join(store.dir(pid), ".studio", "interpolations", `${job.id}.json`),
-      JSON.stringify({ ...job, status: "preview" }),
+      { ...job, status: "generated" },
     );
-    const restored = new ProjectStore(store.root);
-    try {
-      assert.equal(restored.interpolations.get(pid, job.id).status, "applied");
-      assert.deepEqual(
-        restored.interpolations.apply(pid, job.id).frames,
-        applied.frames,
-      );
-      assert.equal(
-        restored.assets(pid).filter((a) => a.type === "image").length,
-        7,
-      );
-    } finally {
-      restored.worker.close();
-    }
+    store.worker.close();
+    restored = new ProjectStore(join(root, "projects"));
+    assert.equal(restored.interpolations.get(pid, job.id).status, "applied");
+    assert.deepEqual(
+      (await restored.interpolations.insert(pid, job.id, layout)).frames,
+      updated.frames,
+    );
+    assert.ok(
+      readFileSync((await restored.exportClip(pid, clip.id)).path).length > 20,
+    );
   } finally {
     store.worker.close();
+    restored?.worker.close();
   }
 });
-
-test("changed animation and edited previews cannot be silently applied; missing reference evidence stays explicit", async () => {
+test("layout, live image and animation version checks protect direct insertion", async () => {
   const { store, pid, sheet, clip, spec } = await fixture();
   try {
-    assert.throws(
-      () =>
-        store.interpolations.create(pid, {
-          ...spec,
-          startFrameId: spec.endFrameId,
-          endFrameId: spec.startFrameId,
-        }),
-      /尾帧必须/,
-    );
     const job = store.interpolations.create(pid, spec);
     store.interpolations.receive(pid, job.id, sheet.id, {
-      id: "incomplete-event",
-      inputImages: [{ sha256: job.start.contentHash }],
+      id: "fixture",
+      inputImages: [],
     });
     assert.equal(job.referencesVerified, false);
-    assert.match(job.error!, /没有确认/);
-    const layout = { columns: 2, rows: 2, includesEndpoints: true, fps: 8 };
-    await store.interpolations.prepare(pid, job.id, layout);
-    const preview = store.asset(pid, job.prepared!.clipId) as ClipAsset;
-    const candidatePath = store.imagePath(pid, preview.frames[1]!.imageId),
-      candidateBytes = readFileSync(candidatePath);
-    writeFileSync(candidatePath, Buffer.from("externally modified candidate"));
+    assert.ok(job.error?.includes("未确认") || job.error?.includes("没有确认"));
     assert.throws(
-      () => store.interpolations.apply(pid, job.id),
-      /图片已被外部修改/,
+      () => store.interpolations.insert(pid, job.id, { ...layout, columns: 1 }),
+      /网格数量/,
     );
-    writeFileSync(candidatePath, candidateBytes);
-    store.updateClip(pid, preview.id, {
-      revision: preview.revision,
-      frames: preview.frames,
-      loop: false,
-    });
-    assert.throws(
-      () => store.interpolations.apply(pid, job.id),
-      /预览动画已修改/,
-    );
-    await store.interpolations.prepare(pid, job.id, layout);
-    store.updateClip(pid, clip.id, {
-      revision: clip.revision,
-      frames: clip.frames,
-      loop: false,
-    });
-    assert.throws(
-      () => store.interpolations.apply(pid, job.id),
-      /原动画已修改/,
-    );
+    const path = store.imagePath(pid, sheet.id),
+      bytes = readFileSync(path);
+    writeFileSync(path, Buffer.from("external modification"));
     await assert.rejects(
-      async () => store.interpolations.prepare(pid, job.id, layout),
+      store.interpolations.insert(pid, job.id, layout),
+      /外部修改/,
+    );
+    writeFileSync(path, bytes);
+    const edited = store.updateClip(pid, clip.id, {
+      revision: clip.revision,
+      loop: clip.loop,
+      frames: clip.frames.map((f, i) =>
+        i === 0 ? { ...f, durationUs: 150000 } : f,
+      ),
+    });
+    assert.throws(
+      () => store.interpolations.insert(pid, job.id, layout),
       /原动画已修改/,
     );
+    assert.equal(store.asset(pid, clip.id).revision, edited.revision);
   } finally {
     store.worker.close();
   }
 });
-
-test('explicitly reviewed middle-frame edits can be adopted while original endpoints remain protected',async()=>{
- const {store,pid,sheet,clip,spec}=await fixture();try{
-  const job=store.interpolations.create(pid,spec);store.interpolations.receive(pid,job.id,sheet.id,{id:'event'});
-  await store.interpolations.prepare(pid,job.id,{columns:2,rows:2,includesEndpoints:true,fps:8});
-  let preview=store.asset(pid,job.prepared!.clipId) as ClipAsset;
-  const invalid=store.updateClip(pid,preview.id,{revision:preview.revision,frames:preview.frames.map((frame,i)=>i===0?{...frame,durationUs:150000}:frame),loop:preview.loop});
-  assert.throws(()=>store.interpolations.apply(pid,job.id,invalid.revision),/必须保留原首尾/);
-  preview=store.updateClip(pid,preview.id,{revision:invalid.revision,frames:preview.frames.map((frame,i)=>i===1?{...frame,durationUs:175000}:frame),loop:preview.loop});
-  assert.throws(()=>store.interpolations.apply(pid,job.id),/预览动画已修改/);
-  const applied=store.interpolations.apply(pid,job.id,preview.revision);assert.equal(applied.frames[1]!.durationUs,175000);assert.deepEqual(applied.frames[0],clip.frames[0]);assert.deepEqual(applied.frames.at(-1),clip.frames.at(-1));
- }finally{store.worker.close();}
+test("a concurrent edit during image processing is retained and insertion refuses to overwrite it", async () => {
+  const { store, pid, sheet, clip, spec } = await fixture();
+  try {
+    const job = store.interpolations.create(pid, spec);
+    store.interpolations.receive(pid, job.id, sheet.id, { id: "fixture" });
+    const count = store.assets(pid).length,
+      pending = store.interpolations.insert(pid, job.id, layout);
+    assert.throws(
+      () =>
+        store.interpolations.insert(pid, job.id, {
+          ...layout,
+          columns: 4,
+          rows: 1,
+        }),
+      /正在处理/,
+    );
+    const edited = store.updateClip(pid, clip.id, {
+      revision: clip.revision,
+      loop: false,
+      frames: clip.frames,
+    });
+    await assert.rejects(pending, /原动画已修改/);
+    assert.equal(store.asset(pid, clip.id).revision, edited.revision);
+    assert.equal(store.assets(pid).length, count);
+  } finally {
+    store.worker.close();
+  }
 });

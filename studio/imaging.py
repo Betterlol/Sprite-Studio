@@ -102,7 +102,7 @@ def run(method, params):
                 result.append(str(target))
         return {'files': result}
     if method == 'transform':
-        if count != 1: raise ValueError('目前仅对静态帧生成调整候选')
+        if count != 1: raise ValueError('目前仅支持调整静态图片')
         spec = params['transform']
         scale = float(spec.get('scale', 1))
         width, height = int(spec.get('width', image.width)), int(spec.get('height', image.height))

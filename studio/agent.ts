@@ -133,7 +133,7 @@ export class AgentHub {
         'mcp_servers.sprite_studio.env_vars=["SPRITE_STUDIO_TOOL_TOKEN"]',
         'mcp_servers.sprite_studio.tools.slice_sheet.approval_mode="approve"',
         'mcp_servers.sprite_studio.tools.adjust_image.approval_mode="approve"',
-        'mcp_servers.sprite_studio.tools.stage_frame_adjustment.approval_mode="approve"',
+        'mcp_servers.sprite_studio.tools.adjust_frame.approval_mode="approve"',
       ],
       this.disabled,
       undefined,
@@ -158,10 +158,10 @@ export class AgentHub {
         sandbox: "workspace-write",
         approvalPolicy: "on-request",
         developerInstructions:
-          "你是 Sprite Studio 中的精灵图制作助手，使用中文交流。只操作当前项目提供的资源工具。先用 list_assets 查找稳定资源 ID，再用 view_image 查看真实图片。位置、尺寸调整使用 adjust_image，规则网格切割使用 slice_sheet，不要通过图片生成替代确定性处理。需要生成/重绘时必须使用内置 image_gen，并实际提供用户引用的参考图，每次用户请求默认最多生成一个候选；没有明确要求生成就不要生成。输出图会自动作为候选出现在资源区，不覆盖原图。你可以在当前任务目录中准备临时文件，但不要探索其他文件、运行程序、安装依赖或使用其他服务。不要声称已经验收动画连贯性；目前可以看静态图、播放编排和逐帧信息，动态评估需结合用户实际观看。工具受限时如实说明，不伪造成果。用户消息中的“资源引用”给出身份、版本与快照路径，引用图片才是视觉输入。",
+          "你是 Sprite Studio 中的精灵图制作助手，使用中文交流。只操作当前项目提供的资源工具。先用 list_assets 查找稳定资源 ID，再用 view_image 查看真实图片。位置、尺寸调整使用 adjust_image，规则网格切割使用 slice_sheet，不要通过图片生成替代确定性处理。需要生成/重绘时必须使用内置 image_gen，并实际提供用户引用的参考图，每次用户请求默认最多生成一张图片；没有明确要求生成就不要生成。输出图会自动保存到资源区，可以直接使用，原始图片保留。你可以在当前任务目录中准备临时文件，但不要探索其他文件、运行程序、安装依赖或使用其他服务。不要声称已经验收动画连贯性；目前可以看静态图、播放编排和逐帧信息，动态评估需结合用户实际观看。工具受限时如实说明，不伪造成果。用户消息中的“资源引用”给出身份、版本与快照路径，引用图片才是视觉输入。",
       };
       params.developerInstructions +=
-        "动画引用含 snapshotId、clipId、版本、帧实例和时长。检查动画必须调用 inspect_clip 查看实际逐帧和相邻叠图证据；每次最多16帧，需要时分区间。单帧大小、位置、时长修正用 stage_frame_adjustment，只准备候选，交给用户在网页对比采纳或撤回。不要改动其他帧实例，不用生成图片替代确定性修正。边界框变化只是线索，不能把有意运动自动拉平。向用户使用第几帧交流，UUID只在工具调用中使用。静态图和叠图不代表你已观看真实速度播放，不可声称动态验收通过。";
+        "动画引用含 snapshotId、clipId、版本、帧实例和时长。检查动画必须调用 inspect_clip 查看实际逐帧和相邻叠图证据；每次最多16帧，需要时分区间。单帧大小、位置、时长修正用 adjust_frame，明确要求的修改直接更新目标动画，返回的修改记录支持比较与撤回。不要改动其他帧实例，不用生成图片替代确定性修正。边界框变化只是线索，不能把有意运动自动拉平。向用户使用第几帧交流，UUID只在工具调用中使用。静态图和叠图不代表你已观看真实速度播放，不可声称动态验收通过。";
       const result = session.threadId
         ? await client.request("thread/resume", {
             ...params,
@@ -383,7 +383,7 @@ export class AgentHub {
         slice_sheet: "切割图集",
         adjust_image: "调整图片",
         inspect_clip: "检查动画证据",
-        stage_frame_adjustment: "准备单帧修正",
+        adjust_frame: "修改动画帧",
       };
       const status =
         message.method === "item/started"
@@ -395,7 +395,7 @@ export class AgentHub {
         id: item.id,
         label:
           item.type === "imageGeneration"
-            ? "生成候选图片"
+            ? "生成图片"
             : names[item.tool] || item.tool,
         status,
         detail: item.error?.message || item.failure?.message,
@@ -464,9 +464,9 @@ export class AgentHub {
         throw new Error("生成结果超出当前单图上限");
       const asset = await this.store.importImage(
         session.projectId,
-        `生成候选-${new Date().toLocaleTimeString("zh-CN", { hour12: false }).replaceAll(":", "")}.png`,
+        `生成图片-${session.title.slice(0, 24)}.png`,
         readFileSync(item.savedPath),
-        "candidate",
+        "image",
         { kind: "generation", runId: session.turnId, interpolationId: job?.id },
         job
           ? this.store.asset(session.projectId, job.clipId).folder || ""
@@ -638,48 +638,41 @@ export class AgentHub {
       attach("reviewIds", review.id);
       return { content: evidence(review) };
     }
-    if (name === "stage_frame_adjustment") {
-      const change = await this.store.animation.propose(
+    if (name === "adjust_frame") {
+      const change = await this.store.animation.adjust(
         pid,
         { ...input, requestId: input.requestId || randomUUID() },
         "agent",
       );
       attach("changeIds", change.id);
-      const candidate = this.store.animation.clip(pid, change.candidateClipId),
-        index = candidate.frames.findIndex(
-          (frame) => frame.id === change.frameId,
-        ),
-        start = candidate.frames[Math.max(0, index - 1)]!.id,
-        end =
-          candidate.frames[Math.min(candidate.frames.length - 1, index + 1)]!
-            .id;
-      const before = await this.store.animation.inspect(pid, {
-          snapshotId: change.baseSnapshotId,
-          startFrameId: start,
-          endFrameId: end,
+      const snapshots = this.store.animation.compare(pid, change.id),
+        before = await this.store.animation.inspect(pid, {
+          snapshotId: snapshots.before.id,
+          startFrameId: change.frameId,
+          endFrameId: change.frameId,
         }),
         after = await this.store.animation.inspect(pid, {
-          clipId: candidate.id,
-          revision: candidate.revision,
-          startFrameId: start,
-          endFrameId: end,
+          snapshotId: snapshots.after.id,
+          startFrameId: change.frameId,
+          endFrameId: change.frameId,
         });
       return {
         content: [
           textContent(
             JSON.stringify({
               change,
-              candidateRevision: candidate.revision,
-              requiresHumanAdoption: true,
+              applied: true,
+              clipRevision: snapshots.after.clip.revision,
             }),
           ),
-          textContent("Before correction"),
+          textContent("Before modification"),
           ...evidence(before).slice(0, 2),
-          textContent("Candidate after correction"),
+          textContent("After modification"),
           ...evidence(after).slice(0, 2),
         ],
       };
     }
+
     if (name === "list_assets")
       return {
         content: [
@@ -691,7 +684,7 @@ export class AgentHub {
                       id: asset.id,
                       name: asset.name,
                       folder: asset.folder || "",
-                      role: asset.role,
+                      kind: asset.kind,
                       width: asset.width,
                       height: asset.height,
                       revision: asset.revision,
@@ -740,7 +733,7 @@ export class AgentHub {
             JSON.stringify({
               id: result.id,
               name: result.name,
-              role: result.role,
+              kind: result.kind,
             }),
           ),
           {

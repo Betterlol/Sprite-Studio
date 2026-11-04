@@ -31,8 +31,7 @@ type Props = {
 };
 const labels = {
   running: "正在生成",
-  candidate: "候选待检查",
-  preview: "预览待确认",
+  generated: "图集已生成",
   applied: "已加入动画",
   failed: "生成未完成",
   interrupted: "任务已停止",
@@ -100,10 +99,10 @@ export function InterpolationPanel(props: Props) {
       `studio.interpolation.${projectId}.${clip.id}`,
       job.id,
     );
-    setColumns(job.prepared?.spec.columns || job.columns);
-    setRows(job.prepared?.spec.rows || job.rows);
-    setIncludesEndpoints(job.prepared?.spec.includesEndpoints ?? true);
-    setLayoutFps(job.prepared?.spec.fps || job.fps);
+    setColumns(job.columns);
+    setRows(job.rows);
+    setIncludesEndpoints(true);
+    setLayoutFps(job.fps);
     setError("");
   }, [job?.id]);
   useEffect(() => {
@@ -148,15 +147,11 @@ export function InterpolationPanel(props: Props) {
   }
   const layoutMatches =
     !!job && columns * rows === job.count + (includesEndpoints ? 2 : 0);
-  const previewCurrent =
-    job?.prepared &&
-    JSON.stringify(job.prepared.spec) ===
-      JSON.stringify({ columns, rows, includesEndpoints, fps: layoutFps });
-  async function prepare() {
+  async function insert() {
     if (!job) return;
-    await run("正在切割", async () => {
-      const updated = await api<Interpolation>(
-        `/api/projects/${projectId}/interpolations/${job.id}/prepare`,
+    await run("正在加入动画", async () => {
+      const updated = await api<ClipAsset>(
+        `/api/projects/${projectId}/interpolations/${job.id}/insert`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -168,7 +163,7 @@ export function InterpolationPanel(props: Props) {
         },
       );
       await props.refresh();
-      if (mounted.current) props.onPreview(updated.prepared!.clipId);
+      if (mounted.current) props.onPreview(updated.id);
     });
   }
   const endpoint = (index: number, label: string) => {
@@ -331,7 +326,7 @@ export function InterpolationPanel(props: Props) {
           {job.error && <p className="interpolation-warning">{job.error}</p>}
           {stale && (
             <p className="interpolation-warning">
-              原动画已修改。请根据当前动画重新发起补帧，旧候选保留。
+              原动画已修改。请根据当前动画重新发起补帧，原生成图片保留。
             </p>
           )}
           {sheet?.type === "image" ? (
@@ -362,7 +357,7 @@ export function InterpolationPanel(props: Props) {
                   <label>
                     列
                     <input
-                      aria-label="候选图集列数"
+                      aria-label="补帧图集列数"
                       type="number"
                       min="1"
                       max="10"
@@ -377,7 +372,7 @@ export function InterpolationPanel(props: Props) {
                   <label>
                     行
                     <input
-                      aria-label="候选图集行数"
+                      aria-label="补帧图集行数"
                       type="number"
                       min="1"
                       max="10"
@@ -391,7 +386,7 @@ export function InterpolationPanel(props: Props) {
                   </label>
                   <label>
                     <input
-                      aria-label="候选包含首尾帧"
+                      aria-label="图集包含首尾帧"
                       type="checkbox"
                       checked={includesEndpoints}
                       onChange={(event) =>
@@ -418,14 +413,14 @@ export function InterpolationPanel(props: Props) {
                   <button
                     className="secondary"
                     disabled={!!operation || !layoutMatches || stale}
-                    onClick={() => void prepare()}
+                    onClick={() => void insert()}
                   >
-                    {operation === "正在切割" ? (
+                    {operation === "正在加入动画" ? (
                       <LoaderCircle size={14} className="spin" />
                     ) : (
                       <Play size={14} />
                     )}
-                    切割并播放预览
+                    切割并加入动画
                   </button>
                 </div>
               )}
@@ -434,40 +429,6 @@ export function InterpolationPanel(props: Props) {
                   当前布局需恰好包含 {job.count + (includesEndpoints ? 2 : 0)}{" "}
                   格，请按实际生成结果调整。
                 </p>
-              )}
-              {job.status === "preview" && (
-                <div className="interpolation-apply">
-                  <span>
-                    中间 {job.count} 帧已统一到 {job.width} × {job.height}{" "}
-                    画布，请播放检查动作。
-                  </span>
-                  <button
-                    className="primary"
-                    disabled={!!operation || stale || !previewCurrent}
-                    onClick={() =>
-                      void run("正在加入动画", async () => {
-                        const updated = await api<ClipAsset>(
-                          `/api/projects/${projectId}/interpolations/${job.id}/apply`,
-                          {
-                            method: "POST",
-                            body: JSON.stringify({
-                              previewRevision: (
-                                assets.find(
-                                  (asset) => asset.id === job.prepared?.clipId,
-                                ) as ClipAsset | undefined
-                              )?.revision,
-                            }),
-                          },
-                        );
-                        await props.refresh();
-                        if (mounted.current) props.onPreview(updated.id);
-                      })
-                    }
-                  >
-                    <Check size={14} />
-                    确认加入动画并播放
-                  </button>
-                </div>
               )}
               {job.status === "applied" && (
                 <div className="interpolation-apply">

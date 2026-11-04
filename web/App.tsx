@@ -65,7 +65,7 @@ type State = {
   trash: TrashEntry[];
 };
 type Connection = { connected: boolean; model?: string; error?: string };
-const roles = { reference: "参考图", source: "已采纳", candidate: "候选" };
+const imageKinds = { reference: "参考图", image: "图片" };
 const emptyTransform: Transform = {
   scale: 1,
   offsetX: 0,
@@ -173,20 +173,7 @@ export function App() {
     [comparison.before.clip.id, comparison.after.clip.id].includes(selectedId)
       ? comparison
       : null;
-  const repairBaseId = state?.frameChanges?.find(
-    (change) => change.candidateClipId === clip?.id,
-  )?.clipId;
-  const interpolationPreviewId = repairBaseId || clip?.id;
-  const originalClipId = state?.interpolations?.find(
-    (job) => job.prepared?.clipId === interpolationPreviewId,
-  )?.clipId;
-  const interpolationClip = (
-    originalClipId
-      ? state?.assets.find((asset) => asset.id === originalClipId)
-      : repairBaseId
-        ? state?.assets.find((asset) => asset.id === repairBaseId)
-        : clip
-  ) as ClipAsset | undefined;
+  const interpolationClip = clip;
   const currentImage = (
     clip
       ? state?.assets.find(
@@ -454,20 +441,16 @@ export function App() {
   async function compareChange(id: string) {
     setFocusedChangeId(id);
     const change = state?.frameChanges?.find((change) => change.id === id);
-    if (!change) throw new Error("候选正在同步，请稍后再试");
-    const candidate = state?.assets.find(
-      (asset) => asset.id === change.candidateClipId,
-    ) as ClipAsset;
+    if (!change) throw new Error("修改记录正在同步，请稍后再试");
     const originalProject = projectId;
     setPlaying(false);
     setTool("review");
-    if (![change.clipId, change.candidateClipId].includes(selectedId))
-      setSelectedId(change.clipId);
+    if (change.clipId !== selectedId) setSelectedId(change.clipId);
     const result = await api<{ before: ClipSnapshot; after: ClipSnapshot }>(
       `/api/projects/${projectId}/frame-changes/${id}/compare`,
       {
         method: "POST",
-        body: JSON.stringify({ candidateRevision: candidate.revision }),
+        body: JSON.stringify({}),
       },
     );
     if (projectRef.current === originalProject)
@@ -483,7 +466,7 @@ export function App() {
         const body = new FormData();
         body.append("file", file);
         const asset = await api<ImageAsset>(
-          `/api/projects/${originalProject}/import?role=reference&folder=${encodeURIComponent(folder)}`,
+          `/api/projects/${originalProject}/import?kind=reference&folder=${encodeURIComponent(folder)}`,
           { method: "POST", body },
         );
         latest = asset.id;
@@ -567,14 +550,8 @@ export function App() {
   }
   async function applyTransform() {
     if (!currentImage) return;
-    await run("正在生成调整候选", async () => {
-      if (
-        clip &&
-        !state?.frameChanges?.some(
-          (change) =>
-            change.candidateClipId === clip.id && change.status === "draft",
-        )
-      ) {
+    await run("正在调整图片", async () => {
+      if (clip) {
         const change = await api<FrameChange>(
           `/api/projects/${projectId}/frame-changes`,
           {
@@ -589,35 +566,25 @@ export function App() {
           },
         );
         await refreshRef.current();
-        previewClip(change.candidateClipId, change.frameId, false);
         setFocusedChangeId(change.id);
-        notify("单帧修正候选已准备，原动画未覆盖");
-        return;
-      }
-      const result = await api<ImageAsset>(
-        `/api/projects/${projectId}/assets/${currentImage.id}/transform`,
-        {
-          method: "POST",
-          body: JSON.stringify({ revision: currentImage.revision, transform }),
-        },
-      );
-      if (clip) {
-        await saveClip({
-          ...clip,
-          frames: clip.frames.map((frame, index) =>
-            index === frameIndex ? { ...frame, imageId: result.id } : frame,
-          ),
-        });
+        setTransform(emptyTransform);
+        notify("当前帧已更新，可在动画检查中比较或撤回");
       } else {
+        const result = await api<ImageAsset>(
+          `/api/projects/${projectId}/assets/${currentImage.id}/transform`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              revision: currentImage.revision,
+              transform,
+            }),
+          },
+        );
         await refreshRef.current();
         setSelectedId(result.id);
+        setTransform(emptyTransform);
+        notify("调整图片已保存");
       }
-      setTransform(emptyTransform);
-      notify(
-        clip
-          ? "当前帧已更新，原图保留为独立资源"
-          : "调整候选已生成，原图未覆盖",
-      );
     });
   }
   const fit = currentImage
@@ -746,8 +713,8 @@ export function App() {
               )}
               <span>{selected?.name || "预览画布"}</span>
               {selected?.type === "image" && (
-                <small className={`role-tag ${selected.role}`}>
-                  {roles[selected.role]}
+                <small className={`image-kind ${selected.kind}`}>
+                  {imageKinds[selected.kind]}
                 </small>
               )}
             </div>
@@ -853,7 +820,7 @@ export function App() {
                   <Upload size={15} />
                   导入第一张图片
                 </button>
-                <small>原图保留，每次调整都可以生成独立候选</small>
+                <small>原图保留，图片和动画可以直接编辑使用</small>
               </div>
             )}
             {currentImage && !comparing && (
@@ -1039,46 +1006,21 @@ export function App() {
                           clip.frames[frameIndex]?.durationUs
                       )
                         void run("保存时长", async () => {
-                          if (
-                            !state?.frameChanges?.some(
-                              (change) =>
-                                change.candidateClipId === clip.id &&
-                                change.status === "draft",
-                            )
-                          ) {
-                            const change = await api<FrameChange>(
-                              `/api/projects/${projectId}/frame-changes`,
-                              {
-                                method: "POST",
-                                body: JSON.stringify({
-                                  requestId: crypto.randomUUID(),
-                                  clipId: clip.id,
-                                  revision: clip.revision,
-                                  frameId: clip.frames[frameIndex]!.id,
-                                  durationUs: Math.round(duration * 1000),
-                                }),
-                              },
-                            );
-                            await refreshRef.current();
-                            previewClip(
-                              change.candidateClipId,
-                              change.frameId,
-                              false,
-                            );
-                            setFocusedChangeId(change.id);
-                            return;
-                          }
-                          await saveClip({
-                            ...clip,
-                            frames: clip.frames.map((frame, index) =>
-                              index === frameIndex
-                                ? {
-                                    ...frame,
-                                    durationUs: Math.round(duration * 1000),
-                                  }
-                                : frame,
-                            ),
-                          });
+                          const change = await api<FrameChange>(
+                            `/api/projects/${projectId}/frame-changes`,
+                            {
+                              method: "POST",
+                              body: JSON.stringify({
+                                requestId: crypto.randomUUID(),
+                                clipId: clip.id,
+                                revision: clip.revision,
+                                frameId: clip.frames[frameIndex]!.id,
+                                durationUs: Math.round(duration * 1000),
+                              }),
+                            },
+                          );
+                          await refreshRef.current();
+                          setFocusedChangeId(change.id);
                         });
                     }}
                   />
@@ -1179,34 +1121,10 @@ export function App() {
                     动画检查
                   </button>
                 )}
-                {currentImage.role === "candidate" && (
-                  <button
-                    className="adopt-button"
-                    disabled={!!operation}
-                    onClick={() =>
-                      void run("采纳候选", async () => {
-                        await api(
-                          `/api/projects/${projectId}/assets/${currentImage.id}/adopt`,
-                          {
-                            method: "POST",
-                            body: JSON.stringify({
-                              revision: currentImage.revision,
-                            }),
-                          },
-                        );
-                        await refreshRef.current();
-                        notify("已标记为采纳资源");
-                      })
-                    }
-                  >
-                    <Check size={13} />
-                    采纳候选
-                  </button>
-                )}
               </div>
               {tool === "review" && clip ? (
                 <AnimationPanel
-                  key={`${projectId}-${repairBaseId || clip.id}`}
+                  key={`${projectId}-${clip.id}`}
                   projectId={projectId}
                   clip={clip}
                   assets={state?.assets || []}
@@ -1386,7 +1304,7 @@ export function App() {
                       ) : (
                         <Check size={14} />
                       )}{" "}
-                      {clip ? "准备单帧修正候选" : "另存调整候选"}
+                      {clip ? "应用到当前帧" : "保存调整图片"}
                     </button>
                   </div>
                   <div className="adjust-note">

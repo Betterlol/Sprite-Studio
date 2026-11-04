@@ -27,9 +27,9 @@ const tools = [
     annotations: { readOnlyHint: true },
   },
   {
-    name: "stage_frame_adjustment",
+    name: "adjust_frame",
     description:
-      "Prepare a reversible single-instance animation correction, preserving all other instances and original pixels. Returns a candidate animation, change ID and actual before/after contact sheets. Does not adopt the change. Human confirms or reverts in the webpage. Durations are integer microseconds.",
+      "Modify one frame instance in the current animation directly, preserving all other instances and original pixels. Returns a change ID and actual before/after evidence. The webpage supports comparison and undo. Durations are integer microseconds.",
     inputSchema: {
       type: "object",
       properties: {
@@ -61,7 +61,7 @@ const tools = [
   {
     name: "list_assets",
     description:
-      "List current project images and clips with stable resource IDs, roles and sizes.",
+      "List current project images and clips with stable resource IDs, image kinds and sizes.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -84,7 +84,7 @@ const tools = [
   {
     name: "slice_sheet",
     description:
-      "Slice a static spritesheet into a regular grid and create a playable candidate animation. Original pixels are retained.",
+      "Slice a static spritesheet into a regular grid and create a playable animation. Original pixels are retained.",
     inputSchema: {
       type: "object",
       properties: {
@@ -106,7 +106,7 @@ const tools = [
   {
     name: "adjust_image",
     description:
-      "Create a candidate by scaling/repositioning an image on a canvas. Deterministic image operation; does not regenerate or overwrite the original. Positive X is right, positive Y is down. Scale is relative to the original full canvas.",
+      "Save a new image by scaling/repositioning an image on a canvas. Deterministic image operation; does not regenerate or overwrite the original. Positive X is right, positive Y is down. Scale is relative to the original full canvas.",
     inputSchema: {
       type: "object",
       properties: {
@@ -148,7 +148,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           capabilities: { tools: {} },
           serverInfo: { name: "sprite-studio", version: "0.1.0" },
           instructions:
-            "Use stable project resource IDs. Inspect actual images before making visual claims. Operations create candidates and preserve originals.",
+            "Use stable project resource IDs. Inspect actual images before making visual claims. Image operations preserve originals; frame edits update the selected animation and record undo history.",
         },
       });
     else if (request.method === "ping")

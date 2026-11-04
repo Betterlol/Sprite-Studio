@@ -14,10 +14,7 @@ import {
 export class InterpolationStore {
   store: ProjectStore;
   jobs = new Map<string, Interpolation>();
-  preparing = new Map<
-    string,
-    { key: string; promise: Promise<Interpolation> }
-  >();
+  inserting = new Map<string, { key: string; promise: Promise<ClipAsset> }>();
   constructor(store: ProjectStore) {
     this.store = store;
     for (const projectId of store.projects.keys()) {
@@ -37,8 +34,10 @@ export class InterpolationStore {
           job.status = "applied";
         else if (job.status === "running") {
           job.status = "interrupted";
-          job.error = "服务已重启，补帧没有自动重试；已收到的候选仍会保留。";
+          job.error = "服务已重启，补帧没有自动重试；已收到的图片仍会保留。";
         }
+        if (["candidate", "preview"].includes(job.status))
+          job.status = "generated";
         this.jobs.set(job.id, job);
       }
     }
@@ -144,22 +143,22 @@ export class InterpolationStore {
     job.referencesVerified = [job.start, job.end].every((ref) =>
       job.referenceHashes!.includes(ref.contentHash),
     );
-    job.status = "candidate";
+    job.status = "generated";
     if (!job.referencesVerified)
       job.error =
-        "生成事件没有确认两张首尾参考均被传入，请核对候选；不会自动重试。";
+        "生成事件没有确认两张首尾参考均被传入，请核对生成结果；不会自动重试。";
     return this.save(job);
   }
-  prepare(
-    projectId: string,
-    id: string,
-    input: unknown,
-  ): Promise<Interpolation> {
+  insert(projectId: string, id: string, input: unknown): Promise<ClipAsset> {
     const job = this.get(projectId, id),
       spec = interpolationLayoutSchema.parse(input),
       key = JSON.stringify(spec);
-    if (job.status === "applied")
-      throw new StudioError("这个补帧结果已经加入动画", 409);
+    const current = this.store.asset(projectId, job.clipId) as ClipAsset;
+    if (current.appliedInterpolationIds?.includes(id)) {
+      job.status = "applied";
+      this.save(job);
+      return Promise.resolve(current);
+    }
     if (!job.sheetId) throw new StudioError("尚未收到生成图集");
     if (
       spec.columns * spec.rows !==
@@ -167,29 +166,25 @@ export class InterpolationStore {
     )
       throw new StudioError("网格数量必须与补帧数及首尾设置一致");
     this.clip(job);
-    if (job.prepared && JSON.stringify(job.prepared.spec) === key) {
-      const preview = this.store.asset(projectId, job.prepared.clipId);
-      if (preview.revision === job.prepared.clipRevision)
-        return Promise.resolve(job);
-    }
-    const running = this.preparing.get(id);
+    const running = this.inserting.get(id);
     if (running) {
       if (running.key !== key)
-        throw new StudioError("这个候选正在处理，请稍后再试", 409);
+        throw new StudioError("这个图集正在处理，请稍后再试", 409);
       return running.promise;
     }
     const promise = this.store
-      .reading(projectId, () => this.buildPreview(job, spec))
-      .finally(() => this.preparing.delete(id));
-    this.preparing.set(id, { key, promise });
+      .reading(projectId, () => this.insertFrames(job, spec))
+      .finally(() => this.inserting.delete(id));
+    this.inserting.set(id, { key, promise });
     return promise;
   }
-  private async buildPreview(
+  private async insertFrames(
     job: Interpolation,
     spec: ReturnType<typeof interpolationLayoutSchema.parse>,
   ) {
     const pid = job.projectId,
-      sheet = this.store.image(pid, job.sheetId!);
+      sheet = this.store.image(pid, job.sheetId!),
+      before = this.store.animation.capture(pid, job.clipId, job.clipRevision);
     const result = await this.store.worker.run("inbetween", {
       path: this.store.imagePath(pid, sheet.id, sheet.revision),
       outputDir: this.store.stage(pid),
@@ -205,7 +200,7 @@ export class InterpolationStore {
         pid,
         `补帧-${index + 1}.png`,
         readFileSync(file),
-        "candidate",
+        "image",
         {
           kind: "interpolation_frame",
           assetId: sheet.id,
@@ -227,78 +222,31 @@ export class InterpolationStore {
           Math.round((index * 1_000_000) / spec.fps),
       });
     }
-    const clip = this.clip(job);
-    const start = clip.frames.findIndex(
-        (frame) => frame.id === job.start.frameId,
-      ),
+    const clip = this.clip(job),
+      start = clip.frames.findIndex((frame) => frame.id === job.start.frameId),
       end = clip.frames.findIndex((frame) => frame.id === job.end.frameId);
-    const preview = this.store.createClip(
-      pid,
-      `${clip.name} · 补帧预览`,
-      [
-        ...clip.frames.slice(0, start + 1),
-        ...frames,
-        ...clip.frames.slice(end),
-      ],
-      { assetId: clip.id, revision: clip.revision },
-      clip.loop,
-    );
-    job.prepared = { clipId: preview.id, clipRevision: preview.revision, spec };
-    job.status = "preview";
-    return this.save(job);
-  }
-  apply(projectId: string, id: string, expectedPreviewRevision?: string) {
-    const job = this.get(projectId, id),
-      current = this.store.asset(projectId, job.clipId) as ClipAsset;
-    if (current.appliedInterpolationIds?.includes(id)) {
-      job.status = "applied";
-      this.save(job);
-      return current;
-    }
-    if (this.preparing.has(id))
-      throw new StudioError("请等待预览处理完成", 409);
-    const clip = this.clip(job);
-    if (!job.prepared) throw new StudioError("请先切割并预览候选");
-    const preview = this.store.asset(projectId, job.prepared.clipId);
-    if (
-      preview.type !== "clip" ||
-      preview.revision !==
-        (expectedPreviewRevision || job.prepared.clipRevision)
-    )
-      throw new StudioError("预览动画已修改，请重新切割候选后确认", 409);
-    const start = clip.frames.findIndex(
-        (frame) => frame.id === job.start.frameId,
-      ),
-      end = clip.frames.findIndex((frame) => frame.id === job.end.frameId);
-    const equal = (a: any, b: any) =>
-      a?.id === b?.id &&
-      a?.imageId === b?.imageId &&
-      a?.durationUs === b?.durationUs;
-    if (
-      preview.frames.length !==
-        clip.frames.length - (end - start - 1) + job.count ||
-      clip.frames
-        .slice(0, start + 1)
-        .some((frame, index) => !equal(frame, preview.frames[index])) ||
-      clip.frames
-        .slice(end)
-        .some(
-          (frame, index) =>
-            !equal(frame, preview.frames[start + 1 + job.count + index]),
-        )
-    )
-      throw new StudioError(
-        "补帧预览必须保留原首尾和区间外帧，只能修改中间候选",
-        409,
-      );
-    for (const frame of preview.frames)
-      this.store.imagePath(projectId, frame.imageId);
+    for (const frame of frames) this.store.imagePath(pid, frame.imageId);
+    job.beforeSnapshotId = before.id;
+    this.save(job);
     const updated = this.store.updateClip(
-      projectId,
+      pid,
       clip.id,
-      { revision: job.clipRevision, frames: preview.frames, loop: clip.loop },
-      id,
+      {
+        revision: job.clipRevision,
+        frames: [
+          ...clip.frames.slice(0, start + 1),
+          ...frames,
+          ...clip.frames.slice(end),
+        ],
+        loop: clip.loop,
+      },
+      job.id,
     );
+    job.afterSnapshotId = this.store.animation.capture(
+      pid,
+      updated.id,
+      updated.revision,
+    ).id;
     job.status = "applied";
     this.save(job);
     return updated;
@@ -306,5 +254,5 @@ export class InterpolationStore {
 }
 
 export function interpolationPrompt(job: Interpolation) {
-  return `请为动画补帧，实际使用本条消息的两张图片作为首尾参考。第一张是首帧（assetId=${job.start.imageId}），第二张是尾帧（assetId=${job.end.imageId}），两张都必须通过 referenced_image_paths 等图像生成参考参数实际传给内置 image_gen。\n动作要求：${job.description}\n仅调用一次内置 image_gen，失败不重试，不使用 slice_sheet 或 adjust_image。生成一张透明背景 spritesheet，共 ${job.count + 2} 格，严格 ${job.columns} 列 ${job.rows} 行，等大无间距网格，按从左到右、从上到下排序：第一格复现首帧，最后一格复现尾帧，中间 ${job.count} 格为连续过渡。每格画布比例 ${job.width}:${job.height}，角色大小、朝向和基准一致，不画网格线、文字、序号、边框。网页将去掉生成的首尾格，保留原始首尾帧，再由用户预览和确认加入动画。生成完成后停止，不自行切割、重试或修改动画，不宣称动态验收通过。`;
+  return `请为动画补帧，实际使用本条消息的两张图片作为首尾参考。第一张是首帧（assetId=${job.start.imageId}），第二张是尾帧（assetId=${job.end.imageId}），两张都必须通过 referenced_image_paths 等图像生成参考参数实际传给内置 image_gen。\n动作要求：${job.description}\n仅调用一次内置 image_gen，失败不重试，不使用 slice_sheet 或 adjust_image。生成一张透明背景 spritesheet，共 ${job.count + 2} 格，严格 ${job.columns} 列 ${job.rows} 行，等大无间距网格，按从左到右、从上到下排序：第一格复现首帧，最后一格复现尾帧，中间 ${job.count} 格为连续过渡。每格画布比例 ${job.width}:${job.height}，角色大小、朝向和基准一致，不画网格线、文字、序号、边框。网页将去掉生成的首尾格，保留原始首尾帧，由网页按设置切割并加入动画。生成完成后停止，不自行切割或重试，不宣称动态验收通过。`;
 }

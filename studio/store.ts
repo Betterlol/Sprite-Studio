@@ -24,7 +24,7 @@ import {
   type Asset,
   type ImageAsset,
   type ClipAsset,
-  type AssetRole,
+  type ImageKind,
   type Session,
 } from "./model.ts";
 
@@ -163,6 +163,11 @@ export class ProjectStore extends EventEmitter {
         const asset = JSON.parse(
           readFileSync(this.safePath(id, `${base}/${file}`), "utf8"),
         ) as Asset;
+        if (asset.type === "image") {
+          const legacy = asset as ImageAsset & { role?: string };
+          legacy.kind ??= legacy.role === "reference" ? "reference" : "image";
+          delete legacy.role;
+        }
         asset.folder = folder;
         if (asset.type === "clip")
           asset.file ||= `${base}/${asset.id}.clip.json`;
@@ -280,7 +285,7 @@ export class ProjectStore extends EventEmitter {
     projectId: string,
     filename: string,
     bytes: Buffer,
-    role: AssetRole = "reference",
+    kind: ImageKind = "reference",
     origin?: ImageAsset["origin"],
     folder?: string,
   ) {
@@ -328,7 +333,7 @@ export class ProjectStore extends EventEmitter {
         name: location.name,
         folder,
         type: "image",
-        role,
+        kind,
         revision: "",
         createdAt: now(),
         file,
@@ -338,21 +343,6 @@ export class ProjectStore extends EventEmitter {
         origin,
       } as ImageAsset) as ImageAsset;
     });
-  }
-  adopt(projectId: string, id: string, expected: string) {
-    const old = this.image(projectId, id);
-    if (old.revision !== expected)
-      throw new StudioError("资源已改变，请刷新后再采纳", 409);
-    atomicJson(
-      join(
-        this.dir(projectId),
-        ".studio",
-        "history",
-        `${old.id}-${old.revision}.json`,
-      ),
-      old,
-    );
-    return this.saveAsset(projectId, { ...old, role: "source" });
   }
   async transform(
     projectId: string,
@@ -375,7 +365,7 @@ export class ProjectStore extends EventEmitter {
         projectId,
         `${source.name.replace(/\.[^.]+$/, "")}-调整.png`,
         readFileSync(result.files[0]),
-        "candidate",
+        "image",
         { kind: "transform", assetId: id, revision: expected, operation: spec },
       );
     });
@@ -403,7 +393,7 @@ export class ProjectStore extends EventEmitter {
             projectId,
             `${source.name.replace(/\.[^.]+$/, "")}-${String(i + 1).padStart(2, "0")}.png`,
             readFileSync(file),
-            "candidate",
+            "image",
             {
               kind: "slice",
               assetId: id,

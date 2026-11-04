@@ -1,6 +1,6 @@
 import { z } from "zod";
-export const roleSchema = z.enum(["reference", "source", "candidate"]);
-export type AssetRole = z.infer<typeof roleSchema>;
+export const imageKindSchema = z.enum(["reference", "image"]);
+export type ImageKind = z.infer<typeof imageKindSchema>;
 export type Project = {
   id: string;
   name: string;
@@ -12,7 +12,7 @@ export type ImageAsset = {
   id: string;
   type: "image";
   name: string;
-  role: AssetRole;
+  kind: ImageKind;
   revision: string;
   createdAt: string;
   width: number;
@@ -126,13 +126,7 @@ export type Interpolation = {
   rows: number;
   width: number;
   height: number;
-  status:
-    | "running"
-    | "candidate"
-    | "preview"
-    | "applied"
-    | "failed"
-    | "interrupted";
+  status: "running" | "generated" | "applied" | "failed" | "interrupted";
   createdAt: string;
   updatedAt: string;
   error?: string;
@@ -140,11 +134,8 @@ export type Interpolation = {
   generationItemId?: string;
   referenceHashes?: string[];
   referencesVerified?: boolean;
-  prepared?: {
-    clipId: string;
-    clipRevision: string;
-    spec: InterpolationLayout;
-  };
+  beforeSnapshotId?: string;
+  afterSnapshotId?: string;
 };
 export const interpolationSchema = z.object({
   requestId: z.string().uuid(),
@@ -229,14 +220,15 @@ export type FrameChange = {
   clipId: string;
   frameId: string;
   baseSnapshotId: string;
-  candidateClipId: string;
+  legacyClipId?: string;
   createdAt: string;
   updatedAt: string;
   source: "agent" | "human";
-  status: "draft" | "applied" | "reverted" | "discarded";
+  status: "pending" | "applied" | "reverted" | "archived";
   transform?: Transform;
   durationUs?: number;
-  appliedSnapshotId?: string;
+  afterSnapshotId?: string;
+  resultFrames?: ClipFrame[];
 };
 export const frameAdjustmentSchema = z
   .object({

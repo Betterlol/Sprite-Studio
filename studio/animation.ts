@@ -19,7 +19,7 @@ export class AnimationStore {
   snapshots = new Map<string, ClipSnapshot>();
   reviews = new Map<string, ClipReview>();
   changes = new Map<string, FrameChange>();
-  proposing = new Map<string, Promise<FrameChange>>();
+  adjusting = new Map<string, Promise<FrameChange>>();
   constructor(store: ProjectStore) {
     this.store = store;
     for (const projectId of store.projects.keys())
@@ -39,14 +39,34 @@ export class AnimationStore {
         }
       }
     for (const change of this.changes.values()) {
+      const legacy = change as FrameChange & {
+        candidateClipId?: string;
+        appliedSnapshotId?: string;
+      };
+      change.legacyClipId ??= legacy.candidateClipId;
+      change.afterSnapshotId ??= legacy.appliedSnapshotId;
+      delete legacy.candidateClipId;
+      delete legacy.appliedSnapshotId;
+      if (
+        !["pending", "applied", "reverted", "archived"].includes(change.status)
+      )
+        change.status = "archived";
       if (!store.indexes.get(change.projectId)?.has(change.clipId)) continue;
       const clip = this.clip(change.projectId, change.clipId);
       if (clip.revertedFrameChangeIds?.includes(change.id))
         change.status = "reverted";
-      else if (clip.appliedFrameChangeIds?.includes(change.id))
+      else if (clip.appliedFrameChangeIds?.includes(change.id)) {
         change.status = "applied";
+        if (
+          !change.afterSnapshotId &&
+          change.resultFrames &&
+          JSON.stringify(clip.frames) === JSON.stringify(change.resultFrames)
+        )
+          change.afterSnapshotId = this.capture(change.projectId, clip.id).id;
+      } else if (change.status === "pending") change.status = "archived";
     }
   }
+
   private save(folder: string, item: ClipSnapshot | ClipReview | FrameChange) {
     const dir = join(
       this.store.dir(item.projectId),
@@ -255,10 +275,10 @@ export class AnimationStore {
   change(pid: string, id: string) {
     const change = this.changes.get(id);
     if (!change || change.projectId !== pid)
-      throw new StudioError("修改候选不存在", 404);
+      throw new StudioError("修改记录不存在", 404);
     return change;
   }
-  propose(
+  adjust(
     pid: string,
     input: unknown,
     source: "agent" | "human" = "human",
@@ -266,119 +286,89 @@ export class AnimationStore {
     const spec = frameAdjustmentSchema.parse(input),
       existing = this.changes.get(spec.requestId);
     if (existing) return Promise.resolve(this.change(pid, spec.requestId));
-    const running = this.proposing.get(spec.requestId);
+    const running = this.adjusting.get(spec.requestId);
     if (running) return running.then((change) => this.change(pid, change.id));
-    const promise = this.buildChange(pid, spec, source).finally(() =>
-      this.proposing.delete(spec.requestId),
-    );
-    this.proposing.set(spec.requestId, promise);
+    const promise = this.store
+      .reading(pid, () => this.applyAdjustment(pid, spec, source))
+      .finally(() => this.adjusting.delete(spec.requestId));
+    this.adjusting.set(spec.requestId, promise);
     return promise;
   }
-  private async buildChange(
+  private async applyAdjustment(
     pid: string,
     spec: ReturnType<typeof frameAdjustmentSchema.parse>,
     source: "agent" | "human",
   ) {
-    const snapshot = this.capture(pid, spec.clipId, spec.revision),
-      frame = snapshot.clip.frames.find((frame) => frame.id === spec.frameId);
+    const before = this.capture(pid, spec.clipId, spec.revision),
+      frame = before.clip.frames.find((frame) => frame.id === spec.frameId);
     if (!frame) throw new StudioError("帧不在目标动画中");
     let imageId = frame.imageId;
     if (spec.transform) {
-      const image = this.store.image(pid, imageId),
-        adjusted = await this.store.transform(
+      const image = this.store.image(pid, imageId);
+      imageId = (
+        await this.store.transform(
           pid,
           image.id,
           image.revision,
           spec.transform,
-        );
-      imageId = adjusted.id;
+        )
+      ).id;
     }
-    if (this.clip(pid, spec.clipId).revision !== spec.revision)
-      throw new StudioError("动画已修改，候选图片保留，请基于新版本重试", 409);
-    const candidate = this.store.createClip(
-      pid,
-      `${snapshot.clip.name} · 单帧修正`,
-      snapshot.clip.frames.map((current) =>
-        current.id === spec.frameId
-          ? {
-              ...current,
-              imageId,
-              durationUs: spec.durationUs ?? current.durationUs,
-            }
-          : current,
-      ),
-      { assetId: spec.clipId, revision: spec.revision },
-      snapshot.clip.loop,
+    const clip = this.clip(pid, spec.clipId);
+    if (clip.revision !== spec.revision)
+      throw new StudioError("动画已修改，请基于当前版本重试", 409);
+    const frames = clip.frames.map((current) =>
+      current.id === spec.frameId
+        ? {
+            ...current,
+            imageId,
+            durationUs: spec.durationUs ?? current.durationUs,
+          }
+        : current,
     );
     const change: FrameChange = {
       id: spec.requestId,
       projectId: pid,
-      clipId: spec.clipId,
-      frameId: spec.frameId,
-      baseSnapshotId: snapshot.id,
-      candidateClipId: candidate.id,
+      clipId: clip.id,
+      frameId: frame.id,
+      baseSnapshotId: before.id,
       source,
-      status: "draft",
+      status: "pending",
       transform: spec.transform,
       durationUs: spec.durationUs,
+      resultFrames: frames,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     this.changes.set(change.id, change);
-    this.save("changes", change);
+    this.saveChange(change);
+    const updated = this.store.updateClip(
+      pid,
+      clip.id,
+      { revision: spec.revision, frames, loop: clip.loop },
+      undefined,
+      { id: change.id, action: "apply" },
+    );
+    change.afterSnapshotId = this.capture(pid, updated.id, updated.revision).id;
+    change.status = "applied";
+    this.saveChange(change);
     return change;
   }
   private saveChange(change: FrameChange) {
     change.updatedAt = new Date().toISOString();
     this.save("changes", change);
   }
-  compare(pid: string, id: string, expectedCandidate?: string) {
+  compare(pid: string, id: string) {
     const change = this.change(pid, id),
-      before = this.snapshot(pid, change.baseSnapshotId),
-      after =
-        change.appliedSnapshotId &&
-        (change.status === "applied" || change.status === "reverted")
-          ? this.snapshot(pid, change.appliedSnapshotId)
-          : this.capture(pid, change.candidateClipId, expectedCandidate);
+      before = this.snapshot(pid, change.baseSnapshotId);
+    const after = change.afterSnapshotId
+      ? this.snapshot(pid, change.afterSnapshotId)
+      : change.legacyClipId &&
+          this.store.indexes.get(pid)?.has(change.legacyClipId)
+        ? this.capture(pid, change.legacyClipId)
+        : null;
+    if (!after) throw new StudioError("这条历史记录没有完整的修改后快照", 409);
     return { before, after };
-  }
-  apply(pid: string, id: string, expectedCandidate: string) {
-    const change = this.change(pid, id),
-      clip = this.clip(pid, change.clipId);
-    if (
-      clip.revertedFrameChangeIds?.includes(id) ||
-      change.status === "discarded"
-    )
-      throw new StudioError("这次修改已撤回或放弃，请创建新候选", 409);
-    if (clip.appliedFrameChangeIds?.includes(id)) {
-      change.status = "applied";
-      this.saveChange(change);
-      return clip;
-    }
-    const base = this.snapshot(pid, change.baseSnapshotId);
-    if (clip.revision !== base.clip.revision)
-      throw new StudioError(
-        "原动画已修改，不能覆盖，请基于当前版本重新准备候选",
-        409,
-      );
-    this.capture(pid, clip.id, base.clip.revision);
-    const after = this.capture(pid, change.candidateClipId, expectedCandidate);
-    change.appliedSnapshotId = after.id;
-    this.saveChange(change);
-    const updated = this.store.updateClip(
-      pid,
-      clip.id,
-      {
-        revision: clip.revision,
-        frames: after.clip.frames,
-        loop: after.clip.loop,
-      },
-      undefined,
-      { id, action: "apply" },
-    );
-    change.status = "applied";
-    this.saveChange(change);
-    return updated;
   }
   revert(pid: string, id: string, expected: string) {
     const change = this.change(pid, id),
@@ -388,16 +378,15 @@ export class AnimationStore {
       this.saveChange(change);
       return clip;
     }
-    if (!clip.appliedFrameChangeIds?.includes(id) || !change.appliedSnapshotId)
-      throw new StudioError("这次修改尚未采纳");
+    if (!clip.appliedFrameChangeIds?.includes(id) || !change.afterSnapshotId)
+      throw new StudioError("这次修改尚未完成");
     this.capture(pid, clip.id, expected);
     if (
       clip.revision !== expected ||
-      content(clip) !==
-        content(this.snapshot(pid, change.appliedSnapshotId).clip)
+      content(clip) !== content(this.snapshot(pid, change.afterSnapshotId).clip)
     )
       throw new StudioError(
-        "采纳后动画有新修改，不能撤回覆盖，请先处理后续修改",
+        "动画有后续修改，不能撤回覆盖，请先处理后续修改",
         409,
       );
     const before = this.snapshot(pid, change.baseSnapshotId);
@@ -419,13 +408,5 @@ export class AnimationStore {
     change.status = "reverted";
     this.saveChange(change);
     return updated;
-  }
-  discard(pid: string, id: string) {
-    const change = this.change(pid, id);
-    if (change.status !== "draft")
-      throw new StudioError("只能放弃未采纳的候选", 409);
-    change.status = "discarded";
-    this.saveChange(change);
-    return change;
   }
 }

@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { ProjectStore, StudioError } from "./store.ts";
 import { AgentHub } from "./agent.ts";
-import { roleSchema, clipReferenceSchema } from "./model.ts";
+import { imageKindSchema, clipReferenceSchema } from "./model.ts";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const dataRoot = resolve(
@@ -151,7 +151,7 @@ app.post("/api/projects/:projectId/import", async (request) => {
   store.project(projectId);
   const query = z
     .object({
-      role: roleSchema.default("reference"),
+      kind: imageKindSchema.default("reference"),
       folder: z.string().default(""),
     })
     .parse(request.query);
@@ -162,7 +162,7 @@ app.post("/api/projects/:projectId/import", async (request) => {
     projectId,
     part.filename,
     buffer,
-    query.role,
+    query.kind,
     undefined,
     query.folder,
   );
@@ -181,10 +181,7 @@ app.get("/api/projects/:projectId/images/:assetId", async (request, reply) => {
     );
   return reply.send(createReadStream(path));
 });
-app.post("/api/projects/:projectId/assets/:assetId/adopt", async (request) => {
-  const input = z.object({ revision: z.string() }).parse(request.body);
-  return store.adopt(pid(request), aid(request), input.revision);
-});
+
 app.post(
   "/api/projects/:projectId/assets/:assetId/transform",
   async (request) => {
@@ -251,33 +248,15 @@ app.get(
   },
 );
 app.post("/api/projects/:projectId/frame-changes", async (request) =>
-  store.animation.propose(pid(request), request.body),
+  store.animation.adjust(pid(request), request.body),
 );
 app.post(
   "/api/projects/:projectId/frame-changes/:changeId/compare",
-  async (request: any) => {
-    const input = z
-      .object({ candidateRevision: z.string().optional() })
-      .parse(request.body || {});
-    return store.animation.compare(
+  async (request: any) =>
+    store.animation.compare(
       pid(request),
       z.string().uuid().parse(request.params.changeId),
-      input.candidateRevision,
-    );
-  },
-);
-app.post(
-  "/api/projects/:projectId/frame-changes/:changeId/apply",
-  async (request: any) => {
-    const input = z
-      .object({ candidateRevision: z.string() })
-      .parse(request.body);
-    return store.animation.apply(
-      pid(request),
-      z.string().uuid().parse(request.params.changeId),
-      input.candidateRevision,
-    );
-  },
+    ),
 );
 app.post(
   "/api/projects/:projectId/frame-changes/:changeId/revert",
@@ -290,14 +269,7 @@ app.post(
     );
   },
 );
-app.post(
-  "/api/projects/:projectId/frame-changes/:changeId/discard",
-  async (request: any) =>
-    store.animation.discard(
-      pid(request),
-      z.string().uuid().parse(request.params.changeId),
-    ),
-);
+
 app.post("/api/projects/:projectId/clips", async (request) => {
   const spec = z
     .object({
@@ -326,23 +298,12 @@ app.post("/api/projects/:projectId/interpolations", async (request, reply) =>
   reply.code(202).send(agent.startInterpolation(pid(request), request.body)),
 );
 app.post(
-  "/api/projects/:projectId/interpolations/:interpolationId/prepare",
+  "/api/projects/:projectId/interpolations/:interpolationId/insert",
   async (request: any) =>
-    store.interpolations.prepare(
+    store.interpolations.insert(
       pid(request),
       z.string().uuid().parse(request.params.interpolationId),
       request.body,
-    ),
-);
-app.post(
-  "/api/projects/:projectId/interpolations/:interpolationId/apply",
-  async (request: any) =>
-    store.interpolations.apply(
-      pid(request),
-      z.string().uuid().parse(request.params.interpolationId),
-      z
-        .object({ previewRevision: z.string().optional() })
-        .parse(request.body || {}).previewRevision,
     ),
 );
 app.get(

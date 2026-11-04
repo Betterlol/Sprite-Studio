@@ -36,7 +36,7 @@ const parent = (folder: string) =>
 const basename = (folder: string) => folder.split("/").at(-1) || "项目资源";
 const inside = (path: string, folder: string) =>
   path === folder || path.startsWith(folder + "/");
-const roles = { reference: "参考图", source: "已采纳", candidate: "候选" };
+const imageKinds = { reference: "参考图", image: "图片" };
 export function ResourceLibrary({
   projectId,
   state,
@@ -150,7 +150,7 @@ export function ResourceLibrary({
       (filter === "all" ||
         (filter === "clip"
           ? a.type === "clip"
-          : a.type === "image" && a.role === filter)),
+          : a.type === "image" && a.kind === filter)),
   );
   const children = folders.filter((f) => f && parent(f) === folder && !search);
   const keys = [
@@ -370,7 +370,7 @@ export function ResourceLibrary({
         {[
           ["all", "全部"],
           ["reference", "参考"],
-          ["candidate", "候选"],
+          ["image", "图片"],
           ["clip", "动画"],
         ].map(([value, label]) => (
           <button
@@ -482,13 +482,10 @@ export function ResourceLibrary({
                 <small>
                   {search ? `${asset.folder || "资源"} · ` : ""}
                   {asset.type === "image"
-                    ? `${roles[asset.role]} · ${asset.width} × ${asset.height}`
+                    ? `${imageKinds[asset.kind]} · ${asset.width} × ${asset.height}`
                     : `${asset.frames.length} 帧 · 动画片段`}
                 </small>
               </span>
-              {asset.type === "image" && asset.role === "candidate" && (
-                <span className="candidate-dot" />
-              )}
             </button>
           </div>
         ))}

@@ -632,14 +632,7 @@ a {
 .selected .asset-info small {
   color: #8fbaaa;
 }
-.candidate-dot {
-  width: 5px;
-  height: 5px;
-  background: #d6b77e;
-  border-radius: 50%;
-  margin-left: auto;
-  flex: none;
-}
+
 .library-empty {
   display: flex;
   align-items: center;
@@ -724,7 +717,7 @@ a {
   gap: 8px;
   margin-left: auto;
 }
-.role-tag {
+.image-kind {
   font-size: 9px;
   white-space: nowrap;
   padding: 2px 5px;
@@ -732,14 +725,7 @@ a {
   background: #2b353e;
   color: #99aebb;
 }
-.role-tag.candidate {
-  color: #c4ae83;
-  background: #393428;
-}
-.role-tag.source {
-  color: #8db9a3;
-  background: #283a31;
-}
+
 .stage {
   flex: 1;
   min-height: 160px;

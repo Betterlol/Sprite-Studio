@@ -85,7 +85,7 @@ export function ComparisonPlayer({
       </div>
       <div className="comparison-panes">
         {panel(before, "修改前")}
-        {panel(after, "修正候选")}
+        {panel(after, "修改后")}
       </div>
       <div className="comparison-controls">
         <button

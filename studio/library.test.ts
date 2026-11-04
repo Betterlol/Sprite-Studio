@@ -48,7 +48,7 @@ async function fixture() {
   return { root, store, pid, sheet, clip, rev };
 }
 
-test("real directories preserve IDs, snapshot validity and frame adoption/revert after rename, move and restart", async () => {
+test("real directories preserve IDs, snapshot validity and direct frame editing/revert after rename, move and restart", async () => {
   const { root, store, pid, sheet, clip, rev } = await fixture();
   let reloaded: ProjectStore | undefined;
   try {
@@ -65,7 +65,7 @@ test("real directories preserve IDs, snapshot validity and frame adoption/revert
       description: "目录移动回归",
     });
     job.sheetId = sheet.id;
-    job.status = "candidate";
+    job.status = "generated";
     store.interpolations.save(job);
     store.library.createFolder(pid, "", "角色", rev());
     store.library.createFolder(pid, "角色", "空目录", rev());
@@ -86,18 +86,14 @@ test("real directories preserve IDs, snapshot validity and frame adoption/revert
     assert.equal(store.asset(pid, clip.id).revision, clip.revision);
     assert.equal(store.image(pid, sheet.id).revision, sheet.revision);
     assert.equal(store.animation.review(pid, review.id).stale, false);
-    const prepared = await store.interpolations.prepare(pid, job.id, {
-      columns: 1,
-      rows: 1,
-      includesEndpoints: false,
-      fps: 8,
-    });
-    assert.ok(prepared.prepared);
-    // Moving a prepared candidate and both endpoint images does not expire the job.
     store.library.relocate(pid, folders("角色"), "", rev(), "主角");
-    const appliedInterpolation = store.interpolations.apply(pid, job.id);
+    const appliedInterpolation = await store.interpolations.insert(
+      pid,
+      job.id,
+      { columns: 1, rows: 1, includesEndpoints: false, fps: 8 },
+    );
     assert.equal(appliedInterpolation.frames.length, 3);
-    const change = await store.animation.propose(
+    const change = await store.animation.adjust(
       pid,
       {
         requestId: randomUUID(),
@@ -108,16 +104,15 @@ test("real directories preserve IDs, snapshot validity and frame adoption/revert
       },
       "human",
     );
-    store.library.relocate(pid, assets(change.candidateClipId), "主角", rev());
-    const candidate = store.asset(pid, change.candidateClipId) as ClipAsset;
-    store.animation.apply(pid, change.id, candidate.revision);
+    store.library.relocate(pid, assets(clip.id), "主角", rev());
+    const modified = store.asset(pid, clip.id) as ClipAsset;
     store.worker.close();
     reloaded = new ProjectStore(join(root, "projects"));
     assert.ok(reloaded.library.folders(pid).includes("主角/空目录"));
     assert.equal(reloaded.asset(pid, clip.id).name, "待机");
     assert.deepEqual(
       (reloaded.asset(pid, clip.id) as ClipAsset).frames,
-      candidate.frames,
+      modified.frames,
     );
     const reverted = reloaded.animation.revert(
       pid,
@@ -163,7 +158,7 @@ test("batch deletion protects outside references and undo dependencies; trash re
       /复用动画/,
     );
     store.library.delete(pid, assets(reused.id), rev());
-    const change = await store.animation.propose(
+    const change = await store.animation.adjust(
       pid,
       {
         requestId: randomUUID(),
@@ -174,16 +169,13 @@ test("batch deletion protects outside references and undo dependencies; trash re
       },
       "human",
     );
-    const candidate = store.asset(pid, change.candidateClipId) as ClipAsset;
-    store.animation.apply(pid, change.id, candidate.revision);
     assert.ok(
       store.library
         .planDelete(pid, assets(frameIds[0]!))
         .blockers.some((b) => b.reason.includes("撤回")),
     );
     store.animation.revert(pid, change.id, store.asset(pid, clip.id).revision);
-    // The separate candidate also uses the remaining frame; delete it in the same batch.
-    const selection = { assetIds: [candidate.id], folders: [clip.folder!] };
+    const selection = { assetIds: [], folders: [clip.folder!] };
     store.library.createFolder(pid, clip.folder!, "空", rev());
     const snapshot = store.animation.capture(pid, clip.id);
     const trash = store.library.delete(pid, selection, rev());
@@ -231,7 +223,7 @@ test("batch deletion protects outside references and undo dependencies; trash re
       assert.ok(existsSync(reloaded.imagePath(pid, id)));
     const removedClips = reloaded.library.delete(
       pid,
-      assets(clip.id, candidate.id),
+      assets(clip.id),
       reloaded.library.revision(pid),
     );
     const removedImage = reloaded.library.delete(

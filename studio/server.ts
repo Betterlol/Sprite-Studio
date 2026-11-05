@@ -568,6 +568,12 @@ app.post("/internal/tools/:sessionId", async (request: any) => {
       arguments: z.record(z.string(), z.unknown()).default({}),
     })
     .parse(request.body);
+  if (
+    !["starting", "running"].includes(
+      store.session(request.params.sessionId).status,
+    )
+  )
+    throw new StudioError("当前回合已结束，拒绝执行迟到的工具请求", 409);
   return agent.tool(request.params.sessionId, input.name, input.arguments);
 });
 

@@ -4,7 +4,11 @@ import { readFileSync, copyFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { AppServer, type Message } from "./runtime/app-server.ts";
+import {
+  AppServer,
+  RpcRequestError,
+  type Message,
+} from "./runtime/app-server.ts";
 import { ProjectStore, StudioError, sha256 } from "./store.ts";
 import { clipDocumentSchema } from "./documents.ts";
 import { interpolationPrompt } from "./interpolation.ts";
@@ -39,6 +43,8 @@ export class AgentHub {
   >();
   toolTails = new Map<string, Promise<void>>();
   toolEpochs = new Map<string, number>();
+  promptTails = new Map<string, Promise<void>>();
+  staleTurns = new Map<string, Set<string>>();
   disabled: string[] = [];
   status: {
     connected: boolean;
@@ -92,6 +98,25 @@ export class AgentHub {
     if (timer) clearTimeout(timer);
     this.timers.delete(session.id);
     this.store.saveSession(session);
+  }
+  private diagnose(
+    session: Session,
+    kind: "approval" | "runtime" | "tool",
+    message: string,
+    method?: string,
+  ) {
+    session.diagnostics = [
+      ...(session.diagnostics || []),
+      {
+        id: randomUUID(),
+        createdAt: new Date().toISOString(),
+        kind,
+        message,
+        method,
+        turnId: session.turnId,
+      },
+    ].slice(-40);
+    this.flush(session);
   }
   private schedule(session: Session) {
     if (!this.timers.has(session.id))
@@ -156,11 +181,17 @@ export class AgentHub {
     );
     this.clients.set(session.id, client);
     client.on("notification", (message) => {
+      if (this.clients.get(session.id) !== client) return;
       void this.notification(session, message).catch((error) =>
         this.fail(session, error),
       );
     });
+    client.on("requestError", (event) => {
+      if (this.clients.get(session.id) === client)
+        this.diagnose(session, "runtime", event.message, event.method);
+    });
     client.on("stopped", (error) => {
+      if (this.clients.get(session.id) !== client) return;
       this.clients.delete(session.id);
       if (!this.stopped && ["starting", "running"].includes(session.status))
         this.fail(session, error);
@@ -178,6 +209,8 @@ export class AgentHub {
       };
       params.developerInstructions +=
         "切割配置已改为持久JSON配方：先read_document读取原图的documentId与全文，必要时get_schema查看格式，再用write_documents提交正文和expectedDocumentRevision。新配方items为空，需要明确添加待切单元；新增条目可省略ID，保存会返回ID，后续保留已有ID。slice_sheet只接收assetId、expectedDefinitionRevision和requestId，读取已保存配置执行。重复切割更新原切片而不创建动画，禁止以旧columns/rows工具参数执行。当前仅支持规则网格，动画可用create_clip创建空动画，read_document/write_documents编辑clip JSON中的frames(imageId、id、durationUs)、loop、initialFps；帧id新增可省略，重排保留id。单帧变换已有frame-edit草稿配置，按下述流程执行。";
+      params.developerInstructions +=
+        "需要把生成图保存进项目时，调用save_image并自行提供合理的名称和目录，工具本身按权限等待Approve/Deny；不要用额外的用户提问、手动保存表单或结束回合来代替工具审批。审批期间不要结束当前回合；等待工具结果后再继续。用户明确要求仅预览时不保存。";
       params.developerInstructions +=
         "所有项目工具的权限由网页设置控制。需要审批时工具调用保持等待，必须等用户决定后再继续；不要把等待请求当作成功，不要尝试并行工具或换工具绕过。拒绝结果附带用户理由，按理由调整后再请求。默认只有save_image需要审批，其他项目工具为full access，用户可逐项更改。";
       params.developerInstructions +=
@@ -292,6 +325,11 @@ export class AgentHub {
     const clipReferences = clipInputs.map((input) =>
       this.store.animation.reference(session.projectId, input),
     );
+    this.staleTurns ??= new Map();
+    const previousTurns = this.staleTurns.get(session.id) || new Set<string>();
+    if (session.turnId) previousTurns.add(session.turnId);
+    this.staleTurns.set(session.id, new Set([...previousTurns].slice(-40)));
+    session.turnId = undefined;
     session.model = selectedModel;
     session.status = "starting";
     session.outputFolder = outputFolder;
@@ -311,9 +349,14 @@ export class AgentHub {
       createdAt: new Date().toISOString(),
     });
     this.flush(session);
-    void this.startTurn(session, text, references).catch((error) =>
-      this.fail(session, error),
-    );
+    void this.startTurn(session, text, references).catch((error) => {
+      if (
+        session.messages.filter((m) => m.role === "user").at(-1)?.id ===
+          requestId &&
+        ["starting", "running"].includes(session.status)
+      )
+        this.fail(session, error);
+    });
     return session;
   }
   private async startTurn(
@@ -321,8 +364,14 @@ export class AgentHub {
     text: string,
     references: ReturnType<ProjectStore["image"]>[],
   ) {
+    const messageId = session.messages
+      .filter((m) => m.role === "user")
+      .at(-1)?.id;
+    const current = () =>
+      session.messages.filter((m) => m.role === "user").at(-1)?.id ===
+      messageId;
     const client = await this.client(session);
-    if (session.status !== "starting") return;
+    if (session.status !== "starting" || !current()) return;
     const inputs: any[] = [{ type: "text", text, text_elements: [] }];
     inputs.push({
       type: "text",
@@ -392,6 +441,7 @@ export class AgentHub {
         { type: "localImage", path: snapshot },
       );
     }
+    if (session.status !== "starting" || !current()) return;
     if (interpolation) this.store.interpolations.save(interpolation);
     session.status = "running";
     this.flush(session);
@@ -404,6 +454,7 @@ export class AgentHub {
         .filter((message) => message.role === "user")
         .at(-1)!.id,
     });
+    if (!current() || session.status !== "running") return;
     session.turnId = result.turn.id;
     this.flush(session);
   }
@@ -416,6 +467,26 @@ export class AgentHub {
         params.threadId !== session.threadId)
     )
       return;
+    const eventTurnId = params.turnId || params.turn?.id;
+    if (
+      eventTurnId &&
+      (this.staleTurns?.get(session.id)?.has(eventTurnId) ||
+        (session.turnId && eventTurnId !== session.turnId))
+    )
+      return;
+    if (
+      message.method === "serverRequest/resolved" &&
+      session.prompt?.requestId === params.requestId
+    ) {
+      this.prompts.get(session.prompt!.id)?.({});
+      this.diagnose(
+        session,
+        "runtime",
+        "原生提问已由运行时结束或取消",
+        message.method,
+      );
+      return;
+    }
     if (message.method === "turn/started") {
       session.turnId = params.turn.id;
       this.schedule(session);
@@ -455,10 +526,29 @@ export class AgentHub {
         adjust_image: "调整图片",
         inspect_clip: "检查动画证据",
       };
+      const content = item.result?.content || [];
+      const returnedText = content
+        .filter((c: any) => c.type === "text")
+        .map((c: any) => c.text || "")
+        .join("\n");
+      let outcome: any;
+      try {
+        outcome = JSON.parse(returnedText);
+      } catch {}
+      const rejected = outcome?.executed === false || outcome?.saved === false;
+      const detail =
+        item.error?.message ||
+        item.failure?.message ||
+        outcome?.reason ||
+        (item.result?.isError ? returnedText.slice(0, 900) : undefined);
       const status =
         message.method === "item/started"
           ? "running"
-          : item.error || item.failure || item.status === "failed"
+          : item.error ||
+              item.failure ||
+              item.result?.isError ||
+              rejected ||
+              item.status === "failed"
             ? "failed"
             : "completed";
       const activity = {
@@ -468,7 +558,7 @@ export class AgentHub {
             ? "生成图片"
             : names[item.tool] || item.tool,
         status,
-        detail: item.error?.message || item.failure?.message,
+        detail,
       } as const;
       const index = session.activities.findIndex(
         (activity) => activity.id === item.id,
@@ -476,6 +566,13 @@ export class AgentHub {
       if (index < 0) session.activities.push(activity);
       else session.activities[index] = activity;
       this.flush(session);
+      if (message.method === "item/completed" && detail)
+        this.diagnose(
+          session,
+          "tool",
+          `${activity.label}：${detail}`,
+          message.method,
+        );
       if (
         message.method === "item/completed" &&
         item.type === "imageGeneration" &&
@@ -488,17 +585,51 @@ export class AgentHub {
       }
     }
     if (message.method === "turn/completed") {
+      const endedTurn = params.turn.id;
+      const endedMessage = session.messages
+        .filter((m) => m.role === "user")
+        .at(-1)?.id;
+      const waiting = !!(
+        session.toolApproval ||
+        session.frameSaveApproval ||
+        (session.prompt && session.prompt.blocking !== false)
+      );
+      const pendingError = waiting
+        ? "Codex回合在等待用户决定时已经结束；待审批操作未执行。请发送消息继续，不能把已结束回合当作仍在等待。"
+        : undefined;
       this.cancelTools(session, "任务已结束，待审批操作未执行");
       this.cancelFrameSave(session, "任务已结束，待审批修改未保存");
+      if (session.prompt) this.prompts.get(session.prompt.id)?.({});
       await Promise.allSettled(this.imports.get(session.id) || []);
+      if (
+        (session.turnId && session.turnId !== endedTurn) ||
+        session.messages.filter((m) => m.role === "user").at(-1)?.id !==
+          endedMessage
+      )
+        return;
       this.imports.delete(session.id);
       session.status =
-        params.turn.status === "interrupted"
-          ? "interrupted"
-          : params.turn.status === "failed"
-            ? "failed"
+        params.turn.status === "failed"
+          ? "failed"
+          : params.turn.status === "interrupted" || pendingError
+            ? "interrupted"
             : "idle";
-      if (params.turn.error?.message) session.error = params.turn.error.message;
+      session.error =
+        params.turn.error?.message ||
+        pendingError ||
+        (session.status === "failed"
+          ? session.error ||
+            "Codex回合失败，但未返回详细错误。请查看下方诊断记录。"
+          : session.status === "interrupted"
+            ? session.error ||
+              "Codex报告回合中断（未提供具体原因）。已完成的资源会保留。"
+            : session.error);
+      this.diagnose(
+        session,
+        "runtime",
+        session.error || "本轮对话正常完成",
+        message.method,
+      );
       session.prompt = undefined;
       for (const msg of session.messages)
         if (msg.status === "streaming")
@@ -522,8 +653,15 @@ export class AgentHub {
       }
     }
     if (message.method === "error") {
-      session.error = params.error?.message || params.message;
-      this.schedule(session);
+      const error =
+        params.error?.message || params.message || "Codex返回未说明原因的错误";
+      if (!params.willRetry) session.error = error;
+      this.diagnose(
+        session,
+        "runtime",
+        `${params.willRetry ? "连接重试中：" : "运行错误："}${error}${params.error?.additionalDetails ? "；" + params.error.additionalDetails : ""}`,
+        message.method,
+      );
     }
   }
   private async importGenerated(session: Session, item: any) {
@@ -548,64 +686,135 @@ export class AgentHub {
     }
   }
   private async requestInput(session: Session, request: Message): Promise<any> {
-    // Serialize native user questions behind pending project tools as well.
-    await this.toolTails?.get(session.id);
-    if (!["starting", "running"].includes(session.status))
-      return { decision: "decline" };
-    const params = request.params;
-    const id = randomUUID();
+    const method = request.method;
+    const params = request.params || {};
     if (
-      request.method === "tool/requestUserInput" ||
-      request.method === "mcpServer/elicitation/request"
+      params.threadId &&
+      session.threadId &&
+      params.threadId !== session.threadId
+    )
+      throw new RpcRequestError("请求不属于当前对话", -32602);
+    if (params.turnId && session.turnId && params.turnId !== session.turnId)
+      throw new RpcRequestError("请求来自已结束的回合", -32602);
+    if (method === "currentTime/read")
+      return { currentTimeAt: Math.floor(Date.now() / 1000) };
+    // This callback can be needed by a tool already in flight. Waiting for that
+    // tool's tail here makes both sides wait on each other.
+    if (
+      method === "item/tool/requestUserInput" ||
+      method === "tool/requestUserInput"
     ) {
-      const isTool = request.method === "tool/requestUserInput";
-      const schema = params.requestedSchema || params.request?.requestedSchema;
-      const questions = isTool
-        ? params.questions.map((question: any) => ({
-            id: question.id,
-            question: question.question,
-            options: (question.options || []).map(
-              (option: any) => option.label,
-            ),
-          }))
-        : Object.entries(schema?.properties || {}).map(
-            ([key, value]: [string, any]) => ({
-              id: key,
-              question: value.title || params.message || key,
-              options: value.enum || [],
-            }),
-          );
-      if (!questions.length) return Promise.resolve({ action: "decline" });
-      session.prompt = { id, questions };
-      this.flush(session);
-      return new Promise((resolve) => {
-        const timer = setTimeout(() => {
-          this.prompts.delete(id);
-          session.prompt = undefined;
-          this.flush(session);
-          resolve(isTool ? { answers: {} } : { action: "decline" });
-        }, 15 * 60_000);
-        this.prompts.set(id, (value) => {
-          clearTimeout(timer);
-          this.prompts.delete(id);
-          session.prompt = undefined;
-          this.flush(session);
-          resolve(
-            isTool
-              ? {
-                  answers: Object.fromEntries(
-                    Object.entries(value).map(([key, answer]) => [
-                      key,
-                      { answers: [answer] },
-                    ]),
-                  ),
-                }
-              : { action: "accept", content: value },
-          );
-        });
+      this.promptTails ??= new Map();
+      this.toolEpochs ??= new Map();
+      const epoch = this.toolEpochs.get(session.id) || 0;
+      const previous = this.promptTails.get(session.id);
+      let release!: () => void;
+      const tail = new Promise<void>((r) => {
+        release = r;
       });
+      this.promptTails.set(session.id, tail);
+      await previous;
+      try {
+        if (
+          !["starting", "running"].includes(session.status) ||
+          (this.toolEpochs.get(session.id) || 0) !== epoch
+        )
+          return { answers: {} };
+        const questions = z
+          .array(
+            z.object({
+              id: z.string(),
+              question: z.string(),
+              options: z
+                .array(z.object({ label: z.string() }))
+                .nullable()
+                .optional(),
+            }),
+          )
+          .parse(params.questions)
+          .map((q) => ({
+            id: q.id,
+            question: q.question,
+            options: (q.options || []).map((o) => o.label),
+          }));
+        if (!questions.length) return { answers: {} };
+        const id = randomUUID();
+        session.prompt = {
+          id,
+          requestId: request.id,
+          questions,
+          blocking: params.isBlocking !== false,
+        };
+        const result = new Promise((resolve) => {
+          const timer = setTimeout(
+            () => {
+              void this.stop(session.id, "等待用户回答超时，任务已停止");
+            },
+            23 * 60 * 60_000,
+          );
+          this.prompts.set(id, (answers) => {
+            clearTimeout(timer);
+            this.prompts.delete(id);
+            if (session.prompt?.id === id) session.prompt = undefined;
+            this.flush(session);
+            resolve({
+              answers: Object.fromEntries(
+                Object.entries(answers).map(([key, value]) => [
+                  key,
+                  { answers: [value] },
+                ]),
+              ),
+            });
+          });
+        });
+        this.diagnose(
+          session,
+          "runtime",
+          "助手正在等待回答（这是任务提问，不是工具审批）",
+          method,
+        );
+        return await result;
+      } finally {
+        release();
+        if (this.promptTails.get(session.id) === tail)
+          this.promptTails.delete(session.id);
+      }
     }
-    return Promise.resolve({ decision: "decline" });
+    // Our project MCP advertises tools only, never form elicitation. Do not turn
+    // an unexpected authorization request into an unrelated save/settings form.
+    const response =
+      method === "mcpServer/elicitation/request"
+        ? { action: "decline", content: null, _meta: null }
+        : method === "item/permissions/requestApproval"
+          ? { permissions: {}, scope: "turn" }
+          : method === "item/commandExecution/requestApproval" ||
+              method === "item/fileChange/requestApproval"
+            ? { decision: "decline" }
+            : method === "execCommandApproval" ||
+                method === "applyPatchApproval"
+              ? {
+                  decision: {
+                    denied: {
+                      rejection:
+                        "请使用当前工程的项目工具；宿主执行或文件权限不在本次授权范围",
+                    },
+                  },
+                }
+              : method === "item/tool/call"
+                ? { success: false, contentItems: [] }
+                : undefined;
+    if (response) {
+      this.diagnose(
+        session,
+        "runtime",
+        `已拒绝未接入的原生请求 ${method}；请使用项目工具审批，未开放额外宿主权限。`,
+        method,
+      );
+      return response;
+    }
+    throw new RpcRequestError(
+      `工作台未接入原生请求 ${method}，没有自动授权；请查看对话诊断记录。`,
+    );
   }
   answer(sessionId: string, id: string, answers: Record<string, string>) {
     const session = this.store.session(sessionId);
@@ -686,7 +895,11 @@ export class AgentHub {
         timer,
       });
     });
-    this.flush(session);
+    this.diagnose(
+      session,
+      "approval",
+      `等待审批：保存动画“${approval.clipName}”的帧调整`,
+    );
     return promise;
   }
   cancelFrameSave(session: Session, reason: string) {
@@ -703,7 +916,7 @@ export class AgentHub {
     );
     if (draft.status === "pending")
       this.store.frameDrafts.persist({ ...draft, status: "editing" });
-    this.flush(session);
+    this.diagnose(session, "approval", `帧调整未保存：${reason}`);
     pending.finish({ saved: false, reason });
   }
   async resolveFrameSave(
@@ -737,6 +950,11 @@ export class AgentHub {
         approval.documentRevision,
       );
       const result = { saved: true, change };
+      this.diagnose(
+        session,
+        "approval",
+        `已允许并保存动画“${approval.clipName}”的帧调整`,
+      );
       pending.finish(result);
       return result;
     } catch (error) {
@@ -756,6 +974,10 @@ export class AgentHub {
   async stop(sessionId: string, reason = "任务已停止，待审批操作未执行") {
     const session = this.store.session(sessionId);
     const client = this.clients.get(sessionId);
+    const interruptedTurn = session.turnId;
+    const interruptedMessage = session.messages
+      .filter((m) => m.role === "user")
+      .at(-1)?.id;
     // Interrupt the model before releasing blocked tool calls, so it cannot resume
     // reasoning from a timeout/cancellation result while still running.
     if (client && session.turnId && session.status === "running") {
@@ -768,7 +990,15 @@ export class AgentHub {
         await client.close();
       }
     }
+    if (
+      (session.turnId && session.turnId !== interruptedTurn) ||
+      session.messages.filter((m) => m.role === "user").at(-1)?.id !==
+        interruptedMessage
+    )
+      return;
     session.status = "interrupted";
+    session.error = reason;
+    this.diagnose(session, "runtime", reason, "turn/interrupt");
     this.cancelTools(session, reason);
     this.cancelFrameSave(session, reason);
     if (session.prompt) this.prompts.get(session.prompt.id)?.({});
@@ -781,10 +1011,16 @@ export class AgentHub {
     }
   }
   private fail(session: Session, error: unknown) {
+    const client = this.clients.get(session.id);
+    this.clients.delete(session.id);
+    this.tokens?.delete(session.id);
+    if (client) void client.close().catch(() => {});
     this.cancelTools(session, "任务失败，待审批操作未执行");
     this.cancelFrameSave(session, "任务失败，修改未保存");
     session.status = "failed";
     session.error = error instanceof Error ? error.message : String(error);
+    this.diagnose(session, "runtime", session.error, "runtime/failure");
+    if (session.prompt) this.prompts.get(session.prompt.id)?.({});
     for (const msg of session.messages)
       if (msg.status === "streaming") msg.status = "failed";
     this.flush(session);
@@ -819,7 +1055,11 @@ export class AgentHub {
     clearTimeout(pending.timer);
     this.toolWaits.delete(approvalId);
     session.toolApproval = undefined;
-    this.flush(session);
+    this.diagnose(
+      session,
+      "approval",
+      `${accept ? "已允许" : "已拒绝"}工具审批${reason ? "：" + reason : ""}`,
+    );
     pending.finish({
       accept,
       reason:
@@ -859,7 +1099,11 @@ export class AgentHub {
         this.toolWaits.set(id, { finish, timer });
       },
     );
-    this.flush(session);
+    this.diagnose(
+      session,
+      "approval",
+      `等待审批：${session.toolApproval!.label}`,
+    );
     return result;
   }
   async tool(sessionId: string, name: string, input: any) {
@@ -901,6 +1145,13 @@ export class AgentHub {
       if ((this.toolEpochs.get(sessionId) || 0) !== epoch)
         throw new StudioError("任务已取消，操作未执行", 409);
       return await this.executeTool(sessionId, name, args);
+    } catch (error) {
+      this.diagnose(
+        session,
+        "tool",
+        `${name} 未执行或失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw error;
     } finally {
       release();
       if (this.toolTails.get(sessionId) === tail)
@@ -1256,6 +1507,7 @@ export class AgentHub {
     for (const session of this.store.sessions.values()) {
       this.cancelTools(session, "服务已停止，待审批操作未执行");
       this.cancelFrameSave(session, "服务已停止，修改未保存");
+      if (session.prompt) this.prompts.get(session.prompt.id)?.({});
     }
     for (const timer of this.timers.values()) clearTimeout(timer);
     for (const session of this.store.sessions.values())

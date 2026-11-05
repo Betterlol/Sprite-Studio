@@ -106,7 +106,7 @@ export function FrameSaveApprovals({
                   disabled={!!busy}
                   onClick={() => void decide(s, true)}
                 >
-                  Accept · 应用保存
+                  Approve · 应用保存
                 </button>
                 <button
                   className="secondary"

@@ -6,10 +6,12 @@ export function GeneratedPreview({
   projectId,
   image,
   onSaved,
+  awaitingApproval = false,
 }: {
   projectId: string;
   image: GeneratedImageInfo;
   onSaved: (asset: ImageAsset) => Promise<void>;
+  awaitingApproval?: boolean;
 }) {
   const [name, setName] = useState("生成图.png"),
     [folder, setFolder] = useState(""),
@@ -26,10 +28,17 @@ export function GeneratedPreview({
         alt="生成图片（尚未保存为项目资源）"
       />
       <span>生成图片 · 尚未保存</span>
-      <button className="secondary" onClick={() => setOpen(!open)}>
-        保存到项目…
-      </button>
-      {open && (
+      {awaitingApproval ? (
+        <p role="status">
+          助手正在请求保存这张图片，请使用下方 Approve /
+          Deny；无需另外填写保存表单。
+        </p>
+      ) : (
+        <button className="secondary" onClick={() => setOpen(!open)}>
+          手动保存到项目…
+        </button>
+      )}
+      {open && !awaitingApproval && (
         <form
           onSubmit={(e) => {
             e.preventDefault();

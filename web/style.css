@@ -3325,3 +3325,39 @@ a {
   opacity: 0.65;
   cursor: not-allowed;
 }
+
+.activities .activity {
+  flex-wrap: wrap;
+}
+.activities .activity-detail {
+  flex-basis: 100%;
+  padding-left: 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.session-diagnostics {
+  margin: 12px 0;
+  font-size: 11px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 8px;
+}
+.session-diagnostics summary {
+  cursor: pointer;
+}
+.session-diagnostics ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  max-height: 240px;
+  overflow: auto;
+}
+.session-diagnostics li {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.session-diagnostics time,
+.session-diagnostics code {
+  display: block;
+  color: var(--muted);
+}

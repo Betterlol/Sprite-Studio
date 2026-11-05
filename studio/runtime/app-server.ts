@@ -48,6 +48,13 @@ export function codexCommand(): { executable: string; prefix: string[] } {
   );
 }
 
+export class RpcRequestError extends Error {
+  code: number;
+  constructor(message: string, code = -32601) {
+    super(message);
+    this.code = code;
+  }
+}
 export class AppServer extends EventEmitter {
   child: ChildProcessWithoutNullStreams;
   nextId = 1;
@@ -63,9 +70,13 @@ export class AppServer extends EventEmitter {
   notifications: Message[] = [];
   stderrTail = "";
   closed = false;
-  serverRequest: (message: Message) => Promise<any> = async () => ({
-    decision: "decline",
-  });
+  serverRequest: (message: Message) => Promise<any> = async (message) => {
+    if (message.method === "currentTime/read")
+      return { currentTimeAt: Math.floor(Date.now() / 1000) };
+    throw new RpcRequestError(
+      `Unsupported App Server request: ${message.method}`,
+    );
+  };
 
   constructor(
     cwd: string,
@@ -127,17 +138,28 @@ export class AppServer extends EventEmitter {
         return;
       }
       if (message.method && message.id !== undefined) {
-        this.serverRequest(message)
-          .then((result) => this.send({ id: message.id, result }))
-          .catch(() =>
-            this.send({
-              id: message.id,
-              error: {
-                code: -32000,
-                message: "Probe rejected the server request",
-              },
-            }),
-          );
+        void Promise.resolve()
+          .then(() => this.serverRequest(message))
+          .then((result) => {
+            if (!this.closed && !this.child.stdin.destroyed)
+              this.send({ id: message.id, result });
+          })
+          .catch((error) => {
+            const detail =
+              error instanceof Error ? error.message : String(error);
+            this.emit("requestError", {
+              method: message.method,
+              message: detail,
+            });
+            if (!this.closed && !this.child.stdin.destroyed)
+              this.send({
+                id: message.id,
+                error: {
+                  code: error instanceof RpcRequestError ? error.code : -32000,
+                  message: detail,
+                },
+              });
+          });
       } else if (message.id !== undefined) {
         const pending = this.pending.get(Number(message.id));
         if (!pending) return;
@@ -160,7 +182,19 @@ export class AppServer extends EventEmitter {
     this.child.on("error", (error) => this.fail(error));
     this.child.on("exit", (code) => {
       this.closed = true;
-      this.fail(new Error(`App Server exited (${code})`));
+      const detail = this.stderrTail
+        .trim()
+        .split(/\r?\n/)
+        .slice(-3)
+        .join(" ")
+        .slice(-900)
+        .replace(
+          /Bearer\s+\S+|sk-[A-Za-z0-9_-]+|SPRITE_STUDIO_TOOL_TOKEN[=:]\S+/gi,
+          "[redacted]",
+        );
+      this.fail(
+        new Error(`App Server exited (${code})${detail ? ": " + detail : ""}`),
+      );
     });
   }
 

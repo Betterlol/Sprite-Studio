@@ -211,7 +211,20 @@ export type PromptQuestion = {
   question: string;
   options: string[];
 };
-export type PendingPrompt = { id: string; questions: PromptQuestion[] };
+export type PendingPrompt = {
+  id: string;
+  requestId?: string | number;
+  blocking?: boolean;
+  questions: PromptQuestion[];
+};
+export type SessionDiagnostic = {
+  id: string;
+  createdAt: string;
+  kind: "approval" | "runtime" | "tool";
+  message: string;
+  method?: string;
+  turnId?: string;
+};
 export type ToolApproval = {
   id: string;
   tool: string;
@@ -220,6 +233,7 @@ export type ToolApproval = {
   createdAt: string;
 };
 export type Session = {
+  diagnostics?: SessionDiagnostic[];
   outputFolder?: string;
   id: string;
   projectId: string;

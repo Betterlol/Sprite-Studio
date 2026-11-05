@@ -84,7 +84,7 @@ export function ToolApprovals({
                   disabled={!!busy}
                   onClick={() => void decide(s, true)}
                 >
-                  Accept · 允许执行
+                  Approve · 允许执行
                 </button>
                 <button
                   className="secondary"

@@ -247,6 +247,14 @@ export function App() {
       : selected
   ) as ImageAsset | undefined;
   const session = state?.sessions.find((session) => session.id === sessionId);
+  const waitingSession = state?.sessions.find(
+    (s) => s.toolApproval || s.frameSaveApproval || s.prompt,
+  );
+  const waitingId =
+    waitingSession?.toolApproval?.id ||
+    waitingSession?.frameSaveApproval?.id ||
+    waitingSession?.prompt?.id ||
+    "";
   const agentBusy = !!state?.sessions.some((session) => active(session));
 
   const loadProject = useCallback(async (id: string, initial = false) => {
@@ -398,7 +406,23 @@ export function App() {
     session?.messages.at(-1)?.text,
     session?.status,
     session?.activities.length,
+    session?.toolApproval?.id,
+    session?.frameSaveApproval?.id,
+    session?.prompt?.id,
+    chatVisible,
+    waitingId,
   ]);
+  const displayedApproval = useRef("");
+  useEffect(() => {
+    if (
+      waitingId &&
+      waitingId !== displayedApproval.current &&
+      waitingSession
+    ) {
+      displayedApproval.current = waitingId;
+      setChatVisible(true);
+    }
+  }, [waitingId]);
   useEffect(() => {
     if (!playing || !displayClip || !displayClip.frames.length) return;
     let index = Math.min(frameIndex, displayClip.frames.length - 1),
@@ -1659,6 +1683,11 @@ export function App() {
                         key={id}
                         projectId={projectId}
                         image={image}
+                        awaitingApproval={state?.sessions.some(
+                          (s) =>
+                            s.toolApproval?.tool === "save_image" &&
+                            s.toolApproval.arguments.generatedId === image.id,
+                        )}
                         onSaved={async (asset) => {
                           await refreshRef.current();
                           setSelectedId(asset.id);
@@ -1691,6 +1720,11 @@ export function App() {
                       )}
                       <span>{activity.label}</span>
                       {activity.status === "running" && <small>进行中</small>}
+                      {activity.detail && (
+                        <small className="activity-detail">
+                          {activity.detail}
+                        </small>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1707,6 +1741,24 @@ export function App() {
                   <span>本次任务已停止，已经完成的结果仍会保留。</span>
                 </div>
               )}
+              {!!session?.diagnostics?.length && (
+                <details className="session-diagnostics">
+                  <summary>
+                    本地诊断记录（{session.diagnostics.length}）
+                  </summary>
+                  <ol>
+                    {session.diagnostics.slice(-15).map((entry) => (
+                      <li key={entry.id}>
+                        <time>
+                          {new Date(entry.createdAt).toLocaleTimeString()}
+                        </time>
+                        <span>{entry.message}</span>
+                        {entry.method && <code>{entry.method}</code>}
+                      </li>
+                    ))}
+                  </ol>
+                </details>
+              )}
               {session?.prompt && (
                 <form
                   className="prompt-card"
@@ -1721,7 +1773,7 @@ export function App() {
                     }).catch((error) => notify(error.message, true));
                   }}
                 >
-                  <strong>需要你的选择</strong>
+                  <strong>助手提问（不是工具审批）</strong>
                   {session.prompt.questions.map((question) => (
                     <label key={question.id}>
                       {question.question}
@@ -1931,7 +1983,9 @@ export function App() {
                 (s) => s.toolApproval || s.frameSaveApproval,
               )
                 ? "等待你的审批"
-                : "助手正在工作"}
+                : state?.sessions.some((s) => s.prompt)
+                  ? "等待你的回答"
+                  : "助手正在工作"}
             </>
           ) : (
             <>

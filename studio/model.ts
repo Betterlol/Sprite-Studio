@@ -51,7 +51,60 @@ export type ImageAsset = {
     interpolationId?: string;
   };
 };
-export type ClipFrame = { id: string; imageId: string; durationUs: number };
+export type FrameTransform = {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  clip: boolean;
+};
+export const frameTransformSchema = z
+  .object({
+    scale: z.number().min(0.05).max(4).default(1),
+    offsetX: z.number().min(-4096).max(4096).default(0),
+    offsetY: z.number().min(-4096).max(4096).default(0),
+    clip: z.boolean().default(false),
+  })
+  .strict();
+export type ClipFrame = {
+  id: string;
+  imageId: string;
+  durationUs: number;
+  transform?: FrameTransform;
+};
+export type FrameDraft = {
+  id: string;
+  projectId: string;
+  clipId: string;
+  frameId: string;
+  baseSnapshotId: string;
+  source: "agent" | "human";
+  sessionId?: string;
+  status: "editing" | "pending" | "saved" | "discarded";
+  createdAt: string;
+  documentRevision: string;
+  text: string;
+  snapshotId?: string;
+  changeId?: string;
+};
+export const frameEditSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    type: z.literal("frame-edit"),
+    transform: frameTransformSchema,
+    durationUs: z.number().int().min(1000).max(60_000_000),
+  })
+  .strict();
+export type FrameSaveApproval = {
+  id: string;
+  draftId: string;
+  documentRevision: string;
+  beforeSnapshotId: string;
+  previewSnapshotId: string;
+  frameNumber: number;
+  clipName: string;
+  before: Pick<ClipFrame, "transform" | "durationUs">;
+  after: Pick<ClipFrame, "transform" | "durationUs">;
+};
 export type ClipAsset = {
   initialFps?: number;
   folder?: string;
@@ -125,6 +178,7 @@ export type Session = {
   activities: Activity[];
   error?: string;
   prompt?: PendingPrompt;
+  frameSaveApproval?: FrameSaveApproval;
   createdAt: string;
   updatedAt: string;
   interpolationId?: string;
@@ -224,6 +278,8 @@ export type FrameObservation = {
   height: number;
 };
 export type ClipReview = {
+  draftId?: string;
+  documentRevision?: string;
   id: string;
   projectId: string;
   snapshotId: string;
@@ -293,6 +349,7 @@ export const clipSchema = z.object({
         id: z.string().uuid(),
         imageId: z.string().uuid(),
         durationUs: z.number().int().min(1000).max(60_000_000),
+        transform: frameTransformSchema.optional(),
       }),
     )
     .max(128),
@@ -305,4 +362,12 @@ export function assetUrl(
   revision?: string,
 ): string {
   return `/api/projects/${projectId}/images/${imageId}${revision ? `?v=${revision}` : ""}`;
+}
+export function clipFrameUrl(
+  projectId: string,
+  clip: ClipAsset,
+  frame: ClipFrame,
+  imageRevision?: string,
+) {
+  return `/api/projects/${projectId}/clips/${clip.id}/frames/${frame.id}/image?v=${clip.revision}&imageRevision=${imageRevision || ""}`;
 }

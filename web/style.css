@@ -2411,3 +2411,122 @@ a {
     transition-duration: 0.01ms !important;
   }
 }
+
+.frame-adjustment {
+  padding: 14px 18px;
+  max-height: 300px;
+  overflow: auto;
+}
+.frame-draft-heading,
+.frame-draft-actions,
+.frame-preview-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.frame-draft-heading {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.frame-draft-heading span,
+.frame-draft-actions span {
+  color: var(--muted, #a9b9bb);
+  font-size: 12px;
+}
+.frame-config-fields {
+  border: 0;
+  padding: 0;
+  margin: 10px 0;
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.frame-config-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.frame-config-fields input[type="number"] {
+  width: 96px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #151e23;
+  color: inherit;
+  padding: 5px 8px;
+}
+.frame-config-fields .frame-clip-check {
+  flex-direction: row;
+  align-items: center;
+  padding: 9px 0;
+}
+.frame-preview-banner {
+  padding: 6px 18px;
+  color: var(--accent, #8ee3ca);
+  background: var(--panel, #1d292f);
+  font-size: 12px;
+  flex: none;
+}
+.frame-save-card {
+  border: 1px solid var(--accent, #8ee3ca);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 12px 0;
+  display: grid;
+  gap: 10px;
+}
+.frame-save-card p {
+  margin: 0;
+}
+.frame-save-card label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+.frame-save-card textarea {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #151e23;
+  color: inherit;
+  padding: 8px;
+}
+.frame-save-approvals {
+  padding: 0 12px;
+}
+.frame-permissions {
+  font-size: 12px;
+  margin: 10px 0;
+}
+.frame-permissions label {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+  align-items: center;
+}
+.frame-permissions small {
+  display: block;
+  color: var(--muted, #a9b9bb);
+}
+.frame-draft-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-height: 90px;
+  overflow: auto;
+}
+.frame-draft-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.frame-draft-evidence img {
+  max-width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+}

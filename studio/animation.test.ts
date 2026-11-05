@@ -59,7 +59,7 @@ test("direct edits and immutable comparisons work in deep Windows paths without 
     const comparison = store.animation.compare(pid, change.id);
     assert.equal(comparison.before.clip.id, clip.id);
     assert.equal(comparison.after.clip.id, clip.id);
-    assert.notEqual(
+    assert.equal(
       comparison.before.clip.frames[2]!.imageId,
       comparison.after.clip.frames[2]!.imageId,
     );
@@ -121,7 +121,7 @@ test("one instance changes directly, duplicate requests do not repeat it, and un
       store.animation.adjust(pid, input),
     ]);
     assert.equal(change.id, duplicate.id);
-    assert.equal(store.assets(pid).length, count + 1);
+    assert.equal(store.assets(pid).length, count);
     const changed = store.animation.clip(pid, shared.id);
     assert.equal(changed.frames[2]!.durationUs, 125000);
     assert.equal(changed.frames[4]!.imageId, shared.frames[4]!.imageId);

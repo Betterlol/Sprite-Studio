@@ -70,10 +70,12 @@ const tools = [
   {
     name: "get_schema",
     description:
-      "Read the current configuration JSON schema (type sheet-recipe or clip; default sheet-recipe). Editing uses document text; execution tools read saved configuration.",
+      "Read the current configuration JSON schema (type sheet-recipe or clip; default sheet-recipe). Editing uses document text; frame-edit drafts can be previewed before save_frame_draft applies them.",
     inputSchema: {
       type: "object",
-      properties: { type: { type: "string", enum: ["sheet-recipe", "clip"] } },
+      properties: {
+        type: { type: "string", enum: ["sheet-recipe", "clip", "frame-edit"] },
+      },
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true },
@@ -105,7 +107,7 @@ const tools = [
   {
     name: "write_documents",
     description:
-      "Save 1-16 recipe or clip config files atomically from complete JSON text and expected document revisions. Returns normalized documents and stable IDs for new items. Does not slice, generate images or create animations. Re-read on version conflict; never discard another editor's changes.",
+      "Write 1-16 recipe, clip config or frame-edit draft documents atomically from complete JSON text and expected document revisions. Returns normalized documents and stable IDs for new items. Writing frame-edit only updates the draft, not the animation; use inspect_clip then save_frame_draft. Does not slice, generate images or create animations. Re-read on version conflict; never discard another editor's changes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -137,10 +139,16 @@ const tools = [
   {
     name: "inspect_clip",
     description:
-      "Inspect an animation snapshot or current clip: returns actual ordered contact sheet, red/cyan adjacent onion skins including loop boundary, frame instance IDs, microsecond timings and alpha bounds. These are static evidence, not observed video playback. At most 16 selected frames per call; use frame IDs to inspect further ranges.",
+      "Inspect a draft (draftId + documentRevision), animation snapshot or current clip: returns actual ordered contact sheet, red/cyan adjacent onion skins including loop boundary, frame instance IDs, microsecond timings and alpha bounds. These are static evidence, not observed video playback. At most 16 selected frames per call; use frame IDs to inspect further ranges.",
     inputSchema: {
       type: "object",
       properties: {
+        draftId: {
+          type: "string",
+          description:
+            "Single-frame draft documentId; requires documentRevision. Renders draft config without saving.",
+        },
+        documentRevision: { type: "string" },
         snapshotId: { type: "string" },
         clipId: idProperty,
         revision: { type: "string" },
@@ -152,36 +160,32 @@ const tools = [
     annotations: { readOnlyHint: true },
   },
   {
-    name: "adjust_frame",
+    name: "create_frame_draft",
     description:
-      "Modify one frame instance in the current animation directly, preserving all other instances and original pixels. Returns a change ID and actual before/after evidence. The webpage supports comparison and undo. Durations are integer microseconds.",
+      "Create or reopen a single animation frame config draft from saved source-relative transform and duration. Returns a documentId. Use read_document/write_documents to edit its frame-edit JSON; inspect_clip(draftId,documentRevision) previews it. Does not apply changes or create image resources.",
     inputSchema: {
       type: "object",
       properties: {
-        requestId: { type: "string" },
         clipId: idProperty,
         revision: { type: "string" },
         frameId: idProperty,
-        transform: {
-          type: "object",
-          properties: {
-            scale: { type: "number", minimum: 0.05, maximum: 4 },
-            offsetX: { type: "number" },
-            offsetY: { type: "number" },
-            clip: { type: "boolean" },
-          },
-          additionalProperties: false,
-        },
-        durationUs: { type: "integer", minimum: 1000, maximum: 60000000 },
       },
       required: ["clipId", "revision", "frameId"],
       additionalProperties: false,
     },
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: false,
-      openWorldHint: false,
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  {
+    name: "save_frame_draft",
+    description:
+      "Save the exact previewed frame config draft. Default policy asks the user to Accept/Deny in the webpage; waits and returns the decision and denial reason. Never claim saved before this succeeds. No new image resource; preserves other frame instances and source pixels.",
+    inputSchema: {
+      type: "object",
+      properties: { draftId: idProperty, documentRevision: { type: "string" } },
+      required: ["draftId", "documentRevision"],
+      additionalProperties: false,
     },
+    annotations: { readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "list_assets",
@@ -271,7 +275,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           capabilities: { tools: {} },
           serverInfo: { name: "sprite-studio", version: "0.1.0" },
           instructions:
-            "Use stable project resource IDs. Inspect actual images before making visual claims. Image operations preserve originals; frame edits update the selected animation and record undo history.",
+            "Use stable project resource IDs. Inspect actual images before making visual claims. Image operations preserve originals; frame edits use config drafts, preview before saving and request permission to apply; saved edits record undo history.",
         },
       });
     else if (request.method === "ping")
@@ -287,7 +291,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(request.params),
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.timeout(
+          request.params.name === "save_frame_draft" ? 16 * 60_000 : 120_000,
+        ),
       })
         .then(async (response) => {
           const result = await response.json();

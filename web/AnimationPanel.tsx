@@ -307,7 +307,7 @@ export function AnimationPanel(props: Props) {
       )}
       {!review && !change && (
         <p className="review-note">
-          检查动画或引用给助手。调整会直接更新当前动画，并保留比较与撤回记录。
+          检查动画或引用给助手。单帧调整先预览草稿，保存后更新动画，并保留比较与撤回记录。
         </p>
       )}
       {error && (

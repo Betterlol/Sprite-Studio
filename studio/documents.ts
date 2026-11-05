@@ -9,7 +9,11 @@ import {
   StudioError,
   type ProjectStore,
 } from "./store.ts";
-import type { ClipAsset, ResourceCategory } from "./model.ts";
+import {
+  frameTransformSchema,
+  type ClipAsset,
+  type ResourceCategory,
+} from "./model.ts";
 
 export const clipDocumentSchema = z
   .object({
@@ -24,6 +28,7 @@ export const clipDocumentSchema = z
             id: z.string().uuid().optional(),
             imageId: z.string().uuid(),
             durationUs: z.number().int().min(1000).max(60000000),
+            transform: frameTransformSchema.optional(),
           })
           .strict(),
       )
@@ -60,6 +65,8 @@ export class ProjectDocuments {
     this.store = store;
   }
   read(pid: string, id: string): any {
+    if (this.store.frameDrafts.has(id))
+      return this.store.frameDrafts.read(pid, id);
     const asset = this.store.asset(pid, id);
     if (asset.type !== "clip") return this.store.sheets.read(pid, id);
     const path = asset.file! + ".config.json",
@@ -87,6 +94,10 @@ export class ProjectDocuments {
     };
   }
   parse(pid: string, id: string, text: string) {
+    if (this.store.frameDrafts.has(id)) {
+      this.store.frameDrafts.get(pid, id);
+      return this.store.frameDrafts.parse(text);
+    }
     if (this.store.asset(pid, id).type !== "clip")
       return this.store.sheets.parse(pid, id, text);
     if (Buffer.byteLength(text) > 256 * 1024)
@@ -132,6 +143,8 @@ export class ProjectDocuments {
     )
       throw new StudioError("每次提交1至16份不同配置");
     const writes = documents.flatMap((input) => {
+      if (this.store.frameDrafts.has(input.documentId))
+        return [this.store.frameDrafts.prepare(pid, input)];
       const asset = this.store.asset(pid, input.documentId);
       if (asset.type !== "clip") return [this.store.sheets.prepare(pid, input)];
       const current = this.read(pid, asset.id);

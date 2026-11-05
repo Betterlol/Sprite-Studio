@@ -20,6 +20,7 @@ import { recoverResourceLayout, organizeResourceLayout } from "./layout.ts";
 import { recoverFileOperations } from "./file-operations.ts";
 import { ProjectDocuments } from "./documents.ts";
 import { GeneratedImages } from "./generated.ts";
+import { FrameDrafts } from "./frame-drafts.ts";
 import { SheetDocuments } from "./sheets.ts";
 import {
   resourceCategories,
@@ -72,6 +73,7 @@ export class ProjectStore extends EventEmitter {
   sheets: SheetDocuments;
   documents: ProjectDocuments;
   generated: GeneratedImages;
+  frameDrafts: FrameDrafts;
   metadataPaths = new Map<string, Map<string, string>>();
   resourceReaders = new Map<string, number>();
   constructor(root: string) {
@@ -110,6 +112,7 @@ export class ProjectStore extends EventEmitter {
                 message.status = "interrupted";
           }
           session.prompt = undefined;
+          session.frameSaveApproval = undefined;
           this.sessions.set(session.id, session);
         }
     }
@@ -118,6 +121,7 @@ export class ProjectStore extends EventEmitter {
     this.sheets = new SheetDocuments(this);
     this.documents = new ProjectDocuments(this);
     this.generated = new GeneratedImages(this);
+    this.frameDrafts = new FrameDrafts(this);
   }
   project(id: string) {
     const project = this.projects.get(id);
@@ -552,10 +556,15 @@ export class ProjectStore extends EventEmitter {
       const clip = this.asset(projectId, id);
       if (clip.type !== "clip") throw new StudioError("请选择动画资源");
       if (!clip.frames.length) throw new StudioError("动画还没有帧，无法导出");
-      const frames = clip.frames.map((frame) => ({
-        ...frame,
-        path: this.imagePath(projectId, frame.imageId),
-      }));
+      const snapshot = this.animation.capture(projectId, id);
+      const frames = await Promise.all(
+        clip.frames.map(async (frame) => ({
+          ...frame,
+          path: (
+            await this.animation.renderFrame(projectId, snapshot.id, frame.id)
+          ).path,
+        })),
+      );
       const result = await this.worker.run("export", {
         path: frames[0]!.path,
         outputDir: this.stage(projectId),
@@ -624,6 +633,7 @@ export class ProjectStore extends EventEmitter {
       interpolations: this.interpolations.list(projectId),
       reviews: this.animation.listReviews(projectId),
       frameChanges: this.animation.listChanges(projectId),
+      frameDrafts: this.frameDrafts.list(projectId),
       sessions: [...this.sessions.values()]
         .filter((session) => session.projectId === projectId)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),

@@ -250,6 +250,8 @@ app.post("/api/projects/:projectId/reviews", async (request) => {
   const spec = z
     .object({
       snapshotId: z.string().uuid().optional(),
+      draftId: z.string().uuid().optional(),
+      documentRevision: z.string().optional(),
       clipId: z.string().uuid().optional(),
       revision: z.string().optional(),
       startFrameId: z.string().uuid().optional(),
@@ -277,7 +279,7 @@ app.get(
 app.get(
   "/api/projects/:projectId/snapshots/:snapshotId/images/:frameId",
   async (request: any, reply) => {
-    const { path, image } = store.animation.imagePath(
+    const { path, image } = await store.animation.renderFrame(
       pid(request),
       z.string().uuid().parse(request.params.snapshotId),
       z.string().uuid().parse(request.params.frameId),
@@ -288,9 +290,84 @@ app.get(
       .send(createReadStream(path));
   },
 );
-app.post("/api/projects/:projectId/frame-changes", async (request) =>
-  store.animation.adjust(pid(request), request.body),
+app.get(
+  "/api/projects/:projectId/clips/:assetId/frames/:frameId/image",
+  async (request: any, reply) => {
+    const query = z.object({ v: z.string() }).parse(request.query);
+    const snapshot = store.animation.capture(
+      pid(request),
+      aid(request),
+      query.v,
+    );
+    const rendered = await store.animation.renderFrame(
+      pid(request),
+      snapshot.id,
+      z.string().uuid().parse(request.params.frameId),
+    );
+    return reply
+      .type(rendered.image.mime)
+      .header("Cache-Control", "no-cache")
+      .send(createReadStream(rendered.path));
+  },
 );
+app.post("/api/projects/:projectId/frame-drafts", async (request) =>
+  store.frameDrafts.create(pid(request), request.body as any, "human"),
+);
+app.post(
+  "/api/projects/:projectId/frame-drafts/:draftId/preview",
+  async (request: any) => {
+    const spec = z.object({ documentRevision: z.string() }).parse(request.body);
+    return store.frameDrafts.preview(
+      pid(request),
+      z.string().uuid().parse(request.params.draftId),
+      spec.documentRevision,
+    );
+  },
+);
+app.post(
+  "/api/projects/:projectId/frame-drafts/:draftId/save",
+  async (request: any) => {
+    const spec = z.object({ documentRevision: z.string() }).parse(request.body);
+    const id = z.string().uuid().parse(request.params.draftId);
+    if (store.frameDrafts.get(pid(request), id).status === "pending")
+      throw new StudioError("请在审批卡片中处理这个保存请求", 409);
+    return store.frameDrafts.save(pid(request), id, spec.documentRevision);
+  },
+);
+app.post(
+  "/api/projects/:projectId/frame-drafts/:draftId/discard",
+  async (request: any) => {
+    const spec = z.object({ documentRevision: z.string() }).parse(request.body);
+    return store.frameDrafts.discard(
+      pid(request),
+      z.string().uuid().parse(request.params.draftId),
+      spec.documentRevision,
+    );
+  },
+);
+app.get("/api/tool-permissions", async () => ({
+  save_frame_draft: store.frameDrafts.policy(),
+}));
+app.put("/api/tool-permissions", async (request) => ({
+  save_frame_draft: store.frameDrafts.setPolicy(
+    (request.body as any)?.save_frame_draft,
+  ),
+}));
+app.post("/api/sessions/:sessionId/frame-save", async (request: any) => {
+  const spec = z
+    .object({
+      approvalId: z.string().uuid(),
+      accept: z.boolean(),
+      reason: z.string().max(2000).default(""),
+    })
+    .parse(request.body);
+  return agent.resolveFrameSave(
+    request.params.sessionId,
+    spec.approvalId,
+    spec.accept,
+    spec.reason,
+  );
+});
 app.post(
   "/api/projects/:projectId/frame-changes/:changeId/compare",
   async (request: any) =>

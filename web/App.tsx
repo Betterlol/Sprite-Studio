@@ -1,3 +1,8 @@
+import {
+  FrameAdjustmentPanel,
+  type FramePreview,
+} from "./FrameAdjustmentPanel.tsx";
+import { FrameSaveApprovals } from "./FrameSaveApprovals.tsx";
 import { AnimationEditor } from "./AnimationEditor.tsx";
 import { GeneratedPreview } from "./GeneratedPreview.tsx";
 import type { GeneratedImageInfo } from "../studio/generated.ts";
@@ -44,6 +49,9 @@ import {
 } from "lucide-react";
 import {
   assetUrl,
+  clipFrameUrl,
+  snapshotFrameUrl,
+  type FrameDraft,
   categoryFolder,
   folderCategory,
   type Asset,
@@ -68,6 +76,7 @@ type State = {
   interpolations: Interpolation[];
   reviews: ClipReview[];
   frameChanges: FrameChange[];
+  frameDrafts: FrameDraft[];
   folders: string[];
   libraryRevision: string;
   configurationRevision: string;
@@ -152,6 +161,10 @@ export function App() {
     SheetRecipe["slicing"]["grid"] | null
   >(null);
   const [showGrid, setShowGrid] = useState(true);
+  const [framePreview, setFramePreview] = useState<FramePreview | null>(null);
+  useEffect(() => {
+    if (tool !== "adjust") setFramePreview(null);
+  }, [tool]);
   const [transform, setTransform] = useState<Transform>(emptyTransform);
   const [draft, setDraft] = useState("");
   const [references, setReferences] = useState<string[]>([]);
@@ -183,12 +196,18 @@ export function App() {
       ? comparison
       : null;
   const interpolationClip = clip;
+  const displayClip =
+    framePreview?.draft.clipId === clip?.id
+      ? framePreview?.preview.clip || clip
+      : clip;
   const currentImage = (
     clip
       ? state?.assets.find(
           (asset) =>
             asset.id ===
-            clip.frames[Math.min(frameIndex, clip.frames.length - 1)]?.imageId,
+            displayClip!.frames[
+              Math.min(frameIndex, displayClip!.frames.length - 1)
+            ]?.imageId,
         )
       : selected
   ) as ImageAsset | undefined;
@@ -310,6 +329,7 @@ export function App() {
     setPlaying(playbackIntent.current === selectedId);
     playbackIntent.current = null;
     setTransform(emptyTransform);
+    setFramePreview(null);
     setZoom("fit");
   }, [selectedId]);
   useEffect(() => {
@@ -337,8 +357,8 @@ export function App() {
     session?.activities.length,
   ]);
   useEffect(() => {
-    if (!playing || !clip || !clip.frames.length) return;
-    let index = Math.min(frameIndex, clip.frames.length - 1),
+    if (!playing || !displayClip || !displayClip.frames.length) return;
+    let index = Math.min(frameIndex, displayClip.frames.length - 1),
       elapsed = 0,
       last = performance.now(),
       request = 0;
@@ -347,22 +367,22 @@ export function App() {
       last = time;
       let guard = 0;
       while (
-        elapsed >= clip.frames[index]!.durationUs / 1000 &&
+        elapsed >= displayClip.frames[index]!.durationUs / 1000 &&
         guard++ < 128
       ) {
-        elapsed -= clip.frames[index]!.durationUs / 1000;
-        if (index === clip.frames.length - 1 && !clip.loop) {
+        elapsed -= displayClip.frames[index]!.durationUs / 1000;
+        if (index === displayClip.frames.length - 1 && !displayClip.loop) {
           setPlaying(false);
           return;
         }
-        index = (index + 1) % clip.frames.length;
+        index = (index + 1) % displayClip.frames.length;
         setFrameIndex(index);
       }
       request = requestAnimationFrame(tick);
     };
     request = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(request);
-  }, [playing, clip?.revision, playbackRun]);
+  }, [playing, displayClip?.revision, playbackRun]);
   useEffect(() => {
     if (!clip) return;
     setFrameIndex((index) =>
@@ -552,44 +572,22 @@ export function App() {
     return updated;
   }
   async function applyTransform() {
-    if (!currentImage) return;
+    if (!currentImage || clip) return;
     await run("正在调整图片", async () => {
-      if (clip) {
-        const change = await api<FrameChange>(
-          `/api/projects/${projectId}/frame-changes`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              requestId: crypto.randomUUID(),
-              clipId: clip.id,
-              revision: clip.revision,
-              frameId: clip.frames[frameIndex]!.id,
-              transform,
-            }),
-          },
-        );
-        await refreshRef.current();
-        setFocusedChangeId(change.id);
-        setTransform(emptyTransform);
-        notify("当前帧已更新，可在动画检查中比较或撤回");
-      } else {
-        const result = await api<ImageAsset>(
-          `/api/projects/${projectId}/assets/${currentImage.id}/transform`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              revision: currentImage.revision,
-              transform,
-            }),
-          },
-        );
-        await refreshRef.current();
-        setSelectedId(result.id);
-        setTransform(emptyTransform);
-        notify("调整图片已保存");
-      }
+      const result = await api<ImageAsset>(
+        `/api/projects/${projectId}/assets/${currentImage.id}/transform`,
+        {
+          method: "POST",
+          body: JSON.stringify({ revision: currentImage.revision, transform }),
+        },
+      );
+      await refreshRef.current();
+      setSelectedId(result.id);
+      setTransform(emptyTransform);
+      notify("调整图片已保存");
     });
   }
+
   const fit = currentImage
     ? Math.max(
         0.05,
@@ -602,7 +600,7 @@ export function App() {
     : 1;
   const scale = zoom === "fit" ? fit : zoom;
   const previewTransform =
-    tool === "adjust"
+    !clip && tool === "adjust"
       ? `translate(${transform.offsetX * scale}px,${transform.offsetY * scale}px) scale(${transform.scale})`
       : undefined;
 
@@ -756,6 +754,17 @@ export function App() {
               )}
             </div>
           </div>
+          {framePreview?.draft.clipId === clip?.id && framePreview && (
+            <div className="frame-preview-banner" role="status">
+              草稿预览 · 尚未保存
+              <button
+                className="text-button"
+                onClick={() => setFramePreview(null)}
+              >
+                查看已保存版本
+              </button>
+            </div>
+          )}
           <div className={`stage ${background}`} ref={stage}>
             {comparing ? (
               <ComparisonPlayer
@@ -773,11 +782,26 @@ export function App() {
                 }}
               >
                 <img
-                  src={assetUrl(
-                    projectId,
-                    currentImage.id,
-                    currentImage.revision,
-                  )}
+                  src={
+                    clip && displayClip?.frames[frameIndex]
+                      ? framePreview?.draft.clipId === clip.id
+                        ? snapshotFrameUrl(
+                            projectId,
+                            framePreview.preview.id,
+                            displayClip.frames[frameIndex]!.id,
+                          )
+                        : clipFrameUrl(
+                            projectId,
+                            clip,
+                            clip.frames[frameIndex]!,
+                            currentImage.revision,
+                          )
+                      : assetUrl(
+                          projectId,
+                          currentImage.id,
+                          currentImage.revision,
+                        )
+                  }
                   alt={currentImage.name}
                   draggable={false}
                   style={{ transform: previewTransform }}
@@ -886,7 +910,9 @@ export function App() {
                   (transform.scale !== 1 ||
                     transform.offsetX !== 0 ||
                     transform.offsetY !== 0)
-                    ? "调整预览 · 应用后生成精确结果"
+                    ? clip
+                      ? "按帧配置渲染"
+                      : "调整预览 · 保存后生成图片"
                     : "固定画布"}
                 </span>
               </div>
@@ -941,7 +967,12 @@ export function App() {
             <AnimationEditor
               key={`${projectId}-${clip.id}`}
               projectId={projectId}
-              clip={clip}
+              clip={displayClip!}
+              previewSnapshot={
+                framePreview?.draft.clipId === clip?.id
+                  ? framePreview?.preview
+                  : undefined
+              }
               assets={state?.assets || []}
               frameIndex={frameIndex}
               playing={playing}
@@ -960,7 +991,7 @@ export function App() {
                 setPlaying(false);
                 setComparison(null);
               }}
-              disabled={!!operation || agentBusy}
+              disabled={!!operation || agentBusy || !!framePreview}
             />
           )}
           {(currentImage || clip) && (
@@ -1085,6 +1116,17 @@ export function App() {
                     请在原图素材或参考图中选择静态原图配置切割；动画帧可在调整页编辑。
                   </p>
                 )
+              ) : clip ? (
+                <FrameAdjustmentPanel
+                  key={projectId + clip.id}
+                  projectId={projectId}
+                  clip={clip}
+                  frameId={clip.frames[frameIndex]?.id || ""}
+                  playing={playing}
+                  drafts={state?.frameDrafts || []}
+                  onPreview={setFramePreview}
+                  onRefresh={() => refreshRef.current()}
+                />
               ) : !currentImage ? (
                 <p className="adjust-note">
                   向动画添加图片后，可在这里调整当前帧。
@@ -1496,6 +1538,19 @@ export function App() {
                   </button>
                 </form>
               )}
+              <FrameSaveApprovals
+                sessions={state?.sessions || []}
+                onRefresh={() => refreshRef.current()}
+                onCompare={(value) => {
+                  setSelectedId(value.before.clip.id);
+                  setPlaying(false);
+                  setComparison({
+                    before: value.before,
+                    after: value.preview,
+                    nonce: Date.now(),
+                  });
+                }}
+              />
               <div ref={chatEnd} />
             </div>
             <div className="composer-area">

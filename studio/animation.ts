@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  copyFileSync,
+} from "node:fs";
 import { join, relative } from "node:path";
 import { StudioError, atomicJson, sha256, type ProjectStore } from "./store.ts";
 import {
@@ -20,6 +26,10 @@ export class AnimationStore {
   reviews = new Map<string, ClipReview>();
   changes = new Map<string, FrameChange>();
   adjusting = new Map<string, Promise<FrameChange>>();
+  rendering = new Map<
+    string,
+    Promise<{ path: string; image: ClipSnapshot["images"][string] }>
+  >();
   constructor(store: ProjectStore) {
     this.store = store;
     for (const projectId of store.projects.keys())
@@ -94,8 +104,17 @@ export class AnimationStore {
     const clip = this.clip(pid, id);
     if (expected && clip.revision !== expected)
       throw new StudioError("动画版本已经改变，请重新引用或检查", 409);
-    const images: ClipSnapshot["images"] = {};
-    for (const frame of clip.frames) {
+    return this.captureClip(pid, clip);
+  }
+  captureClip(
+    pid: string,
+    clip: ClipAsset,
+    frozenImages?: ClipSnapshot["images"],
+  ) {
+    const images: ClipSnapshot["images"] = frozenImages
+      ? structuredClone(frozenImages)
+      : {};
+    for (const frame of frozenImages ? [] : clip.frames) {
       const image = this.store.image(pid, frame.imageId);
       this.store.imagePath(pid, image.id);
       images[image.id] = {
@@ -109,8 +128,9 @@ export class AnimationStore {
     const cached = [...this.snapshots.values()].find(
       (snapshot) =>
         snapshot.projectId === pid &&
-        snapshot.clip.id === id &&
+        snapshot.clip.id === clip.id &&
         snapshot.clip.revision === clip.revision &&
+        content(snapshot.clip) === content(clip) &&
         JSON.stringify(snapshot.images) === JSON.stringify(images),
     );
     if (cached) return cached;
@@ -135,6 +155,43 @@ export class AnimationStore {
       throw new StudioError("快照图片缺失或已经改变", 409);
     return { path, image };
   }
+  async renderFrame(pid: string, sid: string, frameId: string) {
+    const original = this.imagePath(pid, sid, frameId);
+    const transform = this.snapshot(pid, sid).clip.frames.find(
+      (f) => f.id === frameId,
+    )!.transform;
+    if (!transform) return original;
+    const key = sha256(
+      JSON.stringify([pid, original.image.contentHash, transform]),
+    );
+    const running = this.rendering.get(key);
+    if (running) return running;
+    const promise = this.store
+      .reading(pid, async () => {
+        const folder = this.store.safePath(pid, ".studio/animation/rendered");
+        mkdirSync(folder, { recursive: true });
+        const path = join(folder, key + ".png"),
+          receipt = path + ".json";
+        if (
+          !existsSync(path) ||
+          !existsSync(receipt) ||
+          JSON.parse(readFileSync(receipt, "utf8")).hash !==
+            sha256(readFileSync(path))
+        ) {
+          const result = await this.store.worker.run("transform", {
+            path: original.path,
+            outputDir: this.store.stage(pid),
+            transform,
+          });
+          copyFileSync(result.files[0], path);
+          atomicJson(receipt, { hash: sha256(readFileSync(path)) });
+        }
+        return { path, image: { ...original.image, mime: "image/png" } };
+      })
+      .finally(() => this.rendering.delete(key));
+    this.rendering.set(key, promise);
+    return promise;
+  }
   range(snapshot: ClipSnapshot, startFrameId?: string, endFrameId?: string) {
     const frames = snapshot.clip.frames,
       start = startFrameId
@@ -155,9 +212,20 @@ export class AnimationStore {
   stale(review: ClipReview) {
     try {
       const snapshot = this.snapshot(review.projectId, review.snapshotId);
+      const draft = review.draftId
+        ? this.store.frameDrafts.get(review.projectId, review.draftId)
+        : undefined;
+      if (
+        draft &&
+        (draft.documentRevision !== review.documentRevision ||
+          !["editing", "pending"].includes(draft.status))
+      )
+        return true;
+      const revision = draft
+        ? this.snapshot(review.projectId, draft.baseSnapshotId).clip.revision
+        : review.clipRevision;
       return (
-        this.clip(review.projectId, review.clipId).revision !==
-          review.clipRevision ||
+        this.clip(review.projectId, review.clipId).revision !== revision ||
         Object.values(snapshot.images).some(
           (image) =>
             this.store.image(review.projectId, image.id).contentHash !==
@@ -200,6 +268,8 @@ export class AnimationStore {
       snapshotId?: string;
       startFrameId?: string;
       endFrameId?: string;
+      draftId?: string;
+      documentRevision?: string;
     },
   ) {
     const snapshot = input.snapshotId
@@ -228,6 +298,8 @@ export class AnimationStore {
     const cached = [...this.reviews.values()].find(
       (review) =>
         review.snapshotId === snapshot.id &&
+        review.draftId === input.draftId &&
+        review.documentRevision === input.documentRevision &&
         review.startFrameId === frames[0]!.id &&
         review.endFrameId === frames.at(-1)!.id,
     );
@@ -236,11 +308,26 @@ export class AnimationStore {
       this.evidence(pid, cached.id, "onion");
       return this.review(pid, cached.id);
     }
-    const params = snapshot.clip.frames.map((frame, index) => ({
-      ...frame,
-      index,
-      path: this.imagePath(pid, snapshot.id, frame.id).path,
-    }));
+    const required = new Set<number>();
+    for (
+      let i = Math.max(0, range.start - 1);
+      i <= Math.min(snapshot.clip.frames.length - 1, range.end + 1);
+      i++
+    )
+      required.add(i);
+    if (snapshot.clip.loop) {
+      required.add(0);
+      required.add(snapshot.clip.frames.length - 1);
+    }
+    const params = await Promise.all(
+      snapshot.clip.frames.map(async (frame, index) => ({
+        ...frame,
+        index,
+        path: required.has(index)
+          ? (await this.renderFrame(pid, snapshot.id, frame.id)).path
+          : this.imagePath(pid, snapshot.id, frame.id).path,
+      })),
+    );
     const result = await this.store.worker.run("review", {
       path: params[0]!.path,
       outputDir: this.store.stage(pid),
@@ -254,6 +341,8 @@ export class AnimationStore {
       onion: relative(this.store.dir(pid), result.onion),
     };
     const review: ClipReview = {
+      draftId: input.draftId,
+      documentRevision: input.documentRevision,
       id: randomUUID(),
       projectId: pid,
       snapshotId: snapshot.id,
@@ -304,26 +393,29 @@ export class AnimationStore {
     const before = this.capture(pid, spec.clipId, spec.revision),
       frame = before.clip.frames.find((frame) => frame.id === spec.frameId);
     if (!frame) throw new StudioError("帧不在目标动画中");
-    let imageId = frame.imageId;
     if (spec.transform) {
-      const image = this.store.image(pid, imageId);
-      imageId = (
-        await this.store.transform(
-          pid,
-          image.id,
-          image.revision,
-          spec.transform,
-        )
-      ).id;
+      const preview = this.captureClip(pid, {
+        ...before.clip,
+        revision: sha256(JSON.stringify([before.id, spec])),
+        frames: before.clip.frames.map((f) =>
+          f.id === frame.id ? { ...f, transform: spec.transform } : f,
+        ),
+      });
+      await this.renderFrame(pid, preview.id, frame.id);
     }
     const clip = this.clip(pid, spec.clipId);
     if (clip.revision !== spec.revision)
       throw new StudioError("动画已修改，请基于当前版本重试", 409);
+    if (
+      JSON.stringify(this.capture(pid, clip.id).images) !==
+      JSON.stringify(before.images)
+    )
+      throw new StudioError("底图在预览期间发生变化，请重新检查", 409);
     const frames = clip.frames.map((current) =>
       current.id === spec.frameId
         ? {
             ...current,
-            imageId,
+            transform: spec.transform ?? current.transform,
             durationUs: spec.durationUs ?? current.durationUs,
           }
         : current,

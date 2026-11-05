@@ -11,6 +11,9 @@ import {
 } from "lucide-react";
 import {
   assetUrl,
+  clipFrameUrl,
+  snapshotFrameUrl,
+  type ClipSnapshot,
   type Asset,
   type ClipAsset,
   type ImageAsset,
@@ -18,6 +21,7 @@ import {
 
 export function AnimationEditor({
   projectId,
+  previewSnapshot,
   clip,
   assets,
   frameIndex,
@@ -29,6 +33,7 @@ export function AnimationEditor({
   disabled,
 }: {
   projectId: string;
+  previewSnapshot?: ClipSnapshot;
   clip: ClipAsset;
   assets: Asset[];
   frameIndex: number;
@@ -251,7 +256,15 @@ export function AnimationEditor({
               {image && (
                 <img
                   draggable={false}
-                  src={assetUrl(projectId, image.id, image.revision)}
+                  src={
+                    previewSnapshot
+                      ? snapshotFrameUrl(
+                          projectId,
+                          previewSnapshot.id,
+                          frame.id,
+                        )
+                      : clipFrameUrl(projectId, clip, frame, image.revision)
+                  }
                   alt={image.name}
                 />
               )}

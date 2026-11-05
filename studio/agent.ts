@@ -4,10 +4,14 @@ import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { AppServer, type Message } from "./runtime/app-server.ts";
-import { ProjectStore, StudioError } from "./store.ts";
+import { ProjectStore, StudioError, sha256 } from "./store.ts";
 import { clipDocumentSchema } from "./documents.ts";
 import { interpolationPrompt } from "./interpolation.ts";
-import { interpolationSchema } from "./model.ts";
+import {
+  interpolationSchema,
+  frameEditSchema,
+  type FrameSaveApproval,
+} from "./model.ts";
 import { transformSchema, type Session, type ChatMessage } from "./model.ts";
 
 const textContent = (text: string) => ({ type: "text", text });
@@ -19,6 +23,10 @@ export class AgentHub {
   timers = new Map<string, NodeJS.Timeout>();
   imports = new Map<string, Promise<unknown>[]>();
   prompts = new Map<string, (value: any) => void>();
+  frameSaves = new Map<
+    string,
+    { sessionId: string; finish: (value: any) => void; timer: NodeJS.Timeout }
+  >();
   disabled: string[] = [];
   status: {
     connected: boolean;
@@ -120,13 +128,15 @@ export class AgentHub {
         `mcp_servers.sprite_studio.args=${JSON.stringify([fileURLToPath(new URL("./mcp.ts", import.meta.url)), this.endpoint, session.id])}`,
         "mcp_servers.sprite_studio.enabled=true",
         "mcp_servers.sprite_studio.required=true",
+        "mcp_servers.sprite_studio.tool_timeout_sec=1000",
         'mcp_servers.sprite_studio.env_vars=["SPRITE_STUDIO_TOOL_TOKEN"]',
         'mcp_servers.sprite_studio.tools.slice_sheet.approval_mode="approve"',
         'mcp_servers.sprite_studio.tools.write_documents.approval_mode="approve"',
         'mcp_servers.sprite_studio.tools.save_image.approval_mode="approve"',
         'mcp_servers.sprite_studio.tools.create_clip.approval_mode="approve"',
         'mcp_servers.sprite_studio.tools.adjust_image.approval_mode="approve"',
-        'mcp_servers.sprite_studio.tools.adjust_frame.approval_mode="approve"',
+        'mcp_servers.sprite_studio.tools.create_frame_draft.approval_mode="approve"',
+        'mcp_servers.sprite_studio.tools.save_frame_draft.approval_mode="approve"',
       ],
       this.disabled,
       undefined,
@@ -154,9 +164,9 @@ export class AgentHub {
           "你是 Sprite Studio 中的精灵图制作助手，使用中文交流。只操作当前项目提供的资源工具。先用 list_assets 查找稳定资源 ID，再用 view_image 查看真实图片。位置、尺寸调整使用 adjust_image，规则网格切割使用 slice_sheet，不要通过图片生成替代确定性处理。需要生成/重绘时必须使用内置 image_gen，并实际提供用户引用的参考图，每次用户请求默认最多生成一张图片；没有明确要求生成就不要生成。生成完成后先用list_generated_images取得生成产物ID，然后用save_image明确指定type(reference/resource)、name和分类内folder保存；folder为空或点号表示分类根目录。不得声称未保存的产物已进入资源区。没有指定名称目录时依据任务合理命名并告知用户；同名冲突不能覆盖。你可以在当前任务目录中准备临时文件，但不要探索其他文件、运行程序、安装依赖或使用其他服务。不要声称已经验收动画连贯性；目前可以看静态图、播放编排和逐帧信息，动态评估需结合用户实际观看。工具受限时如实说明，不伪造成果。用户消息中的“资源引用”给出身份、版本与快照路径，引用图片才是视觉输入。",
       };
       params.developerInstructions +=
-        "切割配置已改为持久JSON配方：先read_document读取原图的documentId与全文，必要时get_schema查看格式，再用write_documents提交正文和expectedDocumentRevision。新配方items为空，需要明确添加待切单元；新增条目可省略ID，保存会返回ID，后续保留已有ID。slice_sheet只接收assetId、expectedDefinitionRevision和requestId，读取已保存配置执行。重复切割更新原切片而不创建动画，禁止以旧columns/rows工具参数执行。当前仅支持规则网格，动画可用create_clip创建空动画，read_document/write_documents编辑clip JSON中的frames(imageId、id、durationUs)、loop、initialFps；帧id新增可省略，重排保留id。后续单帧变换配方尚未接入，不伪造工具能力。";
+        "切割配置已改为持久JSON配方：先read_document读取原图的documentId与全文，必要时get_schema查看格式，再用write_documents提交正文和expectedDocumentRevision。新配方items为空，需要明确添加待切单元；新增条目可省略ID，保存会返回ID，后续保留已有ID。slice_sheet只接收assetId、expectedDefinitionRevision和requestId，读取已保存配置执行。重复切割更新原切片而不创建动画，禁止以旧columns/rows工具参数执行。当前仅支持规则网格，动画可用create_clip创建空动画，read_document/write_documents编辑clip JSON中的frames(imageId、id、durationUs)、loop、initialFps；帧id新增可省略，重排保留id。单帧变换已有frame-edit草稿配置，按下述流程执行。";
       params.developerInstructions +=
-        "动画引用含 snapshotId、clipId、版本、帧实例和时长。检查动画必须调用 inspect_clip 查看实际逐帧和相邻叠图证据；每次最多16帧，需要时分区间。单帧大小、位置、时长修正用 adjust_frame，明确要求的修改直接更新目标动画，返回的修改记录支持比较与撤回。不要改动其他帧实例，不用生成图片替代确定性修正。边界框变化只是线索，不能把有意运动自动拉平。向用户使用第几帧交流，UUID只在工具调用中使用。静态图和叠图不代表你已观看真实速度播放，不可声称动态验收通过。";
+        "动画引用含snapshotId、clipId、版本、帧实例和时长。检查用inspect_clip看实际帧图与相邻叠图，每次最多16帧。单帧缩放、位移、裁切与时长修复：create_frame_draft取得草稿documentId，read_document读取原配置，通过write_documents修改frame-edit JSON（transform为相对源图的绝对参数，勿在上次结果上叠加），再用inspect_clip传draftId、documentRevision检查草稿。预览不会修改动画或新增图片资源。检查后调用save_frame_draft；默认等待用户Accept/Deny，拒绝理由会返回，不能把待审批或拒绝说成已保存。用户要求先看看时停在草稿预览。不要通过直接编辑clip配置或adjust_image绕过单帧修复的草稿与保存流程。其他帧实例不变。边界框变化只是线索，不自动拉平有意运动。向用户用第几帧交流，UUID用于工具。静态图和叠图不代表已观看实际速度播放，不可声称动态验收通过。";
       const result = session.threadId
         ? await client.request("thread/resume", {
             ...params,
@@ -309,18 +319,40 @@ export class AgentHub {
         text_elements: [],
       });
     }
-    for (const asset of references) {
-      const source = this.store.imagePath(
+    const interpolation = this.interpolation(session);
+    const endpoints = interpolation
+      ? this.store.animation.capture(
+          session.projectId,
+          interpolation.clipId,
+          interpolation.clipRevision,
+        )
+      : undefined;
+    for (const [index, asset] of references.entries()) {
+      let source = this.store.imagePath(
         session.projectId,
         asset.id,
         asset.revision,
       );
+      // Endpoint generation keeps its existing workflow, but must see the same
+      // saved frame pixels as playback after source-relative transforms exist.
+      if (interpolation && endpoints) {
+        const ref = index === 0 ? interpolation.start : interpolation.end;
+        source = (
+          await this.store.animation.renderFrame(
+            session.projectId,
+            endpoints.id,
+            ref.frameId,
+          )
+        ).path;
+        ref.contentHash = sha256(readFileSync(source));
+      }
+      const referenceHash = sha256(readFileSync(source));
       const snapshot = join(
         this.store.dir(session.projectId),
         ".studio",
         "staging",
         `agent-${session.id}`,
-        `${asset.id}-${asset.contentHash}${extname(asset.file)}`,
+        `${asset.id}-${referenceHash}${extname(asset.file)}`,
       );
       if (!existsSync(snapshot)) copyFileSync(source, snapshot);
       inputs.push(
@@ -332,6 +364,7 @@ export class AgentHub {
         { type: "localImage", path: snapshot },
       );
     }
+    if (interpolation) this.store.interpolations.save(interpolation);
     session.status = "running";
     this.flush(session);
     const result = await client.request("turn/start", {
@@ -385,12 +418,13 @@ export class AgentHub {
         get_schema: "读取配置格式",
         read_document: "读取制作配置",
         validate_document: "检查制作配置",
-        write_documents: "保存制作配置",
+        write_documents: "编辑制作配置",
+        create_frame_draft: "建立单帧配置草稿",
+        save_frame_draft: "请求保存单帧配置",
         view_image: "查看图片",
         slice_sheet: "切割图集",
         adjust_image: "调整图片",
         inspect_clip: "检查动画证据",
-        adjust_frame: "修改动画帧",
       };
       const status =
         message.method === "item/started"
@@ -425,6 +459,7 @@ export class AgentHub {
       }
     }
     if (message.method === "turn/completed") {
+      this.cancelFrameSave(session, "任务已结束，待审批修改未保存");
       await Promise.allSettled(this.imports.get(session.id) || []);
       this.imports.delete(session.id);
       session.status =
@@ -544,8 +579,134 @@ export class AgentHub {
       throw new StudioError("这个问题已经结束，请刷新对话");
     this.prompts.get(id)!(answers);
   }
+  async requestFrameSave(
+    session: Session,
+    draftId: string,
+    revision: string,
+  ): Promise<any> {
+    const drafts = this.store.frameDrafts,
+      pid = session.projectId;
+    const draft = drafts.get(pid, draftId);
+    if (draft.sessionId !== session.id)
+      throw new StudioError("草稿不属于当前对话");
+    if (draft.status === "saved")
+      return { saved: true, change: await drafts.save(pid, draftId, revision) };
+    drafts.check(pid, draftId, revision);
+    if (draft.status !== "editing" || session.frameSaveApproval)
+      throw new StudioError("已有保存请求等待处理", 409);
+    const policy = drafts.policy();
+    if (policy === "deny")
+      return { saved: false, reason: "当前设置禁止助手保存单帧配置" };
+    const preview = await drafts.preview(pid, draftId, revision);
+    drafts.check(pid, draftId, revision);
+    if (
+      drafts.get(pid, draftId).status !== "editing" ||
+      session.frameSaveApproval
+    )
+      throw new StudioError("草稿状态已改变", 409);
+    if (policy === "allow")
+      return { saved: true, change: await drafts.save(pid, draftId, revision) };
+    const before = preview.before.clip.frames.find(
+      (f) => f.id === draft.frameId,
+    )!;
+    const after = preview.preview.clip.frames.find(
+      (f) => f.id === draft.frameId,
+    )!;
+    const approval: FrameSaveApproval = {
+      id: randomUUID(),
+      draftId,
+      documentRevision: revision,
+      beforeSnapshotId: preview.before.id,
+      previewSnapshotId: preview.preview.id,
+      before: { transform: before.transform, durationUs: before.durationUs },
+      after: { transform: after.transform, durationUs: after.durationUs },
+      frameNumber:
+        preview.before.clip.frames.findIndex((f) => f.id === draft.frameId) + 1,
+      clipName: preview.before.clip.name,
+    };
+    drafts.persist({ ...drafts.get(pid, draftId), status: "pending" });
+    session.frameSaveApproval = approval;
+    const promise = new Promise((resolve) => {
+      const timer = setTimeout(
+        () => this.cancelFrameSave(session, "等待审批超时，修改未保存"),
+        15 * 60_000,
+      );
+      this.frameSaves.set(approval.id, {
+        sessionId: session.id,
+        finish: resolve,
+        timer,
+      });
+    });
+    this.flush(session);
+    return promise;
+  }
+  cancelFrameSave(session: Session, reason: string) {
+    const approval = session.frameSaveApproval;
+    if (!approval) return;
+    const pending = this.frameSaves.get(approval.id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.frameSaves.delete(approval.id);
+    session.frameSaveApproval = undefined;
+    const draft = this.store.frameDrafts.get(
+      session.projectId,
+      approval.draftId,
+    );
+    if (draft.status === "pending")
+      this.store.frameDrafts.persist({ ...draft, status: "editing" });
+    this.flush(session);
+    pending.finish({ saved: false, reason });
+  }
+  async resolveFrameSave(
+    sessionId: string,
+    approvalId: string,
+    accept: boolean,
+    reason = "",
+  ) {
+    const session = this.store.session(sessionId),
+      approval = session.frameSaveApproval;
+    if (
+      !approval ||
+      approval.id !== approvalId ||
+      !this.frameSaves.has(approvalId)
+    )
+      throw new StudioError("保存请求已结束，请刷新", 409);
+    if (!accept) {
+      this.cancelFrameSave(
+        session,
+        reason || "用户拒绝此次保存，请保留草稿并继续调整",
+      );
+      return { saved: false };
+    }
+    const pending = this.frameSaves.get(approvalId)!;
+    this.frameSaves.delete(approvalId);
+    clearTimeout(pending.timer);
+    try {
+      const change = await this.store.frameDrafts.save(
+        session.projectId,
+        approval.draftId,
+        approval.documentRevision,
+      );
+      const result = { saved: true, change };
+      pending.finish(result);
+      return result;
+    } catch (error) {
+      const draft = this.store.frameDrafts.get(
+        session.projectId,
+        approval.draftId,
+      );
+      if (draft.status === "pending")
+        this.store.frameDrafts.persist({ ...draft, status: "editing" });
+      pending.finish({ saved: false, reason: String(error) });
+      throw error;
+    } finally {
+      session.frameSaveApproval = undefined;
+      this.flush(session);
+    }
+  }
   async stop(sessionId: string) {
     const session = this.store.session(sessionId);
+    this.cancelFrameSave(session, "任务已停止，修改未保存");
     const client = this.clients.get(sessionId);
     if (session.prompt) this.prompts.get(session.prompt.id)?.({});
     if (client && session.turnId && session.status === "running")
@@ -565,6 +726,7 @@ export class AgentHub {
     }
   }
   private fail(session: Session, error: unknown) {
+    this.cancelFrameSave(session, "任务失败，修改未保存");
     session.status = "failed";
     session.error = error instanceof Error ? error.message : String(error);
     for (const msg of session.messages)
@@ -585,9 +747,11 @@ export class AgentHub {
         content: [
           textContent(
             JSON.stringify(
-              input.type === "clip"
-                ? z.toJSONSchema(clipDocumentSchema)
-                : this.store.sheets.schema(),
+              input.type === "frame-edit"
+                ? z.toJSONSchema(frameEditSchema)
+                : input.type === "clip"
+                  ? z.toJSONSchema(clipDocumentSchema)
+                  : this.store.sheets.schema(),
             ),
           ),
         ],
@@ -631,6 +795,32 @@ export class AgentHub {
         .min(1)
         .max(16)
         .parse(input.documents);
+      for (const doc of documents) {
+        if (this.store.frameDrafts.has(doc.documentId)) {
+          const draft = this.store.frameDrafts.get(pid, doc.documentId);
+          if (draft.sessionId !== sessionId)
+            throw new StudioError("请使用当前对话创建的单帧草稿");
+        } else {
+          const asset = this.store.asset(pid, doc.documentId);
+          if (asset.type === "clip") {
+            const config = this.store.documents.parse(
+              pid,
+              asset.id,
+              doc.text,
+            ) as z.infer<typeof clipDocumentSchema>;
+            if (
+              config.frames.some((f) => {
+                const old = asset.frames.find((o) => o.id === f.id);
+                return (
+                  old &&
+                  JSON.stringify(old.transform) !== JSON.stringify(f.transform)
+                );
+              })
+            )
+              throw new StudioError("已有帧的变换请通过单帧草稿编辑并请求保存");
+          }
+        }
+      }
       return {
         content: [
           textContent(
@@ -745,6 +935,8 @@ export class AgentHub {
     if (name === "inspect_clip") {
       const spec = z
         .object({
+          draftId: z.string().uuid().optional(),
+          documentRevision: z.string().optional(),
           snapshotId: z.string().uuid().optional(),
           clipId: z.string().uuid().optional(),
           revision: z.string().optional(),
@@ -752,47 +944,47 @@ export class AgentHub {
           endFrameId: z.string().uuid().optional(),
         })
         .refine(
-          (input) => !!input.snapshotId || !!input.clipId,
+          (input) => !!input.draftId || !!input.snapshotId || !!input.clipId,
           "请提供快照或动画身份",
         )
         .parse(input);
+      if (spec.draftId) {
+        if (!spec.documentRevision)
+          throw new StudioError("检查草稿必须指定documentRevision");
+        const result = await this.store.frameDrafts.preview(
+          pid,
+          spec.draftId,
+          spec.documentRevision,
+        );
+        spec.snapshotId = result.preview.id;
+      }
       const review = await this.store.animation.inspect(pid, spec);
       attach("reviewIds", review.id);
       return { content: evidence(review) };
     }
-    if (name === "adjust_frame") {
-      const change = await this.store.animation.adjust(
-        pid,
-        { ...input, requestId: input.requestId || randomUUID() },
-        "agent",
-      );
-      attach("changeIds", change.id);
-      const snapshots = this.store.animation.compare(pid, change.id),
-        before = await this.store.animation.inspect(pid, {
-          snapshotId: snapshots.before.id,
-          startFrameId: change.frameId,
-          endFrameId: change.frameId,
-        }),
-        after = await this.store.animation.inspect(pid, {
-          snapshotId: snapshots.after.id,
-          startFrameId: change.frameId,
-          endFrameId: change.frameId,
-        });
+    if (name === "create_frame_draft") {
       return {
         content: [
           textContent(
-            JSON.stringify({
-              change,
-              applied: true,
-              clipRevision: snapshots.after.clip.revision,
-            }),
+            JSON.stringify(
+              this.store.frameDrafts.create(pid, input, "agent", sessionId),
+            ),
           ),
-          textContent("Before modification"),
-          ...evidence(before).slice(0, 2),
-          textContent("After modification"),
-          ...evidence(after).slice(0, 2),
         ],
       };
+    }
+    if (name === "save_frame_draft") {
+      const spec = z
+        .object({ draftId: z.string().uuid(), documentRevision: z.string() })
+        .strict()
+        .parse(input);
+      const result = await this.requestFrameSave(
+        session,
+        spec.draftId,
+        spec.documentRevision,
+      );
+      if (result.saved && result.change) attach("changeIds", result.change.id);
+      return { content: [textContent(JSON.stringify(result))] };
     }
 
     if (name === "list_assets")
@@ -876,6 +1068,8 @@ export class AgentHub {
   }
   async close() {
     this.stopped = true;
+    for (const session of this.store.sessions.values())
+      this.cancelFrameSave(session, "服务已停止，修改未保存");
     for (const timer of this.timers.values()) clearTimeout(timer);
     for (const session of this.store.sessions.values())
       this.store.saveSession(session);

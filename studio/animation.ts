@@ -393,6 +393,14 @@ export class AnimationStore {
     for (const frame of before.clip.frames) {
       this.imagePath(pid, before.id, frame.id);
       this.store.imagePath(pid, frame.imageId);
+      if (
+        this.store.image(pid, frame.imageId).contentHash !==
+        before.images[frame.imageId]!.contentHash
+      )
+        throw new StudioError(
+          "历史图片已被重新切割，不能用当前图片替代旧像素进行撤回；历史快照仍可查看",
+          409,
+        );
     }
     const updated = this.store.updateClip(
       pid,

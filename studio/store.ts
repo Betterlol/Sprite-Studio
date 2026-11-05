@@ -17,6 +17,8 @@ import { InterpolationStore } from "./interpolation.ts";
 import { AnimationStore } from "./animation.ts";
 import { ResourceLibrary, assetFolder } from "./library.ts";
 import { recoverResourceLayout, organizeResourceLayout } from "./layout.ts";
+import { recoverFileOperations } from "./file-operations.ts";
+import { SheetDocuments } from "./sheets.ts";
 import {
   resourceCategories,
   resourceCategory,
@@ -45,7 +47,7 @@ export function atomicJson(path: string, value: unknown) {
   writeFileSync(temp, JSON.stringify(value, null, 2) + "\n", { flag: "wx" });
   renameSync(temp, path);
 }
-const revision = (value: any) => {
+export const assetRevision = (value: any) => {
   const { revision: _, name, folder, file, ...body } = value;
   return sha256(JSON.stringify(body));
 };
@@ -65,6 +67,7 @@ export class ProjectStore extends EventEmitter {
   interpolations: InterpolationStore;
   animation: AnimationStore;
   library: ResourceLibrary;
+  sheets: SheetDocuments;
   metadataPaths = new Map<string, Map<string, string>>();
   resourceReaders = new Map<string, number>();
   constructor(root: string) {
@@ -82,6 +85,7 @@ export class ProjectStore extends EventEmitter {
       if (project.version !== 1 || project.id !== name) continue;
       this.projects.set(project.id, project);
       recoverResourceLayout(this, project.id);
+      recoverFileOperations(this, project.id);
       this.library.recover(project.id);
       this.loadAssets(project.id);
       organizeResourceLayout(this, project.id);
@@ -107,6 +111,7 @@ export class ProjectStore extends EventEmitter {
     }
     this.interpolations = new InterpolationStore(this);
     this.animation = new AnimationStore(this);
+    this.sheets = new SheetDocuments(this);
   }
   project(id: string) {
     const project = this.projects.get(id);
@@ -259,7 +264,7 @@ export class ProjectStore extends EventEmitter {
         { folder },
       );
     }
-    asset.revision = revision(asset);
+    asset.revision = assetRevision(asset);
     if (asset.type === "clip")
       atomicJson(this.safePath(projectId, asset.file!), {
         frames: asset.frames,
@@ -584,6 +589,7 @@ export class ProjectStore extends EventEmitter {
       assets: this.assets(projectId),
       folders: this.library.folders(projectId),
       libraryRevision: this.library.revision(projectId),
+      configurationRevision: this.sheets.revision(projectId),
       trash: this.library.trash(projectId),
       interpolations: this.interpolations.list(projectId),
       reviews: this.animation.listReviews(projectId),

@@ -146,6 +146,47 @@ app.post("/api/projects", async (request) => {
 app.get("/api/projects/:projectId", async (request) =>
   store.state(pid(request)),
 );
+app.get("/api/projects/:projectId/schemas/sheet-recipe", async () =>
+  store.sheets.schema(),
+);
+app.get("/api/projects/:projectId/documents/:assetId", async (request) =>
+  store.sheets.read(pid(request), aid(request)),
+);
+app.post("/api/projects/:projectId/documents", async (request) => {
+  const input = z
+    .object({
+      documents: z
+        .array(
+          z.object({
+            documentId: z.string().uuid(),
+            expectedDocumentRevision: z.string(),
+            text: z.string(),
+          }),
+        )
+        .min(1)
+        .max(16),
+    })
+    .parse(request.body);
+  return store.sheets.write(pid(request), input.documents);
+});
+app.post(
+  "/api/projects/:projectId/assets/:assetId/slice-config",
+  async (request) => {
+    const input = z
+      .object({
+        expectedDefinitionRevision: z.string(),
+        requestId: z.string().uuid(),
+      })
+      .strict()
+      .parse(request.body);
+    return store.sheets.execute(
+      pid(request),
+      aid(request),
+      input.expectedDefinitionRevision,
+      input.requestId,
+    );
+  },
+);
 app.post("/api/projects/:projectId/import", async (request) => {
   const projectId = pid(request);
   store.project(projectId);

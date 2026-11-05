@@ -28,6 +28,7 @@ export type Project = {
   resourceLayout?: 1;
 };
 export type ImageAsset = {
+  producer?: { sheetId: string; sliceId: string };
   folder?: string;
   id: string;
   type: "image";

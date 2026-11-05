@@ -416,6 +416,14 @@ export class ResourceLibrary {
         oldMeta = this.store.metaPath(pid, asset.id);
       if (asset.file !== file) moves.push({ from: asset.file!, to: file });
       if (oldMeta !== meta) moves.push({ from: oldMeta, to: meta });
+      if (
+        asset.type === "image" &&
+        existsSync(this.path(pid, asset.file + ".recipe.json"))
+      )
+        moves.push({
+          from: asset.file + ".recipe.json",
+          to: file + ".recipe.json",
+        });
       values.push({
         path: meta,
         beforePath: oldMeta,
@@ -435,6 +443,16 @@ export class ResourceLibrary {
       ids = new Set(chosen.assets.map((a) => a.id)),
       blockers: DeletePlan["blockers"] = [];
     for (const asset of this.store.assets(pid)) {
+      if (
+        asset.type === "image" &&
+        asset.producer &&
+        ids.has(asset.producer.sheetId) &&
+        !ids.has(asset.id)
+      )
+        blockers.push({
+          name: asset.name,
+          reason: "切片仍引用所选原图；请一起选择相关切片",
+        });
       if (
         asset.type === "clip" &&
         !ids.has(asset.id) &&
@@ -508,7 +526,14 @@ export class ResourceLibrary {
       to: prefix + folder,
     }));
     for (const asset of chosen.direct)
-      for (const path of [asset.file!, this.store.metaPath(pid, asset.id)])
+      for (const path of [
+        asset.file!,
+        this.store.metaPath(pid, asset.id),
+        ...(asset.type === "image" &&
+        existsSync(this.path(pid, asset.file + ".recipe.json"))
+          ? [asset.file + ".recipe.json"]
+          : []),
+      ])
         roots.push({ from: path, to: prefix + path.slice(7) });
     const entry: TrashEntry = {
       resourceLayout: 1,
@@ -537,6 +562,13 @@ export class ResourceLibrary {
     if (!entry.resourceLayout) return this.restoreLegacy(pid, entry);
     const ids = new Set(entry.assets.map((a) => a.id));
     for (const asset of entry.assets) {
+      if (
+        asset.type === "image" &&
+        asset.producer &&
+        !ids.has(asset.producer.sheetId) &&
+        !this.store.indexes.get(pid)?.has(asset.producer.sheetId)
+      )
+        throw new StudioError("请先恢复切片的来源原图", 409);
       if (this.store.indexes.get(pid)?.has(asset.id))
         throw new StudioError("资源身份已存在，无法恢复覆盖", 409);
       if (this.folders(pid).includes(assetFolder(asset)))

@@ -10,6 +10,73 @@ const idProperty = {
 };
 const tools = [
   {
+    name: "get_schema",
+    description:
+      "Read the current sheet-recipe JSON schema. Editing uses document text; execution tools read saved configuration.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "read_document",
+    description:
+      "Read the actual editable slicing recipe text, document and definition revisions, path, build state and output IDs for a source image. A missing document returns an unsaved template; initialize items explicitly. Preserves logical item IDs on later edits.",
+    inputSchema: {
+      type: "object",
+      properties: { documentId: idProperty },
+      required: ["documentId"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "validate_document",
+    description:
+      "Validate sheet-recipe JSON text and references without saving or slicing.",
+    inputSchema: {
+      type: "object",
+      properties: { documentId: idProperty, text: { type: "string" } },
+      required: ["documentId", "text"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "write_documents",
+    description:
+      "Save 1-16 recipe files atomically from complete JSON text and expected document revisions. Returns normalized documents and stable IDs for new items. Does not slice, generate images or create animations. Re-read on version conflict; never discard another editor's changes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        documents: {
+          type: "array",
+          minItems: 1,
+          maxItems: 16,
+          items: {
+            type: "object",
+            properties: {
+              documentId: idProperty,
+              expectedDocumentRevision: { type: "string" },
+              text: { type: "string" },
+            },
+            required: ["documentId", "expectedDocumentRevision", "text"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["documents"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
     name: "inspect_clip",
     description:
       "Inspect an animation snapshot or current clip: returns actual ordered contact sheet, red/cyan adjacent onion skins including loop boundary, frame instance IDs, microsecond timings and alpha bounds. These are static evidence, not observed video playback. At most 16 selected frames per call; use frame IDs to inspect further ranges.",
@@ -84,17 +151,15 @@ const tools = [
   {
     name: "slice_sheet",
     description:
-      "Slice a static spritesheet into a regular grid and create a playable animation. Original pixels are retained.",
+      "Execute the source image's saved slicing recipe. Use read_document and write_documents to edit first. Updates the same slice IDs on repeated runs, returns output image IDs, preserves source and existing animation references. Does not create an animation.",
     inputSchema: {
       type: "object",
       properties: {
         assetId: idProperty,
-        columns: { type: "integer", minimum: 1, maximum: 32 },
-        rows: { type: "integer", minimum: 1, maximum: 32 },
-        fps: { type: "number", minimum: 1, maximum: 60 },
-        name: { type: "string" },
+        expectedDefinitionRevision: { type: "string" },
+        requestId: { type: "string" },
       },
-      required: ["assetId", "columns", "rows"],
+      required: ["assetId", "expectedDefinitionRevision", "requestId"],
       additionalProperties: false,
     },
     annotations: {

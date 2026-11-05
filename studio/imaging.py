@@ -77,6 +77,23 @@ def run(method, params):
     folder = inside(params['outputDir'])
     native(folder).mkdir(parents=True, exist_ok=True)
     if method == 'review': return review_images(params, folder)
+    if method == 'recipe_slice':
+        if count != 1: raise ValueError('切割来源必须是静态图片')
+        grid=params['grid']; cols,rows=grid['columns'],grid['rows']
+        top,right,bottom,left=grid['margin']; gap_x,gap_y=grid['spacing']
+        usable_w=image.width-left-right-gap_x*(cols-1)
+        usable_h=image.height-top-bottom-gap_y*(rows-1)
+        if usable_w<cols or usable_h<rows: raise ValueError('切片不能小于一个像素')
+        width,height=math.ceil(usable_w/cols),math.ceil(usable_h/rows)
+        files=[]
+        for item in params['items']:
+            if not item['enabled']: continue
+            x,y=item['cell']
+            box=(left+round(x*usable_w/cols)+x*gap_x, top+round(y*usable_h/rows)+y*gap_y,
+                 left+round((x+1)*usable_w/cols)+x*gap_x, top+round((y+1)*usable_h/rows)+y*gap_y)
+            frame=Image.new('RGBA',(width,height)); frame.alpha_composite(image.crop(box))
+            target=folder/f'{len(files):03}.png';frame.save(native(target));files.append(str(target))
+        return {'files':files,'width':width,'height':height}
     if method in ('slice', 'inbetween'):
         if count != 1: raise ValueError('目前仅支持切割静态图集')
         cols, rows = params['columns'], params['rows']

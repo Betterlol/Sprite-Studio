@@ -13,12 +13,7 @@ import { AppServer, type Message } from "./runtime/app-server.ts";
 import { ProjectStore, StudioError } from "./store.ts";
 import { interpolationPrompt } from "./interpolation.ts";
 import { interpolationSchema } from "./model.ts";
-import {
-  transformSchema,
-  sliceSchema,
-  type Session,
-  type ChatMessage,
-} from "./model.ts";
+import { transformSchema, type Session, type ChatMessage } from "./model.ts";
 
 const textContent = (text: string) => ({ type: "text", text });
 export class AgentHub {
@@ -132,6 +127,7 @@ export class AgentHub {
         "mcp_servers.sprite_studio.required=true",
         'mcp_servers.sprite_studio.env_vars=["SPRITE_STUDIO_TOOL_TOKEN"]',
         'mcp_servers.sprite_studio.tools.slice_sheet.approval_mode="approve"',
+        'mcp_servers.sprite_studio.tools.write_documents.approval_mode="approve"',
         'mcp_servers.sprite_studio.tools.adjust_image.approval_mode="approve"',
         'mcp_servers.sprite_studio.tools.adjust_frame.approval_mode="approve"',
       ],
@@ -160,6 +156,8 @@ export class AgentHub {
         developerInstructions:
           "你是 Sprite Studio 中的精灵图制作助手，使用中文交流。只操作当前项目提供的资源工具。先用 list_assets 查找稳定资源 ID，再用 view_image 查看真实图片。位置、尺寸调整使用 adjust_image，规则网格切割使用 slice_sheet，不要通过图片生成替代确定性处理。需要生成/重绘时必须使用内置 image_gen，并实际提供用户引用的参考图，每次用户请求默认最多生成一张图片；没有明确要求生成就不要生成。输出图会自动保存到资源区，可以直接使用，原始图片保留。你可以在当前任务目录中准备临时文件，但不要探索其他文件、运行程序、安装依赖或使用其他服务。不要声称已经验收动画连贯性；目前可以看静态图、播放编排和逐帧信息，动态评估需结合用户实际观看。工具受限时如实说明，不伪造成果。用户消息中的“资源引用”给出身份、版本与快照路径，引用图片才是视觉输入。",
       };
+      params.developerInstructions +=
+        "切割配置已改为持久JSON配方：先read_document读取原图的documentId与全文，必要时get_schema查看格式，再用write_documents提交正文和expectedDocumentRevision。新配方items为空，需要明确添加待切单元；新增条目可省略ID，保存会返回ID，后续保留已有ID。slice_sheet只接收assetId、expectedDefinitionRevision和requestId，读取已保存配置执行。重复切割更新原切片而不创建动画，禁止以旧columns/rows工具参数执行。当前仅支持规则网格，后续单帧配方、自由编排等尚未接入，不伪造工具能力。";
       params.developerInstructions +=
         "动画引用含 snapshotId、clipId、版本、帧实例和时长。检查动画必须调用 inspect_clip 查看实际逐帧和相邻叠图证据；每次最多16帧，需要时分区间。单帧大小、位置、时长修正用 adjust_frame，明确要求的修改直接更新目标动画，返回的修改记录支持比较与撤回。不要改动其他帧实例，不用生成图片替代确定性修正。边界框变化只是线索，不能把有意运动自动拉平。向用户使用第几帧交流，UUID只在工具调用中使用。静态图和叠图不代表你已观看真实速度播放，不可声称动态验收通过。";
       const result = session.threadId
@@ -383,6 +381,10 @@ export class AgentHub {
     ) {
       const names: Record<string, string> = {
         list_assets: "查找工程资源",
+        get_schema: "读取配置格式",
+        read_document: "读取制作配置",
+        validate_document: "检查制作配置",
+        write_documents: "保存制作配置",
         view_image: "查看图片",
         slice_sheet: "切割图集",
         adjust_image: "调整图片",
@@ -592,6 +594,55 @@ export class AgentHub {
   async tool(sessionId: string, name: string, input: any) {
     const session = this.store.session(sessionId);
     const pid = session.projectId;
+    if (name === "get_schema")
+      return {
+        content: [textContent(JSON.stringify(this.store.sheets.schema()))],
+      };
+    if (name === "read_document")
+      return {
+        content: [
+          textContent(
+            JSON.stringify(
+              this.store.sheets.read(
+                pid,
+                z.string().uuid().parse(input.documentId),
+              ),
+            ),
+          ),
+        ],
+      };
+    if (name === "validate_document")
+      return {
+        content: [
+          textContent(
+            JSON.stringify(
+              this.store.sheets.parse(
+                pid,
+                z.string().uuid().parse(input.documentId),
+                z.string().parse(input.text),
+              ),
+            ),
+          ),
+        ],
+      };
+    if (name === "write_documents") {
+      const documents = z
+        .array(
+          z.object({
+            documentId: z.string().uuid(),
+            expectedDocumentRevision: z.string(),
+            text: z.string(),
+          }),
+        )
+        .min(1)
+        .max(16)
+        .parse(input.documents);
+      return {
+        content: [
+          textContent(JSON.stringify(this.store.sheets.write(pid, documents))),
+        ],
+      };
+    }
     const assetId = () => z.string().uuid().parse(input.assetId);
     const attach = (kind: "reviewIds" | "changeIds", id: string) => {
       let msg = session.messages
@@ -692,6 +743,11 @@ export class AgentHub {
                       width: asset.width,
                       height: asset.height,
                       revision: asset.revision,
+                      documentId:
+                        !asset.producer && asset.frameCount === 1
+                          ? asset.id
+                          : undefined,
+                      producer: asset.producer,
                     }
                   : asset,
               ),
@@ -714,12 +770,11 @@ export class AgentHub {
       };
     }
     if (name === "slice_sheet") {
-      const asset = this.store.image(pid, assetId());
-      const result = await this.store.slice(
+      const result = await this.store.sheets.execute(
         pid,
-        asset.id,
-        asset.revision,
-        sliceSchema.parse(input),
+        assetId(),
+        z.string().parse(input.expectedDefinitionRevision),
+        z.string().uuid().parse(input.requestId),
       );
       return { content: [textContent(JSON.stringify(result))] };
     }

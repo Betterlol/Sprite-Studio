@@ -1,9 +1,11 @@
+import type { SheetRecipe } from "../studio/sheet-schema.ts";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { InterpolationPanel } from "./InterpolationPanel.tsx";
 import { NewClipDialog } from "./NewClipDialog.tsx";
 import { AnimationPanel } from "./AnimationPanel.tsx";
 import { ComparisonPlayer } from "./ComparisonPlayer.tsx";
 import { api } from "./api.ts";
+import { SliceConfigPanel } from "./SliceConfigPanel.tsx";
 import { ResourceLibrary } from "./ResourceLibrary.tsx";
 import {
   Upload,
@@ -64,6 +66,7 @@ type State = {
   frameChanges: FrameChange[];
   folders: string[];
   libraryRevision: string;
+  configurationRevision: string;
   trash: TrashEntry[];
 };
 type Connection = { connected: boolean; model?: string; error?: string };
@@ -141,10 +144,10 @@ export function App() {
   useEffect(() => {
     localStorage.setItem("studio.tool", tool);
   }, [tool]);
-  const [columns, setColumns] = useState(4);
-  const [rows, setRows] = useState(1);
-  const [fps, setFps] = useState(12);
-  const [showGrid, setShowGrid] = useState(false);
+  const [sliceGrid, setSliceGrid] = useState<
+    SheetRecipe["slicing"]["grid"] | null
+  >(null);
+  const [showGrid, setShowGrid] = useState(true);
   const [transform, setTransform] = useState<Transform>(emptyTransform);
   const [draft, setDraft] = useState("");
   const [references, setReferences] = useState<string[]>([]);
@@ -536,24 +539,6 @@ export function App() {
     await refreshRef.current();
     return updated;
   }
-  async function applySlice() {
-    if (!currentImage) return;
-    await run("正在切割图集", async () => {
-      const result = await api<ClipAsset>(
-        `/api/projects/${projectId}/assets/${currentImage.id}/slice`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            revision: currentImage.revision,
-            spec: { columns, rows, fps },
-          }),
-        },
-      );
-      await refreshRef.current();
-      setSelectedId(result.id);
-      notify(`已创建 ${result.frames.length} 帧动画，原图已保留`);
-    });
-  }
   async function applyTransform() {
     if (!currentImage) return;
     await run("正在调整图片", async () => {
@@ -785,14 +770,62 @@ export function App() {
                   draggable={false}
                   style={{ transform: previewTransform }}
                 />
-                {tool === "slice" && showGrid && !clip && (
-                  <div
-                    className="grid-overlay"
-                    style={{
-                      backgroundSize: `${100 / columns}% ${100 / rows}%`,
-                    }}
-                  />
-                )}
+                {tool === "slice" &&
+                  showGrid &&
+                  !clip &&
+                  !currentImage.producer &&
+                  sliceGrid && (
+                    <svg
+                      className="grid-overlay"
+                      viewBox={`0 0 ${currentImage.width} ${currentImage.height}`}
+                      preserveAspectRatio="none"
+                      aria-hidden="true"
+                    >
+                      {Array.from(
+                        {
+                          length: Math.min(
+                            128,
+                            sliceGrid.columns * sliceGrid.rows,
+                          ),
+                        },
+                        (_, i) => {
+                          const [top, right, bottom, left] = sliceGrid.margin,
+                            [gapX, gapY] = sliceGrid.spacing;
+                          const width =
+                            (currentImage.width -
+                              left -
+                              right -
+                              gapX * (sliceGrid.columns - 1)) /
+                            sliceGrid.columns;
+                          const height =
+                            (currentImage.height -
+                              top -
+                              bottom -
+                              gapY * (sliceGrid.rows - 1)) /
+                            sliceGrid.rows;
+                          return (
+                            <rect
+                              key={i}
+                              x={
+                                left + (i % sliceGrid.columns) * (width + gapX)
+                              }
+                              y={
+                                top +
+                                Math.floor(i / sliceGrid.columns) *
+                                  (height + gapY)
+                              }
+                              width={Math.max(0, width)}
+                              height={Math.max(0, height)}
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="1"
+                              vectorEffect="non-scaling-stroke"
+                            />
+                          );
+                        },
+                      )}
+                    </svg>
+                  )}
                 <div className="canvas-corners">
                   <i />
                   <i />
@@ -1178,76 +1211,27 @@ export function App() {
                   }}
                 />
               ) : tool === "slice" ? (
-                <div className="tool-content">
-                  <label>
-                    列
-                    <input
-                      aria-label="切割列数"
-                      type="number"
-                      min="1"
-                      max="32"
-                      value={columns}
-                      onChange={(event) =>
-                        setColumns(
-                          Math.max(1, Math.min(32, Number(event.target.value))),
-                        )
-                      }
-                    />
-                  </label>
-                  <span className="multiply">×</span>
-                  <label>
-                    行
-                    <input
-                      aria-label="切割行数"
-                      type="number"
-                      min="1"
-                      max="32"
-                      value={rows}
-                      onChange={(event) =>
-                        setRows(
-                          Math.max(1, Math.min(32, Number(event.target.value))),
-                        )
-                      }
-                    />
-                  </label>
-                  <label>
-                    帧率
-                    <input
-                      aria-label="新动画帧率"
-                      type="number"
-                      min="1"
-                      max="60"
-                      value={fps}
-                      onChange={(event) =>
-                        setFps(
-                          Math.max(1, Math.min(60, Number(event.target.value))),
-                        )
-                      }
-                    />
-                    <small>fps</small>
-                  </label>
-                  <label className="grid-toggle">
-                    <input
-                      type="checkbox"
-                      checked={showGrid}
-                      onChange={(event) => setShowGrid(event.target.checked)}
-                    />
-                    网格
-                  </label>
-                  <span className="tool-spacer" />
-                  <button
-                    className="secondary"
-                    disabled={!!operation || columns * rows > 128}
-                    onClick={() => void applySlice()}
-                  >
-                    {operation === "正在切割图集" ? (
-                      <LoaderCircle size={14} className="spin" />
-                    ) : (
-                      <Grid2X2 size={14} />
-                    )}
-                    创建 {columns * rows} 帧动画
-                  </button>
-                </div>
+                !clip &&
+                !currentImage.producer &&
+                currentImage.frameCount === 1 ? (
+                  <SliceConfigPanel
+                    key={`${projectId}-${currentImage.id}`}
+                    projectId={projectId}
+                    image={currentImage}
+                    assets={state?.assets || []}
+                    refreshToken={`${state?.configurationRevision}-${state?.libraryRevision}`}
+                    onRefresh={() => refreshRef.current()}
+                    onSelect={setSelectedId}
+                    onGrid={setSliceGrid}
+                    gridVisible={showGrid}
+                    onGridVisible={setShowGrid}
+                    disabled={!!operation || agentBusy}
+                  />
+                ) : (
+                  <p className="adjust-note">
+                    请在原图素材或参考图中选择静态原图配置切割；动画帧可在调整页编辑。
+                  </p>
+                )
               ) : (
                 <div className="adjust-content">
                   <div className="tool-content">

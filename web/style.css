@@ -11,6 +11,106 @@
   --surface: #1c2125;
   --soft: #252b30;
 }
+.animation-drop-strip {
+  min-height: 106px;
+}
+.timeline-insert-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 180px;
+  padding: 12px;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: 5px;
+  white-space: normal;
+}
+.animation-editor .timeline-options input[type="number"] {
+  width: 52px;
+}
+.animation-editor .frame-settings {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.animation-editor .frame-settings input {
+  width: 72px;
+}
+.animation-picker {
+  padding: 6px 14px;
+}
+.animation-picker summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.animation-picker summary svg {
+  vertical-align: middle;
+  margin-right: 5px;
+}
+.animation-picker > input {
+  width: 100%;
+  margin: 8px 0;
+}
+.animation-picker-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  max-height: 120px;
+  overflow: auto;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.animation-picker-list label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  padding: 3px;
+}
+.animation-picker-list img {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  background: #141719;
+}
+.animation-picker-list span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.animation-hint {
+  margin: 5px 14px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.generated-preview {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.generated-preview > img {
+  max-width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  background: #141719;
+}
+.generated-preview form {
+  display: grid;
+  gap: 7px;
+}
+.generated-preview label {
+  display: grid;
+  gap: 4px;
+}
+.generated-preview input,
+.generated-preview select {
+  width: 100%;
+  min-width: 0;
+}
+.generated-preview p {
+  color: #efab9f;
+}
 .slice-config-panel {
   padding-bottom: 8px;
 }

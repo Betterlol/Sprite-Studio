@@ -424,6 +424,14 @@ export class ResourceLibrary {
           from: asset.file + ".recipe.json",
           to: file + ".recipe.json",
         });
+      if (
+        asset.type === "clip" &&
+        existsSync(this.path(pid, asset.file + ".config.json"))
+      )
+        moves.push({
+          from: asset.file + ".config.json",
+          to: file + ".config.json",
+        });
       values.push({
         path: meta,
         beforePath: oldMeta,
@@ -529,6 +537,10 @@ export class ResourceLibrary {
       for (const path of [
         asset.file!,
         this.store.metaPath(pid, asset.id),
+        ...(asset.type === "clip" &&
+        existsSync(this.path(pid, asset.file + ".config.json"))
+          ? [asset.file + ".config.json"]
+          : []),
         ...(asset.type === "image" &&
         existsSync(this.path(pid, asset.file + ".recipe.json"))
           ? [asset.file + ".recipe.json"]

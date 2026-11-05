@@ -150,7 +150,7 @@ app.get("/api/projects/:projectId/schemas/sheet-recipe", async () =>
   store.sheets.schema(),
 );
 app.get("/api/projects/:projectId/documents/:assetId", async (request) =>
-  store.sheets.read(pid(request), aid(request)),
+  store.documents.read(pid(request), aid(request)),
 );
 app.post("/api/projects/:projectId/documents", async (request) => {
   const input = z
@@ -167,7 +167,7 @@ app.post("/api/projects/:projectId/documents", async (request) => {
         .max(16),
     })
     .parse(request.body);
-  return store.sheets.write(pid(request), input.documents);
+  return store.documents.write(pid(request), input.documents);
 });
 app.post(
   "/api/projects/:projectId/assets/:assetId/slice-config",
@@ -315,25 +315,48 @@ app.post("/api/projects/:projectId/clips", async (request) => {
   const spec = z
     .object({
       name: z.string().trim().min(1).max(100),
-      imageIds: z.array(z.string().uuid()).min(2).max(128),
-      fps: z.number().min(1).max(60),
-      folder: z.string().optional(),
+      fps: z.number().min(1).max(60).default(12),
+      folder: z.string().default(""),
+      requestId: z.string().uuid(),
     })
     .parse(request.body);
-  return store.createClip(
-    pid(request),
-    spec.name,
-    spec.imageIds.map((imageId, index) => ({
-      id: randomUUID(),
-      imageId,
-      durationUs:
-        Math.round(((index + 1) * 1_000_000) / spec.fps) -
-        Math.round((index * 1_000_000) / spec.fps),
-    })),
-    undefined,
-    true,
-    spec.folder,
-  );
+  return store.documents.createClip(pid(request), spec);
+});
+app.get(
+  "/api/projects/:projectId/generated/:generatedId/image",
+  async (request: any, reply) =>
+    reply
+      .type("image/png")
+      .send(
+        createReadStream(
+          store.generated.imagePath(
+            pid(request),
+            z.string().uuid().parse(request.params.generatedId),
+          ),
+        ),
+      ),
+);
+app.post("/api/projects/:projectId/generated/save", async (request) => {
+  const spec = z
+    .object({
+      generatedId: z.string().uuid(),
+      type: z.enum(["reference", "resource"]),
+      name: z.string(),
+      folder: z.string().default(""),
+      requestId: z.string().uuid(),
+    })
+    .strict()
+    .parse(request.body);
+  const asset = store.generated.save(pid(request), spec),
+    generated = store.generated.record(pid(request), spec.generatedId);
+  if (generated.interpolationId && spec.type === "resource")
+    store.interpolations.receive(
+      pid(request),
+      generated.interpolationId,
+      asset.id,
+      { id: generated.generationId, inputImages: generated.inputImages },
+    );
+  return asset;
 });
 app.post("/api/projects/:projectId/interpolations", async (request, reply) =>
   reply.code(202).send(agent.startInterpolation(pid(request), request.body)),

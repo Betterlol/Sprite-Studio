@@ -97,6 +97,8 @@ export function AnimationPanel(props: Props) {
     endFrameId: clip.frames[end]!.id,
   });
   const rangeValid = end >= start && end - start < 16;
+  if (!clip.frames.length)
+    return <p className="adjust-note">先向动画添加图片，再选择检查区间。</p>;
   return (
     <div className="animation-panel">
       <div className="review-controls">

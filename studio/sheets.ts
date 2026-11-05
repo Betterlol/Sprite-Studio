@@ -223,22 +223,30 @@ export class SheetDocuments {
       new Set(documents.map((d) => d.documentId)).size !== documents.length
     )
       throw new StudioError("每次提交1至16份不同的配置");
-    const writes = documents.map((input) => {
-      const current = this.read(pid, input.documentId);
-      if (current.documentRevision !== input.expectedDocumentRevision)
-        throw new StudioError(
-          "VERSION_CONFLICT：配置已变化，请重新读取；本地草稿已保留",
-          409,
-        );
-      const recipe = this.parse(pid, input.documentId, input.text);
-      for (const item of recipe.slicing.items) item.id ??= randomUUID();
-      return { path: current.path, bytes: jsonBytes(recipe) };
-    });
+    const writes = documents.map((input) => this.prepare(pid, input));
     publishFiles(this.store, pid, writes, {
       kind: "save-config",
       documentIds: documents.map((d) => d.documentId),
     });
     return documents.map((d) => this.read(pid, d.documentId));
+  }
+  prepare(
+    pid: string,
+    input: {
+      documentId: string;
+      expectedDocumentRevision: string;
+      text: string;
+    },
+  ) {
+    const current = this.read(pid, input.documentId);
+    if (current.documentRevision !== input.expectedDocumentRevision)
+      throw new StudioError(
+        "VERSION_CONFLICT：配置已变化，请重新读取；本地草稿已保留",
+        409,
+      );
+    const recipe = this.parse(pid, input.documentId, input.text);
+    for (const item of recipe.slicing.items) item.id ??= randomUUID();
+    return { path: current.path, bytes: jsonBytes(recipe) };
   }
   schema() {
     return z.toJSONSchema(sheetRecipeSchema);

@@ -53,6 +53,7 @@ export type ImageAsset = {
 };
 export type ClipFrame = { id: string; imageId: string; durationUs: number };
 export type ClipAsset = {
+  initialFps?: number;
   folder?: string;
   file?: string;
   id: string;
@@ -86,6 +87,7 @@ export type DeletePlan = {
   blockers: { name: string; reason: string }[];
 };
 export type ChatMessage = {
+  generatedIds?: string[];
   id: string;
   role: "user" | "assistant";
   text: string;
@@ -293,9 +295,9 @@ export const clipSchema = z.object({
         durationUs: z.number().int().min(1000).max(60_000_000),
       }),
     )
-    .min(1)
     .max(128),
   loop: z.boolean(),
+  initialFps: z.number().min(1).max(60).optional(),
 });
 export function assetUrl(
   projectId: string,

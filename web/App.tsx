@@ -1,3 +1,6 @@
+import { AnimationEditor } from "./AnimationEditor.tsx";
+import { GeneratedPreview } from "./GeneratedPreview.tsx";
+import type { GeneratedImageInfo } from "../studio/generated.ts";
 import type { SheetRecipe } from "../studio/sheet-schema.ts";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { InterpolationPanel } from "./InterpolationPanel.tsx";
@@ -60,6 +63,7 @@ import {
 type State = {
   project: Project;
   assets: Asset[];
+  generatedImages: GeneratedImageInfo[];
   sessions: Session[];
   interpolations: Interpolation[];
   reviews: ClipReview[];
@@ -333,8 +337,8 @@ export function App() {
     session?.activities.length,
   ]);
   useEffect(() => {
-    if (!playing || !clip) return;
-    let index = frameIndex,
+    if (!playing || !clip || !clip.frames.length) return;
+    let index = Math.min(frameIndex, clip.frames.length - 1),
       elapsed = 0,
       last = performance.now(),
       request = 0;
@@ -359,6 +363,13 @@ export function App() {
     request = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(request);
   }, [playing, clip?.revision, playbackRun]);
+  useEffect(() => {
+    if (!clip) return;
+    setFrameIndex((index) =>
+      Math.max(0, Math.min(index, clip.frames.length - 1)),
+    );
+    if (!clip.frames.length) setPlaying(false);
+  }, [clip?.revision]);
 
   async function run(label: string, action: () => Promise<void>) {
     setOperation(label);
@@ -532,6 +543,7 @@ export function App() {
         body: JSON.stringify({
           revision: next.revision,
           frames: next.frames,
+          initialFps: next.initialFps || 12,
           loop: next.loop,
         }),
       },
@@ -582,8 +594,8 @@ export function App() {
     ? Math.max(
         0.05,
         Math.min(
-          (stageSize.width - 96) / currentImage.width,
-          (stageSize.height - 96) / currentImage.height,
+          (stageSize.width - 16) / currentImage.width,
+          (stageSize.height - 16) / currentImage.height,
           2,
         ),
       )
@@ -846,9 +858,11 @@ export function App() {
                   <i />
                   <i />
                 </div>
-                <h1>从一张参考图开始</h1>
+                <h1>{clip ? "空动画，等待添加图片" : "从一张参考图开始"}</h1>
                 <p>
-                  把角色、参考图或图集拖进来，
+                  {clip
+                    ? "从素材库把图片拖到下方时间轴，"
+                    : "把角色、参考图或图集拖进来，"}
                   <br />
                   和助手一起完成下一帧。
                 </p>
@@ -924,194 +938,32 @@ export function App() {
             )}
           </div>
           {clip && (
-            <div className="timeline">
-              <div className="timeline-heading">
-                <div className="playback">
-                  <button
-                    className="icon-button"
-                    title="上一帧"
-                    onClick={() => {
-                      setPlaying(false);
-                      setFrameIndex(Math.max(0, frameIndex - 1));
-                    }}
-                  >
-                    <SkipBack size={14} />
-                  </button>
-                  <button
-                    className={`play-button ${playing ? "playing" : ""}`}
-                    aria-label={playing ? "暂停动画" : "播放动画"}
-                    onClick={() => {
-                      setComparison(null);
-                      setPlaying(!playing);
-                    }}
-                  >
-                    {playing ? <Pause size={16} /> : <Play size={16} />}
-                  </button>
-                  <button
-                    className="icon-button"
-                    title="下一帧"
-                    onClick={() => {
-                      setPlaying(false);
-                      setFrameIndex(
-                        Math.min(clip.frames.length - 1, frameIndex + 1),
-                      );
-                    }}
-                  >
-                    <SkipForward size={14} />
-                  </button>
-                  <span>
-                    {String(frameIndex + 1).padStart(2, "0")}
-                    <em> / {String(clip.frames.length).padStart(2, "0")}</em>
-                  </span>
-                </div>
-                <div className="timeline-options">
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={clip.loop}
-                      onChange={(event) =>
-                        void run("保存循环设置", async () => {
-                          await saveClip({
-                            ...clip,
-                            loop: event.target.checked,
-                          });
-                        })
-                      }
-                    />
-                    循环
-                  </label>
-                  <span>
-                    {(
-                      clip.frames.reduce(
-                        (total, frame) => total + frame.durationUs,
-                        0,
-                      ) / 1_000_000
-                    ).toFixed(2)}{" "}
-                    s
-                  </span>
-                </div>
-              </div>
-              <div className="frame-strip">
-                {clip.frames.map((frame, index) => {
-                  const image = state?.assets.find(
-                    (asset) => asset.id === frame.imageId,
-                  ) as ImageAsset | undefined;
-                  return (
-                    <button
-                      key={frame.id}
-                      className={`frame ${index === frameIndex ? "selected" : ""}`}
-                      onClick={() => {
-                        setPlaying(false);
-                        setFrameIndex(index);
-                        setComparison(null);
-                        setTransform(emptyTransform);
-                      }}
-                    >
-                      <span className="frame-number">
-                        {String(index + 1).padStart(2, "0")}
-                      </span>
-                      {image && (
-                        <img
-                          src={assetUrl(projectId, image.id, image.revision)}
-                          alt={`第 ${index + 1} 帧`}
-                        />
-                      )}
-                      <small>{(frame.durationUs / 1000).toFixed(1)} ms</small>
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="frame-settings">
-                <span>选中帧</span>
-                <label>
-                  停留
-                  <input
-                    aria-label="当前帧停留毫秒"
-                    type="number"
-                    min="1"
-                    onFocus={() => {
-                      setPlaying(false);
-                      setComparison(null);
-                    }}
-                    key={`${clip.revision}-${frameIndex}`}
-                    defaultValue={
-                      (clip.frames[frameIndex]?.durationUs || 1000) / 1000
-                    }
-                    onBlur={(event) => {
-                      const duration = Number(event.target.value);
-                      if (
-                        duration > 0 &&
-                        Math.round(duration * 1000) !==
-                          clip.frames[frameIndex]?.durationUs
-                      )
-                        void run("保存时长", async () => {
-                          const change = await api<FrameChange>(
-                            `/api/projects/${projectId}/frame-changes`,
-                            {
-                              method: "POST",
-                              body: JSON.stringify({
-                                requestId: crypto.randomUUID(),
-                                clipId: clip.id,
-                                revision: clip.revision,
-                                frameId: clip.frames[frameIndex]!.id,
-                                durationUs: Math.round(duration * 1000),
-                              }),
-                            },
-                          );
-                          await refreshRef.current();
-                          setFocusedChangeId(change.id);
-                        });
-                    }}
-                  />
-                  <span>ms</span>
-                </label>
-                <div className="reorder">
-                  <button
-                    className="icon-button"
-                    title="将当前帧前移"
-                    disabled={frameIndex === 0 || !!operation}
-                    onClick={() =>
-                      void run("调整帧顺序", async () => {
-                        const frames = [...clip.frames];
-                        [frames[frameIndex - 1], frames[frameIndex]] = [
-                          frames[frameIndex]!,
-                          frames[frameIndex - 1]!,
-                        ];
-                        await saveClip({ ...clip, frames });
-                        setFrameIndex(frameIndex - 1);
-                      })
-                    }
-                  >
-                    <ChevronLeft size={14} />
-                  </button>
-                  <button
-                    className="icon-button"
-                    title="将当前帧后移"
-                    disabled={
-                      frameIndex >= clip.frames.length - 1 || !!operation
-                    }
-                    onClick={() =>
-                      void run("调整帧顺序", async () => {
-                        const frames = [...clip.frames];
-                        [frames[frameIndex], frames[frameIndex + 1]] = [
-                          frames[frameIndex + 1]!,
-                          frames[frameIndex]!,
-                        ];
-                        await saveClip({ ...clip, frames });
-                        setFrameIndex(frameIndex + 1);
-                      })
-                    }
-                  >
-                    <ChevronRight size={14} />
-                  </button>
-                </div>
-                <span className="timeline-hint">
-                  在实际速度下播放，检查动作节奏
-                </span>
-              </div>
-            </div>
+            <AnimationEditor
+              key={`${projectId}-${clip.id}`}
+              projectId={projectId}
+              clip={clip}
+              assets={state?.assets || []}
+              frameIndex={frameIndex}
+              playing={playing}
+              onFrame={(index) => {
+                setFrameIndex(index);
+                setComparison(null);
+                setTransform(emptyTransform);
+              }}
+              onPlaying={(value) => {
+                setPlaying(value);
+                setComparison(null);
+              }}
+              onSave={saveClip}
+              onTool={(value) => {
+                setTool(value);
+                setPlaying(false);
+                setComparison(null);
+              }}
+              disabled={!!operation || agentBusy}
+            />
           )}
-          {currentImage && (
+          {(currentImage || clip) && (
             <section className="tools-panel">
               <div className="tools-tabs">
                 <button
@@ -1138,7 +990,7 @@ export function App() {
                   <button
                     className={tool === "interpolate" ? "active" : ""}
                     onClick={() => {
-                      setTool("interpolate");
+                      setTool("adjust");
                       setPlaying(false);
                       setTransform(emptyTransform);
                     }}
@@ -1212,6 +1064,7 @@ export function App() {
                 />
               ) : tool === "slice" ? (
                 !clip &&
+                currentImage &&
                 !currentImage.producer &&
                 currentImage.frameCount === 1 ? (
                   <SliceConfigPanel
@@ -1232,6 +1085,10 @@ export function App() {
                     请在原图素材或参考图中选择静态原图配置切割；动画帧可在调整页编辑。
                   </p>
                 )
+              ) : !currentImage ? (
+                <p className="adjust-note">
+                  向动画添加图片后，可在这里调整当前帧。
+                </p>
               ) : (
                 <div className="adjust-content">
                   <div className="tool-content">
@@ -1529,6 +1386,22 @@ export function App() {
                       })}
                     </div>
                   )}
+                  {(message.generatedIds || []).map((id) => {
+                    const image = state?.generatedImages?.find(
+                      (item) => item.id === id,
+                    );
+                    return image ? (
+                      <GeneratedPreview
+                        key={id}
+                        projectId={projectId}
+                        image={image}
+                        onSaved={async (asset) => {
+                          await refreshRef.current();
+                          setSelectedId(asset.id);
+                        }}
+                      />
+                    ) : null;
+                  })}
                   {message.status === "streaming" && !message.text && (
                     <span className="typing">
                       <i />
@@ -1747,7 +1620,7 @@ export function App() {
                 className="composer-note generation-location"
                 title={`资源/${categoryFolder("原图素材", folder)}`}
               >
-                生成位置：{categoryFolder("原图素材", folder)} · 原图保留
+                生成后由助手命名并选择目录保存
               </p>
             </div>
           </aside>
@@ -1803,7 +1676,7 @@ export function App() {
             await refreshRef.current();
             setNewClip(false);
             setSelectedId(clip.id);
-            setTool("interpolate");
+            setTool("adjust");
           }}
         />
       )}

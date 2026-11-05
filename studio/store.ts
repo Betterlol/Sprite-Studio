@@ -18,6 +18,8 @@ import { AnimationStore } from "./animation.ts";
 import { ResourceLibrary, assetFolder } from "./library.ts";
 import { recoverResourceLayout, organizeResourceLayout } from "./layout.ts";
 import { recoverFileOperations } from "./file-operations.ts";
+import { ProjectDocuments } from "./documents.ts";
+import { GeneratedImages } from "./generated.ts";
 import { SheetDocuments } from "./sheets.ts";
 import {
   resourceCategories,
@@ -68,6 +70,8 @@ export class ProjectStore extends EventEmitter {
   animation: AnimationStore;
   library: ResourceLibrary;
   sheets: SheetDocuments;
+  documents: ProjectDocuments;
+  generated: GeneratedImages;
   metadataPaths = new Map<string, Map<string, string>>();
   resourceReaders = new Map<string, number>();
   constructor(root: string) {
@@ -112,6 +116,8 @@ export class ProjectStore extends EventEmitter {
     this.interpolations = new InterpolationStore(this);
     this.animation = new AnimationStore(this);
     this.sheets = new SheetDocuments(this);
+    this.documents = new ProjectDocuments(this);
+    this.generated = new GeneratedImages(this);
   }
   project(id: string) {
     const project = this.projects.get(id);
@@ -268,12 +274,24 @@ export class ProjectStore extends EventEmitter {
     if (asset.type === "clip")
       atomicJson(this.safePath(projectId, asset.file!), {
         frames: asset.frames,
+        initialFps: asset.initialFps || 12,
         revision: asset.revision,
         loop: asset.loop,
         origin: asset.origin,
         appliedInterpolationIds: asset.appliedInterpolationIds,
         appliedFrameChangeIds: asset.appliedFrameChangeIds,
         revertedFrameChangeIds: asset.revertedFrameChangeIds,
+      });
+    if (
+      asset.type === "clip" &&
+      existsSync(this.safePath(projectId, asset.file! + ".config.json"))
+    )
+      atomicJson(this.safePath(projectId, asset.file! + ".config.json"), {
+        schemaVersion: 1,
+        type: "clip",
+        initialFps: asset.initialFps || 12,
+        loop: asset.loop,
+        frames: asset.frames,
       });
     const metadata =
       asset.type === "clip"
@@ -449,13 +467,13 @@ export class ProjectStore extends EventEmitter {
     origin?: ClipAsset["origin"],
     loop = true,
     folder?: string,
+    initialFps = 12,
   ) {
     clipSchema.parse({ revision: "", frames, loop });
     const images = frames.map((frame) => this.image(projectId, frame.imageId));
     if (
       images.some((image) => image.frameCount !== 1) ||
-      new Set(images.map((image) => `${image.width}x${image.height}`)).size !==
-        1
+      new Set(images.map((image) => `${image.width}x${image.height}`)).size > 1
     )
       throw new StudioError("动画帧需要相同画布的静态图片");
     return this.saveAsset(projectId, {
@@ -466,12 +484,15 @@ export class ProjectStore extends EventEmitter {
       createdAt: now(),
       frames,
       loop,
+      initialFps,
       origin,
       folder:
         folder ??
         (origin?.assetId
           ? assetFolder(this.asset(projectId, origin.assetId))
-          : assetFolder(images[0]!)),
+          : images[0]
+            ? assetFolder(images[0])
+            : "动画"),
     }) as ClipAsset;
   }
   updateClip(
@@ -496,8 +517,7 @@ export class ProjectStore extends EventEmitter {
     if (images.some((image) => image.frameCount !== 1))
       throw new StudioError("动画帧需要使用静态图片");
     if (
-      new Set(images.map((image) => `${image.width}x${image.height}`)).size !==
-      1
+      new Set(images.map((image) => `${image.width}x${image.height}`)).size > 1
     )
       throw new StudioError("同一动画内的帧需要相同画布");
     atomicJson(
@@ -513,6 +533,7 @@ export class ProjectStore extends EventEmitter {
       ...old,
       frames: spec.frames,
       loop: spec.loop,
+      initialFps: spec.initialFps ?? old.initialFps ?? 12,
       appliedInterpolationIds: interpolationId
         ? [...(old.appliedInterpolationIds || []), interpolationId]
         : old.appliedInterpolationIds,
@@ -530,6 +551,7 @@ export class ProjectStore extends EventEmitter {
     return this.reading(projectId, async () => {
       const clip = this.asset(projectId, id);
       if (clip.type !== "clip") throw new StudioError("请选择动画资源");
+      if (!clip.frames.length) throw new StudioError("动画还没有帧，无法导出");
       const frames = clip.frames.map((frame) => ({
         ...frame,
         path: this.imagePath(projectId, frame.imageId),
@@ -589,7 +611,15 @@ export class ProjectStore extends EventEmitter {
       assets: this.assets(projectId),
       folders: this.library.folders(projectId),
       libraryRevision: this.library.revision(projectId),
-      configurationRevision: this.sheets.revision(projectId),
+      configurationRevision: sha256(
+        JSON.stringify([
+          this.sheets.revision(projectId),
+          this.assets(projectId)
+            .filter((a) => a.type === "clip")
+            .map((a) => [a.id, a.revision]),
+        ]),
+      ),
+      generatedImages: this.generated.list(projectId),
       trash: this.library.trash(projectId),
       interpolations: this.interpolations.list(projectId),
       reviews: this.animation.listReviews(projectId),

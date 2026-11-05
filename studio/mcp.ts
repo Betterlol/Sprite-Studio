@@ -10,9 +10,9 @@ const idProperty = {
 };
 const tools = [
   {
-    name: "get_schema",
+    name: "list_generated_images",
     description:
-      "Read the current sheet-recipe JSON schema. Editing uses document text; execution tools read saved configuration.",
+      "List this chat's generated images, including generatedId (id), dimensions and saved asset IDs. Call after image_gen, then save_image with an explicit name and category-relative folder. Produces no new generation.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -21,9 +21,67 @@ const tools = [
     annotations: { readOnlyHint: true },
   },
   {
+    name: "save_image",
+    description:
+      "Save a generated image as a project asset, choosing its exact filename and category. type=reference goes under 参考图; type=resource under 原图素材. folder is relative to that category: empty or '.' means its root. PNG extension can be omitted. Does not overwrite or silently rename conflicts. Reuse requestId only to retry the same save.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        generatedId: {
+          type: "string",
+          description:
+            "Generated image id returned by list_generated_images; not a project resource ID",
+        },
+        type: { type: "string", enum: ["reference", "resource"] },
+        name: { type: "string" },
+        folder: { type: "string" },
+        requestId: { type: "string" },
+      },
+      required: ["generatedId", "type", "name", "requestId"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "create_clip",
+    description:
+      "Create an empty animation with a name and initial fps. folder is relative to 动画; empty or '.' is its root. Returns clip and document IDs. Then use read_document/write_documents to freely edit frames (imageId, durationUs, instance id), loop and initialFps. Creation does not require endpoint images.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        fps: { type: "number", minimum: 1, maximum: 60 },
+        folder: { type: "string" },
+        requestId: { type: "string" },
+      },
+      required: ["name", "requestId"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "get_schema",
+    description:
+      "Read the current configuration JSON schema (type sheet-recipe or clip; default sheet-recipe). Editing uses document text; execution tools read saved configuration.",
+    inputSchema: {
+      type: "object",
+      properties: { type: { type: "string", enum: ["sheet-recipe", "clip"] } },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
     name: "read_document",
     description:
-      "Read the actual editable slicing recipe text, document and definition revisions, path, build state and output IDs for a source image. A missing document returns an unsaved template; initialize items explicitly. Preserves logical item IDs on later edits.",
+      "Read the actual editable source slicing recipe or animation config text, document and definition revisions, path, build state and output IDs for a source image. A missing document returns an unsaved template; initialize items explicitly. Preserves logical item IDs on later edits.",
     inputSchema: {
       type: "object",
       properties: { documentId: idProperty },
@@ -35,7 +93,7 @@ const tools = [
   {
     name: "validate_document",
     description:
-      "Validate sheet-recipe JSON text and references without saving or slicing.",
+      "Validate recipe or clip JSON text and references without saving or slicing.",
     inputSchema: {
       type: "object",
       properties: { documentId: idProperty, text: { type: "string" } },
@@ -47,7 +105,7 @@ const tools = [
   {
     name: "write_documents",
     description:
-      "Save 1-16 recipe files atomically from complete JSON text and expected document revisions. Returns normalized documents and stable IDs for new items. Does not slice, generate images or create animations. Re-read on version conflict; never discard another editor's changes.",
+      "Save 1-16 recipe or clip config files atomically from complete JSON text and expected document revisions. Returns normalized documents and stable IDs for new items. Does not slice, generate images or create animations. Re-read on version conflict; never discard another editor's changes.",
     inputSchema: {
       type: "object",
       properties: {

@@ -205,6 +205,8 @@ export class AnimationStore {
     const snapshot = input.snapshotId
       ? this.snapshot(pid, input.snapshotId)
       : this.capture(pid, input.clipId!, input.revision);
+    if (!snapshot.clip.frames.length)
+      throw new StudioError("动画还没有帧，无法检查");
     const range = this.range(
       snapshot,
       input.startFrameId,

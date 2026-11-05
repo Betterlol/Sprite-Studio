@@ -254,5 +254,5 @@ export class InterpolationStore {
 }
 
 export function interpolationPrompt(job: Interpolation) {
-  return `请为动画补帧，实际使用本条消息的两张图片作为首尾参考。第一张是首帧（assetId=${job.start.imageId}），第二张是尾帧（assetId=${job.end.imageId}），两张都必须通过 referenced_image_paths 等图像生成参考参数实际传给内置 image_gen。\n动作要求：${job.description}\n仅调用一次内置 image_gen，失败不重试，不使用 slice_sheet 或 adjust_image。生成一张透明背景 spritesheet，共 ${job.count + 2} 格，严格 ${job.columns} 列 ${job.rows} 行，等大无间距网格，按从左到右、从上到下排序：第一格复现首帧，最后一格复现尾帧，中间 ${job.count} 格为连续过渡。每格画布比例 ${job.width}:${job.height}，角色大小、朝向和基准一致，不画网格线、文字、序号、边框。网页将去掉生成的首尾格，保留原始首尾帧，由网页按设置切割并加入动画。生成完成后停止，不自行切割或重试，不宣称动态验收通过。`;
+  return `请为动画补帧，实际使用本条消息的两张图片作为首尾参考。第一张是首帧（assetId=${job.start.imageId}），第二张是尾帧（assetId=${job.end.imageId}），两张都必须通过 referenced_image_paths 等图像生成参考参数实际传给内置 image_gen。\n动作要求：${job.description}\n仅调用一次内置 image_gen，失败不重试，不使用 slice_sheet 或 adjust_image。生成一张透明背景 spritesheet，共 ${job.count + 2} 格，严格 ${job.columns} 列 ${job.rows} 行，等大无间距网格，按从左到右、从上到下排序：第一格复现首帧，最后一格复现尾帧，中间 ${job.count} 格为连续过渡。每格画布比例 ${job.width}:${job.height}，角色大小、朝向和基准一致，不画网格线、文字、序号、边框。网页将去掉生成的首尾格，保留原始首尾帧，由网页按设置切割并加入动画。生成完成后调用list_generated_images，再调用save_image保存图集，type为resource，自行取清楚的文件名；folder是相对原图素材的子目录，可用空字符串或点号存到分类根目录。成功保存后停止，不自行切割或重试，不宣称动态验收通过。`;
 }

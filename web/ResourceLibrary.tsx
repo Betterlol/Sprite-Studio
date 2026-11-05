@@ -490,6 +490,22 @@ export function ResourceLibrary({
                   "application/x-sprite-asset",
                   asset.id,
                 );
+                event.dataTransfer.effectAllowed = "link";
+                const selected = checked
+                  .filter((key) => key.startsWith("a:"))
+                  .map((key) => key.slice(2))
+                  .filter((id) =>
+                    assets.some(
+                      (a) =>
+                        a.id === id && a.type === "image" && a.frameCount === 1,
+                    ),
+                  );
+                event.dataTransfer.setData(
+                  "application/x-sprite-assets",
+                  JSON.stringify(
+                    selected.includes(asset.id) ? selected : [asset.id],
+                  ),
+                );
               }}
             >
               <span
@@ -499,6 +515,7 @@ export function ResourceLibrary({
                   <img
                     src={assetUrl(projectId, asset.id, asset.revision)}
                     alt=""
+                    draggable={false}
                     loading="lazy"
                   />
                 ) : (
@@ -534,11 +551,7 @@ export function ResourceLibrary({
       <div className="library-footer">
         <button
           className="import-button new-clip-button"
-          disabled={
-            disabled ||
-            assets.filter((a) => a.type === "image" && a.frameCount === 1)
-              .length < 2
-          }
+          disabled={disabled}
           onClick={onNewClip}
         >
           <Film size={15} />

@@ -1,3 +1,4 @@
+import { permissionTools, type PermissionTool } from "./tool-permissions.ts";
 import { randomUUID, randomBytes } from "node:crypto";
 import { readFileSync, copyFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, extname } from "node:path";
@@ -27,6 +28,15 @@ export class AgentHub {
     string,
     { sessionId: string; finish: (value: any) => void; timer: NodeJS.Timeout }
   >();
+  toolWaits = new Map<
+    string,
+    {
+      finish: (decision: { accept: boolean; reason: string }) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
+  toolTails = new Map<string, Promise<void>>();
+  toolEpochs = new Map<string, number>();
   disabled: string[] = [];
   status: {
     connected: boolean;
@@ -128,7 +138,7 @@ export class AgentHub {
         `mcp_servers.sprite_studio.args=${JSON.stringify([fileURLToPath(new URL("./mcp.ts", import.meta.url)), this.endpoint, session.id])}`,
         "mcp_servers.sprite_studio.enabled=true",
         "mcp_servers.sprite_studio.required=true",
-        "mcp_servers.sprite_studio.tool_timeout_sec=1000",
+        "mcp_servers.sprite_studio.tool_timeout_sec=86400",
         'mcp_servers.sprite_studio.env_vars=["SPRITE_STUDIO_TOOL_TOKEN"]',
         'mcp_servers.sprite_studio.tools.slice_sheet.approval_mode="approve"',
         'mcp_servers.sprite_studio.tools.write_documents.approval_mode="approve"',
@@ -166,7 +176,9 @@ export class AgentHub {
       params.developerInstructions +=
         "切割配置已改为持久JSON配方：先read_document读取原图的documentId与全文，必要时get_schema查看格式，再用write_documents提交正文和expectedDocumentRevision。新配方items为空，需要明确添加待切单元；新增条目可省略ID，保存会返回ID，后续保留已有ID。slice_sheet只接收assetId、expectedDefinitionRevision和requestId，读取已保存配置执行。重复切割更新原切片而不创建动画，禁止以旧columns/rows工具参数执行。当前仅支持规则网格，动画可用create_clip创建空动画，read_document/write_documents编辑clip JSON中的frames(imageId、id、durationUs)、loop、initialFps；帧id新增可省略，重排保留id。单帧变换已有frame-edit草稿配置，按下述流程执行。";
       params.developerInstructions +=
-        "动画引用含snapshotId、clipId、版本、帧实例和时长。检查用inspect_clip看实际帧图与相邻叠图，每次最多16帧。动画帧缩放、位移、裁切与时长修复：create_frame_draft取得同一动画草稿documentId，frameId仅指定起始焦点；同一动画后续帧复用这份草稿。read_document读取配置，通过write_documents修改frame-edit v2 JSON的frames数组，每项含frameId、transform、durationUs，transform为相对源图的绝对参数；保留其他条目，不把上次修改丢掉，再用inspect_clip传draftId、documentRevision检查草稿。预览不会修改动画或新增图片资源。可以连续修改多帧，一起预览播放编排，inspect_clip返回越界warnings；有blocking警告先修正，不能把画布内截断图当作未越界。检查后调用save_frame_draft一次保存所有修改；默认等待用户Accept/Deny，拒绝理由会返回，不能把待审批或拒绝说成已保存。用户要求先看看时停在草稿预览。不要通过直接编辑clip配置或adjust_image绕过单帧修复的草稿与保存流程。其他帧实例不变。边界框变化只是线索，不自动拉平有意运动。向用户用第几帧交流，UUID用于工具。静态图和叠图不代表已观看实际速度播放，不可声称动态验收通过。";
+        "所有项目工具的权限由网页设置控制。需要审批时工具调用保持等待，必须等用户决定后再继续；不要把等待请求当作成功，不要尝试并行工具或换工具绕过。拒绝结果附带用户理由，按理由调整后再请求。默认只有save_image需要审批，其他项目工具为full access，用户可逐项更改。";
+      params.developerInstructions +=
+        "动画引用含snapshotId、clipId、版本、帧实例和时长。检查用inspect_clip看实际帧图与相邻叠图，每次最多16帧。动画帧缩放、位移、裁切与时长修复：create_frame_draft取得同一动画草稿documentId，frameId仅指定起始焦点；同一动画后续帧复用这份草稿。read_document读取配置，通过write_documents修改frame-edit v2 JSON的frames数组，每项含frameId、transform、durationUs，transform为相对源图的绝对参数；保留其他条目，不把上次修改丢掉，再用inspect_clip传draftId、documentRevision检查草稿。预览不会修改动画或新增图片资源。可以连续修改多帧，一起预览播放编排，inspect_clip返回越界warnings；有blocking警告先修正，不能把画布内截断图当作未越界。检查后调用save_frame_draft一次保存所有修改；按网页权限设置等待用户Accept/Deny或直接执行，拒绝理由会返回，不能把待审批或拒绝说成已保存。用户要求先看看时停在草稿预览。不要通过直接编辑clip配置或adjust_image绕过单帧修复的草稿与保存流程。其他帧实例不变。边界框变化只是线索，不自动拉平有意运动。向用户用第几帧交流，UUID用于工具。静态图和叠图不代表已观看实际速度播放，不可声称动态验收通过。";
       const result = session.threadId
         ? await client.request("thread/resume", {
             ...params,
@@ -459,6 +471,7 @@ export class AgentHub {
       }
     }
     if (message.method === "turn/completed") {
+      this.cancelTools(session, "任务已结束，待审批操作未执行");
       this.cancelFrameSave(session, "任务已结束，待审批修改未保存");
       await Promise.allSettled(this.imports.get(session.id) || []);
       this.imports.delete(session.id);
@@ -517,7 +530,11 @@ export class AgentHub {
       this.flush(session);
     }
   }
-  private requestInput(session: Session, request: Message): Promise<any> {
+  private async requestInput(session: Session, request: Message): Promise<any> {
+    // Serialize native user questions behind pending project tools as well.
+    await this.toolTails?.get(session.id);
+    if (!["starting", "running"].includes(session.status))
+      return { decision: "decline" };
     const params = request.params;
     const id = randomUUID();
     if (
@@ -641,8 +658,10 @@ export class AgentHub {
     session.frameSaveApproval = approval;
     const promise = new Promise((resolve) => {
       const timer = setTimeout(
-        () => this.cancelFrameSave(session, "等待审批超时，修改未保存"),
-        15 * 60_000,
+        () => {
+          void this.stop(session.id, "等待审批超时，任务已停止，修改未保存");
+        },
+        23 * 60 * 60_000,
       );
       this.frameSaves.set(approval.id, {
         sessionId: session.id,
@@ -717,28 +736,35 @@ export class AgentHub {
       this.flush(session);
     }
   }
-  async stop(sessionId: string) {
+  async stop(sessionId: string, reason = "任务已停止，待审批操作未执行") {
     const session = this.store.session(sessionId);
-    this.cancelFrameSave(session, "任务已停止，修改未保存");
     const client = this.clients.get(sessionId);
-    if (session.prompt) this.prompts.get(session.prompt.id)?.({});
-    if (client && session.turnId && session.status === "running")
-      await client.request("turn/interrupt", {
-        threadId: session.threadId,
-        turnId: session.turnId,
-      });
-    else {
-      session.status = "interrupted";
-      this.flush(session);
-      const job = this.interpolation(session);
-      if (job && !job.sheetId) {
-        job.status = "interrupted";
-        job.error = "补帧已停止，没有自动重试。";
-        this.store.interpolations.save(job);
+    // Interrupt the model before releasing blocked tool calls, so it cannot resume
+    // reasoning from a timeout/cancellation result while still running.
+    if (client && session.turnId && session.status === "running") {
+      try {
+        await client.request("turn/interrupt", {
+          threadId: session.threadId,
+          turnId: session.turnId,
+        });
+      } catch {
+        await client.close();
       }
+    }
+    session.status = "interrupted";
+    this.cancelTools(session, reason);
+    this.cancelFrameSave(session, reason);
+    if (session.prompt) this.prompts.get(session.prompt.id)?.({});
+    this.flush(session);
+    const job = this.interpolation(session);
+    if (job && !job.sheetId) {
+      job.status = "interrupted";
+      job.error = "补帧已停止，没有自动重试。";
+      this.store.interpolations.save(job);
     }
   }
   private fail(session: Session, error: unknown) {
+    this.cancelTools(session, "任务失败，待审批操作未执行");
     this.cancelFrameSave(session, "任务失败，修改未保存");
     session.status = "failed";
     session.error = error instanceof Error ? error.message : String(error);
@@ -752,7 +778,119 @@ export class AgentHub {
       this.store.interpolations.save(job);
     }
   }
+  cancelTools(session: Session, reason: string) {
+    this.toolEpochs ??= new Map();
+    this.toolEpochs.set(session.id, (this.toolEpochs.get(session.id) || 0) + 1);
+    if (session.toolApproval)
+      this.resolveToolApproval(
+        session.id,
+        session.toolApproval.id,
+        false,
+        reason,
+      );
+  }
+  resolveToolApproval(
+    sessionId: string,
+    approvalId: string,
+    accept: boolean,
+    reason = "",
+  ) {
+    const session = this.store.session(sessionId);
+    const pending = this.toolWaits?.get(approvalId);
+    if (!pending || session.toolApproval?.id !== approvalId)
+      throw new StudioError("审批已结束，请刷新", 409);
+    clearTimeout(pending.timer);
+    this.toolWaits.delete(approvalId);
+    session.toolApproval = undefined;
+    this.flush(session);
+    pending.finish({
+      accept,
+      reason:
+        reason || (accept ? "用户已允许" : "用户拒绝此次操作，请调整方案"),
+    });
+    return { accepted: accept };
+  }
+  private async approveTool(
+    session: Session,
+    name: PermissionTool,
+    input: any,
+  ) {
+    const policy = this.store.permissions.read()[name];
+    if (policy === "allow") return { accept: true, reason: "" };
+    if (policy === "deny")
+      return {
+        accept: false,
+        reason: "权限设置禁止此操作，请勿使用其他工具绕过",
+      };
+    const id = randomUUID();
+    this.toolWaits ??= new Map();
+    session.toolApproval = {
+      id,
+      tool: name,
+      label: permissionTools.find((t) => t.name === name)!.label,
+      arguments: input,
+      createdAt: new Date().toISOString(),
+    };
+    const result = new Promise<{ accept: boolean; reason: string }>(
+      (finish) => {
+        const timer = setTimeout(
+          () => {
+            void this.stop(session.id, "等待审批超时，任务已停止，操作未执行");
+          },
+          23 * 60 * 60_000,
+        );
+        this.toolWaits.set(id, { finish, timer });
+      },
+    );
+    this.flush(session);
+    return result;
+  }
   async tool(sessionId: string, name: string, input: any) {
+    const session = this.store.session(sessionId);
+    if (this.stopped) throw new StudioError("服务正在停止，操作未执行", 409);
+    if (!permissionTools.some((t) => t.name === name))
+      throw new StudioError("未知项目工具");
+    this.toolTails ??= new Map();
+    this.toolEpochs ??= new Map();
+    const args = structuredClone(input);
+    const epoch = this.toolEpochs.get(sessionId) || 0;
+    const previous = this.toolTails.get(sessionId);
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.toolTails.set(sessionId, tail);
+    await previous;
+    try {
+      if ((this.toolEpochs.get(sessionId) || 0) !== epoch)
+        throw new StudioError("任务已取消，排队操作未执行", 409);
+      // Frame saves keep their existing image comparison and exact-revision approval.
+      if (name !== "save_frame_draft") {
+        const decision = await this.approveTool(
+          session,
+          name as PermissionTool,
+          args,
+        );
+        if (!decision.accept)
+          return {
+            isError: true,
+            content: [
+              textContent(
+                JSON.stringify({ executed: false, reason: decision.reason }),
+              ),
+            ],
+          };
+      }
+      if ((this.toolEpochs.get(sessionId) || 0) !== epoch)
+        throw new StudioError("任务已取消，操作未执行", 409);
+      return await this.executeTool(sessionId, name, args);
+    } finally {
+      release();
+      if (this.toolTails.get(sessionId) === tail)
+        this.toolTails.delete(sessionId);
+    }
+  }
+  private async executeTool(sessionId: string, name: string, input: any) {
     const session = this.store.session(sessionId);
     const pid = session.projectId;
     if (name === "get_schema")
@@ -1095,13 +1233,15 @@ export class AgentHub {
   }
   async close() {
     this.stopped = true;
-    for (const session of this.store.sessions.values())
+    await Promise.allSettled(
+      [...this.clients.values()].map((client) => client.close()),
+    );
+    for (const session of this.store.sessions.values()) {
+      this.cancelTools(session, "服务已停止，待审批操作未执行");
       this.cancelFrameSave(session, "服务已停止，修改未保存");
+    }
     for (const timer of this.timers.values()) clearTimeout(timer);
     for (const session of this.store.sessions.values())
       this.store.saveSession(session);
-    await Promise.all(
-      [...this.clients.values()].map((client) => client.close()),
-    );
   }
 }

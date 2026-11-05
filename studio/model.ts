@@ -202,6 +202,13 @@ export type PromptQuestion = {
   options: string[];
 };
 export type PendingPrompt = { id: string; questions: PromptQuestion[] };
+export type ToolApproval = {
+  id: string;
+  tool: string;
+  label: string;
+  arguments: Record<string, unknown>;
+  createdAt: string;
+};
 export type Session = {
   outputFolder?: string;
   id: string;
@@ -216,6 +223,7 @@ export type Session = {
   error?: string;
   prompt?: PendingPrompt;
   frameSaveApproval?: FrameSaveApproval;
+  toolApproval?: ToolApproval;
   createdAt: string;
   updatedAt: string;
   interpolationId?: string;

@@ -1,3 +1,5 @@
+import { PermissionSettings } from "./PermissionSettings.tsx";
+import { ToolApprovals } from "./ToolApprovals.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
 import {
   FrameAdjustmentPanel,
@@ -50,6 +52,7 @@ import {
   Trash2,
   Sun,
   Moon,
+  Settings,
 } from "lucide-react";
 import {
   assetUrl,
@@ -111,6 +114,7 @@ function mergeSessions(old: Session[], incoming: Session[]) {
 }
 
 export function App() {
+  const [permissionsOpen, setPermissionsOpen] = useState(false);
   const [theme, setTheme] = useState(() =>
     localStorage.getItem("studio.theme") === "light" ? "light" : "dark",
   );
@@ -736,6 +740,14 @@ export function App() {
           </button>
         </div>
         <div className="header-right">
+          <button
+            className="icon-button"
+            title="助手工具权限"
+            aria-label="打开权限设置"
+            onClick={() => setPermissionsOpen(true)}
+          >
+            <Settings size={17} />
+          </button>
           <button
             className="icon-button"
             title={theme === "dark" ? "切换浅色" : "切换深色"}
@@ -1714,6 +1726,10 @@ export function App() {
                   </button>
                 </form>
               )}
+              <ToolApprovals
+                sessions={state?.sessions || []}
+                onRefresh={() => refreshRef.current()}
+              />
               <FrameSaveApprovals
                 sessions={state?.sessions || []}
                 onRefresh={() => refreshRef.current()}
@@ -1865,6 +1881,9 @@ export function App() {
           </aside>
         )}
       </main>
+      {permissionsOpen && (
+        <PermissionSettings onClose={() => setPermissionsOpen(false)} />
+      )}
       <footer className="statusbar">
         <span>
           <i className={online ? "online-dot" : "offline-dot"} />
@@ -1874,7 +1893,11 @@ export function App() {
           {agentBusy ? (
             <>
               <LoaderCircle size={11} className="spin" />
-              助手正在工作
+              {state?.sessions.some(
+                (s) => s.toolApproval || s.frameSaveApproval,
+              )
+                ? "等待你的审批"
+                : "助手正在工作"}
             </>
           ) : (
             <>

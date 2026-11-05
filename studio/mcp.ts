@@ -1,3 +1,4 @@
+import { request as httpRequest } from "node:http";
 import { createInterface } from "node:readline";
 const endpoint = process.argv[2]!;
 const sessionId = process.argv[3]!;
@@ -275,7 +276,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           capabilities: { tools: {} },
           serverInfo: { name: "sprite-studio", version: "0.1.0" },
           instructions:
-            "Use stable project resource IDs. Inspect actual images before making visual claims. Image operations preserve originals; frame edits use config drafts, preview before saving and request permission to apply; saved edits record undo history.",
+            "Use stable project resource IDs. Inspect actual images before making visual claims. Image operations preserve originals; frame edits use config drafts, preview before saving and request permission to apply; saved edits record undo history. Every tool follows configurable webpage permissions; an approval request remains pending until the user decides, and denial includes a reason. Wait for that result before continuing.",
         },
       });
     else if (request.method === "ping")
@@ -284,22 +285,39 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       send({ jsonrpc: "2.0", id: request.id, result: { tools } });
     else if (request.method === "tools/call") {
       const id = request.id;
-      fetch(`${endpoint}/internal/tools/${sessionId}`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(request.params),
-        signal: AbortSignal.timeout(
-          request.params.name === "save_frame_draft" ? 16 * 60_000 : 120_000,
-        ),
+      // Native HTTP has no hidden fetch headers timeout while a person reviews.
+      new Promise<any>((resolve, reject) => {
+        const body = JSON.stringify(request.params);
+        const call = httpRequest(
+          `${endpoint}/internal/tools/${sessionId}`,
+          {
+            method: "POST",
+            timeout: 0,
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+              "Content-Length": Buffer.byteLength(body),
+            },
+          },
+          (response) => {
+            const chunks: Buffer[] = [];
+            response.on("data", (chunk) => chunks.push(chunk));
+            response.on("error", reject);
+            response.on("end", () => {
+              try {
+                const result = JSON.parse(Buffer.concat(chunks).toString());
+                if ((response.statusCode || 500) >= 400)
+                  throw new Error(result.error || "项目操作失败");
+                resolve(result);
+              } catch (error) {
+                reject(error);
+              }
+            });
+          },
+        );
+        call.on("error", reject);
+        call.end(body);
       })
-        .then(async (response) => {
-          const result = await response.json();
-          if (!response.ok) throw new Error(result.error || "项目操作失败");
-          return result;
-        })
         .then((result) => send({ jsonrpc: "2.0", id, result }))
         .catch((error) =>
           send({

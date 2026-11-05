@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "./api.ts";
 import type { Session } from "../studio/model.ts";
 import type { FramePreview } from "./FrameAdjustmentPanel.tsx";
@@ -15,12 +15,6 @@ export function FrameSaveApprovals({
   const [reasons, setReasons] = useState<Record<string, string>>({}),
     [error, setError] = useState(""),
     [busy, setBusy] = useState("");
-  const [policy, setPolicy] = useState("ask");
-  useEffect(() => {
-    void api<{ save_frame_draft: string }>("/api/tool-permissions")
-      .then((v) => setPolicy(v.save_frame_draft))
-      .catch((e) => setError(e.message));
-  }, []);
   async function decide(session: Session, accept: boolean) {
     const a = session.frameSaveApproval!;
     setBusy(a.id);
@@ -128,30 +122,6 @@ export function FrameSaveApprovals({
             </div>
           );
         })}
-      <details className="frame-permissions">
-        <summary>助手帧调整保存权限</summary>
-        <label>
-          保存配置时
-          <select
-            aria-label="助手帧调整保存权限"
-            value={policy}
-            onChange={(e) => {
-              const next = e.target.value;
-              void api<{ save_frame_draft: string }>("/api/tool-permissions", {
-                method: "PUT",
-                body: JSON.stringify({ save_frame_draft: next }),
-              })
-                .then((v) => setPolicy(v.save_frame_draft))
-                .catch((e) => setError(e.message));
-            }}
-          >
-            <option value="ask">每次审批</option>
-            <option value="allow">允许直接保存</option>
-            <option value="deny">禁止保存</option>
-          </select>
-        </label>
-        <small>适用于之后发起的保存请求，当前待审批请求仍需处理。</small>
-      </details>
       {error && (
         <p role="alert" className="interpolation-warning">
           {error}

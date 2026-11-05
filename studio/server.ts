@@ -1,3 +1,4 @@
+import { permissionTools } from "./tool-permissions.ts";
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import staticFiles from "@fastify/static";
@@ -372,13 +373,29 @@ app.post(
   },
 );
 app.get("/api/tool-permissions", async () => ({
-  save_frame_draft: store.frameDrafts.policy(),
+  policies: store.permissions.read(),
+  tools: permissionTools,
 }));
 app.put("/api/tool-permissions", async (request) => ({
-  save_frame_draft: store.frameDrafts.setPolicy(
-    (request.body as any)?.save_frame_draft,
-  ),
+  policies: store.permissions.write(request.body),
+  tools: permissionTools,
 }));
+app.post("/api/sessions/:sessionId/tool-approval", async (request: any) => {
+  const spec = z
+    .object({
+      approvalId: z.string().uuid(),
+      accept: z.boolean(),
+      reason: z.string().max(2000).default(""),
+    })
+    .strict()
+    .parse(request.body);
+  return agent.resolveToolApproval(
+    request.params.sessionId,
+    spec.approvalId,
+    spec.accept,
+    spec.reason,
+  );
+});
 app.post("/api/sessions/:sessionId/frame-save", async (request: any) => {
   const spec = z
     .object({

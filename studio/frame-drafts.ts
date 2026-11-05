@@ -368,18 +368,11 @@ export class FrameDrafts {
     return this.persist({ ...draft, status: "discarded" });
   }
   policy() {
-    const path = join(this.store.root, "tool-permissions.json");
-    return frameSavePolicySchema.parse(
-      existsSync(path)
-        ? (JSON.parse(readFileSync(path, "utf8")).save_frame_draft ?? "ask")
-        : "ask",
-    );
+    return this.store.permissions.read().save_frame_draft;
   }
   setPolicy(value: unknown) {
-    const policy = frameSavePolicySchema.parse(value),
-      path = join(this.store.root, "tool-permissions.json"),
-      existing = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
-    atomicJson(path, { ...existing, save_frame_draft: policy });
-    return policy;
+    return this.store.permissions.write({
+      save_frame_draft: frameSavePolicySchema.parse(value),
+    }).save_frame_draft;
   }
 }

@@ -32,6 +32,7 @@ async function fixture() {
       durationUs: 100000,
     })),
   );
+  store.frameDrafts.setPolicy("ask");
   // Exercise the host tool handlers without starting a remote Codex process.
   const hub: AgentHub = Object.assign(Object.create(AgentHub.prototype), {
     store,

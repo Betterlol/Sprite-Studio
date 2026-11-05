@@ -1,3 +1,4 @@
+import { ToolPermissions } from "./tool-permissions.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -77,10 +78,12 @@ export class ProjectStore extends EventEmitter {
   documents: ProjectDocuments;
   generated: GeneratedImages;
   frameDrafts: FrameDrafts;
+  permissions: ToolPermissions;
   metadataPaths = new Map<string, Map<string, string>>();
   resourceReaders = new Map<string, number>();
   constructor(root: string) {
     super();
+    this.permissions = new ToolPermissions(root);
     mkdirSync(root, { recursive: true });
     this.root = realpathSync(root);
     this.worker = new ImagingWorker(this.root);
@@ -116,6 +119,7 @@ export class ProjectStore extends EventEmitter {
           }
           session.prompt = undefined;
           session.frameSaveApproval = undefined;
+          session.toolApproval = undefined;
           this.sessions.set(session.id, session);
         }
     }

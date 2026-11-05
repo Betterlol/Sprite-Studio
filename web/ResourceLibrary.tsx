@@ -1,3 +1,4 @@
+import { ResizeHandle } from "./ResizeHandle.tsx";
 import { useEffect, useState, useRef } from "react";
 import {
   Folder,
@@ -372,6 +373,13 @@ export function ResourceLibrary({
       <div className="directory-tree" aria-label="目录树">
         {resourceCategories.map(tree)}
       </div>
+      <ResizeHandle
+        name="目录树高度"
+        target=".directory-tree"
+        variable="--tree-height"
+        min={64}
+        max={500}
+      />
       <nav className="directory-breadcrumb" aria-label="当前目录">
         <button onClick={() => onFolder("")}>资源</button>
         {folder

@@ -1,3 +1,4 @@
+import { ResizeHandle } from "./ResizeHandle.tsx";
 import {
   FrameAdjustmentPanel,
   type FramePreview,
@@ -47,6 +48,8 @@ import {
   PanelRightClose,
   ScanEye,
   Trash2,
+  Sun,
+  Moon,
 } from "lucide-react";
 import {
   assetUrl,
@@ -108,6 +111,13 @@ function mergeSessions(old: Session[], incoming: Session[]) {
 }
 
 export function App() {
+  const [theme, setTheme] = useState(() =>
+    localStorage.getItem("studio.theme") === "light" ? "light" : "dark",
+  );
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("studio.theme", theme);
+  }, [theme]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [state, setState] = useState<State | null>(null);
   const [projectId, setProjectId] = useState("");
@@ -726,6 +736,14 @@ export function App() {
           </button>
         </div>
         <div className="header-right">
+          <button
+            className="icon-button"
+            title={theme === "dark" ? "切换浅色" : "切换深色"}
+            aria-label="切换网页色调"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          >
+            {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+          </button>
           <span
             className={`connection ${connection.connected ? "connected" : ""}`}
           >
@@ -776,6 +794,14 @@ export function App() {
           onImport={() => upload.current?.click()}
           onNewClip={() => setNewClip(true)}
           disabled={!!operation || agentBusy}
+        />
+        <ResizeHandle
+          name="资源栏宽度"
+          target=".library"
+          variable="--library-width"
+          axis="x"
+          min={170}
+          max={600}
         />
         <section className="editor">
           <div className="editor-toolbar">
@@ -1050,6 +1076,16 @@ export function App() {
             )}
           </div>
           {clip && (
+            <ResizeHandle
+              name="动画编排高度"
+              target=".animation-editor"
+              variable="--timeline-height"
+              reverse
+              min={110}
+              max={500}
+            />
+          )}
+          {clip && (
             <AnimationEditor
               key={`${projectId}-${clip.id}`}
               projectId={projectId}
@@ -1078,6 +1114,16 @@ export function App() {
                 setComparison(null);
               }}
               disabled={!!operation || agentBusy || !!framePreview}
+            />
+          )}
+          {(currentImage || clip) && (
+            <ResizeHandle
+              name="工具栏高度"
+              target=".tools-panel"
+              variable="--tools-height"
+              reverse
+              min={110}
+              max={600}
             />
           )}
           {(currentImage || clip) && (
@@ -1333,6 +1379,17 @@ export function App() {
             </section>
           )}
         </section>
+        {chatVisible && (
+          <ResizeHandle
+            name="助手栏宽度"
+            target=".chat-panel"
+            variable="--chat-width"
+            axis="x"
+            reverse
+            min={260}
+            max={750}
+          />
+        )}
         {chatVisible && (
           <aside
             className="chat-panel"
@@ -1672,6 +1729,14 @@ export function App() {
               />
               <div ref={chatEnd} />
             </div>
+            <ResizeHandle
+              name="消息输入区高度"
+              target=".composer textarea"
+              variable="--composer-height"
+              reverse
+              min={60}
+              max={350}
+            />
             <div className="composer-area">
               <div className="composer">
                 {!!clipReferences.length && (

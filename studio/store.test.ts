@@ -170,3 +170,27 @@ test("worker rejects paths outside its data root and refuses accidental clipping
     store.worker.close();
   }
 });
+
+test("deleting a conversation removes persisted history and protects running tasks", async () => {
+  const root = mkdtempSync(join(tmpdir(), "studio-sessions-"));
+  const store = new ProjectStore(root);
+  const project = store.createProject("对话测试");
+  const first = store.createSession(project.id);
+  const second = store.createSession(project.id);
+  try {
+    first.status = "running";
+    assert.throws(() => store.deleteSession(first.id), /停止任务/);
+    first.status = "idle";
+    store.deleteSession(first.id);
+    assert.throws(() => store.session(first.id), /不存在/);
+    const reloaded = new ProjectStore(root);
+    try {
+      assert.throws(() => reloaded.session(first.id), /不存在/);
+      assert.equal(reloaded.session(second.id).projectId, project.id);
+    } finally {
+      await reloaded.worker.close();
+    }
+  } finally {
+    await store.worker.close();
+  }
+});

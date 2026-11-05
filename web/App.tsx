@@ -46,6 +46,7 @@ import {
   AlertCircle,
   PanelRightClose,
   ScanEye,
+  Trash2,
 } from "lucide-react";
 import {
   assetUrl,
@@ -226,7 +227,15 @@ export function App() {
     if (projectRef.current !== id) return;
     setState((old) =>
       old?.project.id === id
-        ? { ...next, sessions: mergeSessions(old.sessions, next.sessions) }
+        ? {
+            ...next,
+            sessions: mergeSessions(
+              old.sessions.filter((s) =>
+                next.sessions.some((n) => n.id === s.id),
+              ),
+              next.sessions,
+            ),
+          }
         : next,
     );
     if (initial) {
@@ -423,6 +432,21 @@ export function App() {
     setReferences([]);
     setClipReferences([]);
     setPromptAnswers({});
+  }
+  async function deleteSession() {
+    if (!session || active(session)) return;
+    if (
+      !window.confirm(`删除对话“${session.title}”？已生成和保存的资源会保留。`)
+    )
+      return;
+    try {
+      await api(`/api/sessions/${session.id}`, { method: "DELETE" });
+      localStorage.removeItem(`studio.draft.${projectId}.${session.id}`);
+      chooseSession("");
+      await refreshRef.current();
+    } catch (error: any) {
+      notify(error.message, true);
+    }
   }
   async function makeSession() {
     const created = await api<Session>(`/api/projects/${projectId}/sessions`, {
@@ -1083,7 +1107,7 @@ export function App() {
                   <button
                     className={tool === "interpolate" ? "active" : ""}
                     onClick={() => {
-                      setTool("adjust");
+                      setTool("interpolate");
                       setPlaying(false);
                       setTransform(emptyTransform);
                     }}
@@ -1343,13 +1367,17 @@ export function App() {
                 <button
                   className="icon-button"
                   title="新建对话"
-                  onClick={() =>
-                    void makeSession().catch((error) =>
-                      notify(error.message, true),
-                    )
-                  }
+                  onClick={() => chooseSession("")}
                 >
                   <Plus size={17} />
+                </button>
+                <button
+                  className="icon-button"
+                  title="删除当前对话"
+                  disabled={!session || !!active(session)}
+                  onClick={() => void deleteSession()}
+                >
+                  <Trash2 size={16} />
                 </button>
                 <button
                   className="icon-button"
@@ -1367,6 +1395,7 @@ export function App() {
                 value={sessionId}
                 onChange={(event) => chooseSession(event.target.value)}
               >
+                <option value="">新对话（尚未发送）</option>
                 {state.sessions.map((session) => (
                   <option key={session.id} value={session.id}>
                     {active(session) ? "◌ " : ""}

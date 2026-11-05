@@ -490,6 +490,10 @@ app.get(
 app.post("/api/projects/:projectId/sessions", async (request) =>
   store.createSession(pid(request)),
 );
+app.delete("/api/sessions/:sessionId", async (request: any) => {
+  await agent.deleteSession(request.params.sessionId);
+  return { deleted: true };
+});
 app.get("/api/sessions/:sessionId", async (request: any) =>
   store.session(request.params.sessionId),
 );

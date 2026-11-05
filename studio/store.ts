@@ -10,6 +10,7 @@ import {
   statSync,
   lstatSync,
   copyFileSync,
+  unlinkSync,
 } from "node:fs";
 import { join, resolve, relative, extname, sep } from "node:path";
 import { EventEmitter } from "node:events";
@@ -660,6 +661,16 @@ export class ProjectStore extends EventEmitter {
     this.sessions.set(session.id, session);
     this.saveSession(session);
     return session;
+  }
+  deleteSession(id: string) {
+    const session = this.session(id);
+    if (["starting", "running"].includes(session.status))
+      throw new StudioError("请先停止任务，再删除对话", 409);
+    unlinkSync(
+      join(this.dir(session.projectId), ".studio", "sessions", `${id}.json`),
+    );
+    this.sessions.delete(id);
+    this.changed(session.projectId);
   }
   session(id: string) {
     const session = this.sessions.get(id);

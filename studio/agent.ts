@@ -1079,6 +1079,20 @@ export class AgentHub {
     }
     throw new StudioError("未知项目工具");
   }
+  async deleteSession(id: string) {
+    const session = this.store.session(id);
+    if (["starting", "running"].includes(session.status))
+      throw new StudioError("请先停止任务，再删除对话", 409);
+    const client = this.clients.get(id);
+    // Release the idle runtime before removing local history; project assets remain.
+    this.clients.delete(id);
+    await client?.close();
+    const timer = this.timers.get(id);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(id);
+    this.tokens.delete(id);
+    this.store.deleteSession(id);
+  }
   async close() {
     this.stopped = true;
     for (const session of this.store.sessions.values())

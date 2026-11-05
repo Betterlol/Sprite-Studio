@@ -56,6 +56,10 @@ import {
 } from "lucide-react";
 import {
   assetUrl,
+  agentModels,
+  agentModelSchema,
+  defaultAgentModel,
+  type AgentModel,
   clipFrameUrl,
   snapshotFrameUrl,
   type FrameDraft,
@@ -114,6 +118,15 @@ function mergeSessions(old: Session[], incoming: Session[]) {
 }
 
 export function App() {
+  const [agentModel, setAgentModel] = useState<AgentModel>(() => {
+    const saved = agentModelSchema.safeParse(
+      localStorage.getItem("studio.model"),
+    );
+    return saved.success ? saved.data : defaultAgentModel;
+  });
+  useEffect(() => {
+    localStorage.setItem("studio.model", agentModel);
+  }, [agentModel]);
   const [permissionsOpen, setPermissionsOpen] = useState(false);
   const [theme, setTheme] = useState(() =>
     localStorage.getItem("studio.theme") === "light" ? "light" : "dark",
@@ -580,6 +593,7 @@ export function App() {
           method: "POST",
           body: JSON.stringify({
             text,
+            model: agentModel,
             assetIds: attached,
             outputFolder: folder,
             clipReferences: attachedClips,
@@ -1225,6 +1239,7 @@ export function App() {
                   jobs={state?.interpolations || []}
                   sessions={state?.sessions || []}
                   connected={connection.connected}
+                  model={agentModel}
                   busy={agentBusy}
                   refresh={() => refreshRef.current()}
                   onSession={(id) => {
@@ -1429,7 +1444,26 @@ export function App() {
                 </span>
                 <div>
                   <h2>制作助手</h2>
-                  <small>{connection.model || "Codex"}</small>
+                  <select
+                    className="agent-model-select"
+                    aria-label="助手模型"
+                    title={
+                      agentBusy
+                        ? "任务运行或等待审批时不能切换模型"
+                        : "选择下一次聊天或首尾补帧使用的模型；保留当前对话上下文"
+                    }
+                    value={agentModel}
+                    disabled={agentBusy}
+                    onChange={(event) =>
+                      setAgentModel(agentModelSchema.parse(event.target.value))
+                    }
+                  >
+                    {agentModels.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
               <div className="chat-header-actions">

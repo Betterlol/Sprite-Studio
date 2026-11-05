@@ -1,4 +1,14 @@
 import { z } from "zod";
+
+export const agentModels = [
+  "gpt-6.1-sol",
+  "gpt-6.1-luna",
+  "gpt-6.1-terra",
+] as const;
+export const agentModelSchema = z.enum(agentModels);
+export type AgentModel = z.infer<typeof agentModelSchema>;
+export const defaultAgentModel: AgentModel = "gpt-6.1-sol";
+
 export const imageKindSchema = z.enum(["reference", "image"]);
 export type ImageKind = z.infer<typeof imageKindSchema>;
 export const resourceCategories = ["参考图", "原图素材", "动画"] as const;

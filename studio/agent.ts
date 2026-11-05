@@ -10,6 +10,8 @@ import { clipDocumentSchema } from "./documents.ts";
 import { interpolationPrompt } from "./interpolation.ts";
 import {
   interpolationSchema,
+  agentModelSchema,
+  defaultAgentModel,
   frameEditSchema,
   type FrameSaveApproval,
 } from "./model.ts";
@@ -168,6 +170,7 @@ export class AgentHub {
       await client.initialize();
       const params = {
         cwd: workspace,
+        model: session.model || defaultAgentModel,
         sandbox: "workspace-write",
         approvalPolicy: "on-request",
         developerInstructions:
@@ -187,7 +190,7 @@ export class AgentHub {
           })
         : await client.request("thread/start", params);
       session.threadId = result.thread.id;
-      session.model = result.model;
+      session.model = session.model || result.model || defaultAgentModel;
       const inventory = await client.request("mcpServerStatus/list", {
         threadId: session.threadId,
         detail: "toolsAndAuthOnly",
@@ -211,7 +214,9 @@ export class AgentHub {
     }
   }
   startInterpolation(projectId: string, input: unknown) {
-    const spec = interpolationSchema.parse(input);
+    const { model, ...spec } = interpolationSchema
+      .extend({ model: agentModelSchema.optional() })
+      .parse(input);
     if (this.store.interpolations.jobs.has(spec.requestId))
       return this.store.interpolations.get(projectId, spec.requestId);
     if (
@@ -230,6 +235,9 @@ export class AgentHub {
         [job.start.imageId, job.end.imageId],
         job.id,
         `以两张引用图片为首尾，生成 ${job.count} 张中间帧。${job.description}`,
+        [],
+        undefined,
+        model,
       );
     } catch (error) {
       job.status = "failed";
@@ -257,10 +265,17 @@ export class AgentHub {
     displayText?: string,
     clipInputs: unknown[] = [],
     outputFolder?: string,
+    model?: string,
   ) {
     const session = this.store.session(sessionId);
     if (session.messages.some((message) => message.id === requestId))
       return session;
+    const selectedModel = agentModelSchema.parse(
+      model ??
+        (agentModelSchema.safeParse(session.model).success
+          ? session.model
+          : defaultAgentModel),
+    );
     if (outputFolder !== undefined)
       this.store.library.folder(session.projectId, outputFolder);
     if (
@@ -277,6 +292,7 @@ export class AgentHub {
     const clipReferences = clipInputs.map((input) =>
       this.store.animation.reference(session.projectId, input),
     );
+    session.model = selectedModel;
     session.status = "starting";
     session.outputFolder = outputFolder;
     session.error = undefined;
@@ -381,6 +397,7 @@ export class AgentHub {
     this.flush(session);
     const result = await client.request("turn/start", {
       threadId: session.threadId,
+      model: session.model || defaultAgentModel,
       input: inputs,
       effort: "medium",
       clientUserMessageId: session.messages

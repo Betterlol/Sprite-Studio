@@ -17,7 +17,11 @@ import { fileURLToPath } from "node:url";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { ProjectStore, StudioError } from "./store.ts";
 import { AgentHub } from "./agent.ts";
-import { imageKindSchema, clipReferenceSchema } from "./model.ts";
+import {
+  imageKindSchema,
+  clipReferenceSchema,
+  agentModelSchema,
+} from "./model.ts";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const dataRoot = resolve(
@@ -522,6 +526,7 @@ app.post("/api/sessions/:sessionId/messages", async (request: any, reply) => {
       requestId: z.string().uuid(),
       clipReferences: z.array(clipReferenceSchema).max(3).default([]),
       outputFolder: z.string().optional(),
+      model: agentModelSchema.optional(),
     })
     .parse(request.body);
   const session = agent.send(
@@ -532,6 +537,7 @@ app.post("/api/sessions/:sessionId/messages", async (request: any, reply) => {
     undefined,
     input.clipReferences,
     input.outputFolder,
+    input.model,
   );
   return reply.code(202).send(session);
 });

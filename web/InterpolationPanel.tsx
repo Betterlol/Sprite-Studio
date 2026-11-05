@@ -11,6 +11,7 @@ import {
   assetUrl,
   interpolationGrid,
   type Asset,
+  type AgentModel,
   type ClipAsset,
   type Interpolation,
   type Session,
@@ -24,6 +25,7 @@ type Props = {
   jobs: Interpolation[];
   sessions: Session[];
   connected: boolean;
+  model: AgentModel;
   busy: boolean;
   refresh: () => Promise<void>;
   onSession: (id: string) => void;
@@ -122,6 +124,7 @@ export function InterpolationPanel(props: Props) {
   }
   async function generate() {
     const body = {
+      model: props.model,
       clipId: clip.id,
       revision: clip.revision,
       startFrameId: clip.frames[start]!.id,

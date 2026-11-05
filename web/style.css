@@ -3308,3 +3308,20 @@ a {
   object-fit: contain;
   background: var(--soft);
 }
+
+.agent-model-select {
+  display: block;
+  max-width: 170px;
+  margin-top: 4px;
+  padding: 2px 20px 2px 4px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.agent-model-select:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}

@@ -84,9 +84,10 @@ export type FrameDraft = {
   documentRevision: string;
   text: string;
   snapshotId?: string;
+  mergedInto?: string;
   changeId?: string;
 };
-export const frameEditSchema = z
+export const legacyFrameEditSchema = z
   .object({
     schemaVersion: z.literal(1),
     type: z.literal("frame-edit"),
@@ -94,6 +95,36 @@ export const frameEditSchema = z
     durationUs: z.number().int().min(1000).max(60_000_000),
   })
   .strict();
+export const frameEditItemSchema = z
+  .object({
+    frameId: z.string().uuid(),
+    transform: frameTransformSchema,
+    durationUs: z.number().int().min(1000).max(60_000_000),
+  })
+  .strict();
+export const frameEditSchema = z
+  .object({
+    schemaVersion: z.literal(2),
+    type: z.literal("frame-edit"),
+    frames: z.array(frameEditItemSchema).min(1).max(128),
+  })
+  .strict();
+export type RenderWarning = {
+  frameId?: string;
+  frameNumber?: number;
+  bounds: [number, number, number, number];
+  overflow: { left: number; top: number; right: number; bottom: number };
+  blocking: boolean;
+};
+export type TransformPreview = {
+  id: string;
+  width: number;
+  height: number;
+  bounds: [number, number, number, number] | null;
+  overflow: { left: number; top: number; right: number; bottom: number };
+  blocking: boolean;
+  url: string;
+};
 export type FrameSaveApproval = {
   id: string;
   draftId: string;
@@ -102,6 +133,12 @@ export type FrameSaveApproval = {
   previewSnapshotId: string;
   frameNumber: number;
   clipName: string;
+  frameChanges?: {
+    frameId: string;
+    frameNumber: number;
+    before: Pick<ClipFrame, "transform" | "durationUs">;
+    after: Pick<ClipFrame, "transform" | "durationUs">;
+  }[];
   before: Pick<ClipFrame, "transform" | "durationUs">;
   after: Pick<ClipFrame, "transform" | "durationUs">;
 };
@@ -259,6 +296,7 @@ export type ClipAttachment = ClipReference & {
   name: string;
 };
 export type ClipSnapshot = {
+  renderMode?: "preview";
   id: string;
   projectId: string;
   createdAt: string;
@@ -278,6 +316,7 @@ export type FrameObservation = {
   height: number;
 };
 export type ClipReview = {
+  warnings?: RenderWarning[];
   draftId?: string;
   documentRevision?: string;
   id: string;
@@ -295,6 +334,7 @@ export type ClipReview = {
   stale?: boolean;
 };
 export type FrameChange = {
+  frameIds?: string[];
   id: string;
   projectId: string;
   clipId: string;

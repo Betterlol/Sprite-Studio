@@ -2530,3 +2530,10 @@ a {
   max-height: 320px;
   object-fit: contain;
 }
+.canvas-overflow-border {
+  position: absolute;
+  inset: 0;
+  border: 2px solid #ef8c78;
+  pointer-events: none;
+  z-index: 2;
+}

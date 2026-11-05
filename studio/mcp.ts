@@ -162,7 +162,7 @@ const tools = [
   {
     name: "create_frame_draft",
     description:
-      "Create or reopen a single animation frame config draft from saved source-relative transform and duration. Returns a documentId. Use read_document/write_documents to edit its frame-edit JSON; inspect_clip(draftId,documentRevision) previews it. Does not apply changes or create image resources.",
+      "Create or reopen ONE shared frame-edit v2 draft per animation and editor session. frameId is only initial focus. Returns a documentId; read_document/write_documents edit frames[{frameId,transform,durationUs}], preserving prior edits on other frames. inspect_clip previews ALL changes together and reports overflow warnings. Does not apply or create image resources.",
     inputSchema: {
       type: "object",
       properties: {
@@ -178,7 +178,7 @@ const tools = [
   {
     name: "save_frame_draft",
     description:
-      "Save the exact previewed frame config draft. Default policy asks the user to Accept/Deny in the webpage; waits and returns the decision and denial reason. Never claim saved before this succeeds. No new image resource; preserves other frame instances and source pixels.",
+      "Save ALL modified frames of the exact previewed animation draft in one commit. Default policy asks the user to Accept/Deny in the webpage; waits and returns the decision and denial reason. Never claim saved before this succeeds. No new image resource; preserves unchanged frame instances and source pixels. Resolve blocking overflow warnings before saving.",
     inputSchema: {
       type: "object",
       properties: { draftId: idProperty, documentRevision: { type: "string" } },

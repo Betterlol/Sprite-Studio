@@ -9,6 +9,7 @@ import {
   realpathSync,
   statSync,
   lstatSync,
+  copyFileSync,
 } from "node:fs";
 import { join, resolve, relative, extname, sep } from "node:path";
 import { EventEmitter } from "node:events";
@@ -34,6 +35,7 @@ import {
   type ClipAsset,
   type ImageKind,
   type Session,
+  type TransformPreview,
 } from "./model.ts";
 
 export class StudioError extends Error {
@@ -384,6 +386,72 @@ export class ProjectStore extends EventEmitter {
         origin,
       } as ImageAsset) as ImageAsset;
     });
+  }
+  async previewTransform(
+    projectId: string,
+    id: string,
+    expected: string,
+    input: unknown,
+  ): Promise<TransformPreview> {
+    return this.reading(projectId, async () => {
+      const image = this.image(projectId, id),
+        path = this.imagePath(projectId, id, expected),
+        spec = transformSchema.parse(input);
+      const key = sha256(
+        JSON.stringify(["visible-alpha16-v2", image.contentHash, spec]),
+      );
+      const folder = this.safePath(projectId, ".studio/transform-previews");
+      mkdirSync(folder, { recursive: true });
+      const target = join(folder, key + ".png"),
+        receipt = target + ".json";
+      let saved: any;
+      try {
+        saved = JSON.parse(readFileSync(receipt, "utf8"));
+        if (saved.hash !== sha256(readFileSync(target))) saved = undefined;
+      } catch {
+        saved = undefined;
+      }
+      if (!saved) {
+        const result = await this.worker.run("transform", {
+          path,
+          outputDir: this.stage(projectId),
+          transform: spec,
+          preview: true,
+        });
+        this.imagePath(projectId, id, expected);
+        copyFileSync(result.files[0], target);
+        saved = {
+          id: key,
+          width: spec.width || image.width,
+          height: spec.height || image.height,
+          bounds: result.bounds,
+          overflow: result.overflow,
+          blocking: result.blocking,
+          hash: sha256(readFileSync(target)),
+        };
+        atomicJson(receipt, saved);
+      }
+      const { hash, ...info } = saved;
+      return {
+        ...info,
+        url: `/api/projects/${projectId}/transform-previews/${key}/image`,
+      };
+    });
+  }
+  transformPreviewPath(projectId: string, id: string) {
+    if (!/^[a-f0-9]{64}$/.test(id))
+      throw new StudioError("预览图片不存在", 404);
+    const path = this.safePath(
+      projectId,
+      `.studio/transform-previews/${id}.png`,
+    );
+    if (
+      !existsSync(path) ||
+      sha256(readFileSync(path)) !==
+        JSON.parse(readFileSync(path + ".json", "utf8")).hash
+    )
+      throw new StudioError("预览图片已改变，请重新预览", 409);
+    return path;
   }
   async transform(
     projectId: string,

@@ -237,6 +237,32 @@ app.post(
     );
   },
 );
+app.post(
+  "/api/projects/:projectId/assets/:assetId/transform-preview",
+  async (request) => {
+    const spec = z
+      .object({ revision: z.string(), transform: z.unknown() })
+      .parse(request.body);
+    return store.previewTransform(
+      pid(request),
+      aid(request),
+      spec.revision,
+      spec.transform,
+    );
+  },
+);
+app.get(
+  "/api/projects/:projectId/transform-previews/:previewId/image",
+  async (request: any, reply) =>
+    reply
+      .type("image/png")
+      .header("Cache-Control", "private, max-age=31536000, immutable")
+      .send(
+        createReadStream(
+          store.transformPreviewPath(pid(request), request.params.previewId),
+        ),
+      ),
+);
 app.post("/api/projects/:projectId/assets/:assetId/slice", async (request) => {
   const input = z
     .object({ revision: z.string(), spec: z.unknown() })

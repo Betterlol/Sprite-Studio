@@ -6,6 +6,7 @@ import {
   type ClipAsset,
   type ClipSnapshot,
   type FrameDraft,
+  type RenderWarning,
 } from "../studio/model.ts";
 import type { z } from "zod";
 
@@ -21,6 +22,8 @@ export type FramePreview = {
   before: ClipSnapshot;
   preview: ClipSnapshot;
   modified: boolean;
+  modifiedFrameIds: string[];
+  warnings: RenderWarning[];
 };
 export function FrameAdjustmentPanel(props: {
   projectId: string;
@@ -39,6 +42,9 @@ export function FrameAdjustmentPanel(props: {
     [busy, setBusy] = useState(false);
   const [evidence, setEvidence] = useState<ClipReview | null>(null);
   const [modified, setModified] = useState(false);
+  const [changedFrames, setChangedFrames] = useState<string[]>([]),
+    [warnings, setWarnings] = useState<RenderWarning[]>([]);
+  const modifiedRef = useRef(false);
   const current = useRef<Document | null>(null),
     queue = useRef(Promise.resolve());
   const onPreview = useRef(props.onPreview);
@@ -50,6 +56,7 @@ export function FrameAdjustmentPanel(props: {
   }, [props.frameId, props.playing]);
   const url = `/api/projects/${props.projectId}`;
   function load(value: Document) {
+    modifiedRef.current = false;
     current.current = value;
     setDoc(value);
     setConfig(JSON.parse(value.text));
@@ -57,20 +64,32 @@ export function FrameAdjustmentPanel(props: {
     setModified(false);
     setError("");
     setEvidence(null);
+    setWarnings([]);
+    setChangedFrames([]);
   }
   useEffect(() => {
     let cancelled = false;
+    if (
+      current.current &&
+      modifiedRef.current &&
+      current.current.draft.source === "human"
+    ) {
+      setError(
+        "已保存动画发生变化；你的整份草稿已保留，保存前需要处理版本冲突。",
+      );
+      return;
+    }
     current.current = null;
     setDoc(null);
     setConfig(null);
     onPreview.current(null);
-    if (!target) return;
+    if (!props.frameId) return;
     const request = api<Document>(`${url}/frame-drafts`, {
       method: "POST",
       body: JSON.stringify({
         clipId: props.clip.id,
         revision: props.clip.revision,
-        frameId: target,
+        frameId: props.frameId,
       }),
     });
     void request
@@ -83,7 +102,7 @@ export function FrameAdjustmentPanel(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.projectId, props.clip.id, props.clip.revision, target]);
+  }, [props.projectId, props.clip.id, props.clip.revision]);
   useEffect(() => {
     if (!doc || !config) return;
     let cancelled = false;
@@ -129,6 +148,9 @@ export function FrameAdjustmentPanel(props: {
             setDoc(latest);
             setReadyText(text);
             setModified(result.modified);
+            modifiedRef.current = result.modified;
+            setChangedFrames(result.modifiedFrameIds);
+            setWarnings(result.warnings);
             onPreview.current(result.modified ? result : null);
           } catch (e: any) {
             if (!cancelled) {
@@ -159,10 +181,8 @@ export function FrameAdjustmentPanel(props: {
   }, [remote?.documentRevision]);
   const pending = remote?.status === "pending",
     agent = doc?.draft.source === "agent";
-  const frameNumber =
-    props.clip.frames.findIndex(
-      (f) => f.id === (doc?.draft.frameId || target),
-    ) + 1;
+  const frameNumber = props.clip.frames.findIndex((f) => f.id === target) + 1;
+  const selectedConfig = config?.frames.find((f) => f.frameId === target);
   async function action(kind: "save" | "discard") {
     if (!current.current) return;
     setBusy(true);
@@ -234,14 +254,19 @@ export function FrameAdjustmentPanel(props: {
       setError(e.message);
     }
   }
-  const change = (next: Config) => {
+  const change = (next: Config["frames"][number]) => {
+    if (!config) return;
     setReadyText("");
-    setConfig(next);
+    modifiedRef.current = true;
+    setConfig({
+      ...config,
+      frames: config.frames.map((f) => (f.frameId === target ? next : f)),
+    });
   };
   return (
     <div className="frame-adjustment">
       <div className="frame-draft-heading">
-        <strong>单帧配置 · 第 {frameNumber} 帧</strong>
+        <strong>动画调整 · 正在编辑第 {frameNumber} 帧</strong>
         <span>
           {pending
             ? "等待保存审批"
@@ -262,14 +287,13 @@ export function FrameAdjustmentPanel(props: {
                 key={d.id}
                 onClick={() => void open(d)}
               >
-                {d.source === "agent" ? "助手" : "我的"}草稿 · 第{" "}
-                {props.clip.frames.findIndex((f) => f.id === d.frameId) + 1} 帧
+                {d.source === "agent" ? "助手" : "我的"}草稿 · 动画
                 {d.status === "pending" ? " · 待审批" : ""}
               </button>
             ))}
         </div>
       )}
-      {config && (
+      {config && selectedConfig && (
         <>
           <fieldset
             disabled={busy || pending || agent}
@@ -282,12 +306,12 @@ export function FrameAdjustmentPanel(props: {
                 type="number"
                 min="5"
                 max="400"
-                value={config.transform.scale * 100}
+                value={selectedConfig.transform.scale * 100}
                 onChange={(e) =>
                   change({
-                    ...config,
+                    ...selectedConfig,
                     transform: {
-                      ...config.transform,
+                      ...selectedConfig.transform,
                       scale: Number(e.target.value) / 100,
                     },
                   })
@@ -299,12 +323,12 @@ export function FrameAdjustmentPanel(props: {
               <input
                 aria-label="帧水平位移"
                 type="number"
-                value={config.transform.offsetX}
+                value={selectedConfig.transform.offsetX}
                 onChange={(e) =>
                   change({
-                    ...config,
+                    ...selectedConfig,
                     transform: {
-                      ...config.transform,
+                      ...selectedConfig.transform,
                       offsetX: Number(e.target.value),
                     },
                   })
@@ -316,12 +340,12 @@ export function FrameAdjustmentPanel(props: {
               <input
                 aria-label="帧垂直位移"
                 type="number"
-                value={config.transform.offsetY}
+                value={selectedConfig.transform.offsetY}
                 onChange={(e) =>
                   change({
-                    ...config,
+                    ...selectedConfig,
                     transform: {
-                      ...config.transform,
+                      ...selectedConfig.transform,
                       offsetY: Number(e.target.value),
                     },
                   })
@@ -335,10 +359,10 @@ export function FrameAdjustmentPanel(props: {
                 type="number"
                 min="1"
                 max="60000"
-                value={config.durationUs / 1000}
+                value={selectedConfig.durationUs / 1000}
                 onChange={(e) =>
                   change({
-                    ...config,
+                    ...selectedConfig,
                     durationUs: Math.round(Number(e.target.value) * 1000),
                   })
                 }
@@ -347,11 +371,14 @@ export function FrameAdjustmentPanel(props: {
             <label className="frame-clip-check">
               <input
                 type="checkbox"
-                checked={config.transform.clip}
+                checked={selectedConfig.transform.clip}
                 onChange={(e) =>
                   change({
-                    ...config,
-                    transform: { ...config.transform, clip: e.target.checked },
+                    ...selectedConfig,
+                    transform: {
+                      ...selectedConfig.transform,
+                      clip: e.target.checked,
+                    },
                   })
                 }
               />
@@ -366,12 +393,13 @@ export function FrameAdjustmentPanel(props: {
                   busy ||
                   pending ||
                   !modified ||
+                  warnings.some((w) => w.blocking) ||
                   !readyText ||
                   readyText !== JSON.stringify(config)
                 }
                 onClick={() => void action("save")}
               >
-                保存帧配置
+                保存全部帧调整
               </button>
             )}
             {!pending && (
@@ -380,7 +408,7 @@ export function FrameAdjustmentPanel(props: {
                 disabled={busy}
                 onClick={() => void action("discard")}
               >
-                放弃草稿
+                放弃全部调整
               </button>
             )}
             <button
@@ -397,13 +425,39 @@ export function FrameAdjustmentPanel(props: {
                   ? "预览未更新"
                   : readyText === JSON.stringify(config)
                     ? modified
-                      ? "正在预览草稿，可播放检查"
+                      ? "已预览整份草稿，可播放检查"
                       : "与已保存配置一致"
                     : "正在更新预览…"}
             </span>
           </div>
         </>
       )}
+      {!!changedFrames.length && (
+        <p className="adjust-note">
+          已调整 {changedFrames.length} 帧：
+          {changedFrames
+            .map((id) => props.clip.frames.findIndex((f) => f.id === id) + 1)
+            .join("、")}
+          。切换帧会保留这些修改，一起播放、保存或放弃。
+        </p>
+      )}
+      {readyText === JSON.stringify(config) &&
+        warnings.map((w) => (
+          <p key={w.frameId} className="interpolation-warning" role="alert">
+            第 {w.frameNumber} 帧超出画布（
+            {Object.entries(w.overflow)
+              .filter(([, v]) => v)
+              .map(
+                ([k, v]) =>
+                  `${({ left: "左", right: "右", top: "上", bottom: "下" } as const)[k as "left"]}${v}px`,
+              )
+              .join("，")}
+            ）。
+            {w.blocking
+              ? "预览显示画布内部分；请调整参数或允许裁切后再保存。"
+              : "已允许裁切，预览与保存均使用画布内部分。"}
+          </p>
+        ))}
       {evidence && (
         <div className="frame-draft-evidence">
           <img
@@ -417,10 +471,10 @@ export function FrameAdjustmentPanel(props: {
         </div>
       )}
       <p className="adjust-note">
-        调整基于源图片，不新增素材。
+        整份动画草稿基于源图片渲染，不新增素材。
         {agent
-          ? "助手提交保存后，可在对话中批准或拒绝。"
-          : "播放检查后再保存，原配置在保存前保持不变。"}
+          ? "助手提交后，可一次批准或拒绝整份草稿。"
+          : "所有帧修改一起预览；确认后统一保存，原配置在保存前保持不变。"}
       </p>
       {error && (
         <p className="interpolation-warning" role="alert">

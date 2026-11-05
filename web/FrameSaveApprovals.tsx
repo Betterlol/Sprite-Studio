@@ -49,21 +49,34 @@ export function FrameSaveApprovals({
           const a = s.frameSaveApproval!;
           return (
             <div className="frame-save-card" key={a.id}>
-              <strong>助手请求保存单帧配置</strong>
+              <strong>助手请求保存动画帧调整</strong>
               <p>
-                {a.clipName} · 第 {a.frameNumber} 帧
+                {a.clipName} · {a.frameChanges?.length || 1} 帧修改
               </p>
-              <small>
-                缩放 {(a.before.transform?.scale || 1) * 100}% →{" "}
-                {(a.after.transform?.scale || 1) * 100}%<br />
-                位移 ({a.before.transform?.offsetX || 0},{" "}
-                {a.before.transform?.offsetY || 0}) → (
-                {a.after.transform?.offsetX || 0},{" "}
-                {a.after.transform?.offsetY || 0})<br />
-                时长 {a.before.durationUs / 1000} → {a.after.durationUs / 1000}{" "}
-                ms · 裁切 {a.before.transform?.clip ? "允许" : "禁止"} →{" "}
-                {a.after.transform?.clip ? "允许" : "禁止"}
-              </small>
+              {(
+                a.frameChanges || [
+                  {
+                    frameId: a.draftId,
+                    frameNumber: a.frameNumber,
+                    before: a.before,
+                    after: a.after,
+                  },
+                ]
+              ).map((f) => (
+                <small key={f.frameId}>
+                  第 {f.frameNumber} 帧：缩放{" "}
+                  {(f.before.transform?.scale || 1) * 100}% →{" "}
+                  {(f.after.transform?.scale || 1) * 100}%<br />
+                  位移 ({f.before.transform?.offsetX || 0},{" "}
+                  {f.before.transform?.offsetY || 0}) → (
+                  {f.after.transform?.offsetX || 0},{" "}
+                  {f.after.transform?.offsetY || 0})<br />
+                  时长 {f.before.durationUs / 1000} →{" "}
+                  {f.after.durationUs / 1000} ms · 裁切{" "}
+                  {f.before.transform?.clip ? "允许" : "禁止"} →{" "}
+                  {f.after.transform?.clip ? "允许" : "禁止"}
+                </small>
+              ))}
               <button
                 className="secondary"
                 disabled={!!busy}
@@ -86,7 +99,7 @@ export function FrameSaveApprovals({
               <label>
                 拒绝理由（可选）
                 <textarea
-                  aria-label="单帧保存拒绝理由"
+                  aria-label="帧调整保存拒绝理由"
                   value={reasons[a.id] || ""}
                   onChange={(e) =>
                     setReasons({ ...reasons, [a.id]: e.target.value })
@@ -109,16 +122,18 @@ export function FrameSaveApprovals({
                   Deny · 返回修改
                 </button>
               </div>
-              <small>审批仅应用这份草稿；原图和其他帧不变。</small>
+              <small>
+                一次保存这份草稿中的全部帧调整；原图和未修改帧不变。
+              </small>
             </div>
           );
         })}
       <details className="frame-permissions">
-        <summary>助手单帧保存权限</summary>
+        <summary>助手帧调整保存权限</summary>
         <label>
           保存配置时
           <select
-            aria-label="助手单帧保存权限"
+            aria-label="助手帧调整保存权限"
             value={policy}
             onChange={(e) => {
               const next = e.target.value;

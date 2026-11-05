@@ -52,6 +52,7 @@ import {
   clipFrameUrl,
   snapshotFrameUrl,
   type FrameDraft,
+  type TransformPreview,
   categoryFolder,
   folderCategory,
   type Asset,
@@ -163,8 +164,14 @@ export function App() {
   const [showGrid, setShowGrid] = useState(true);
   const [framePreview, setFramePreview] = useState<FramePreview | null>(null);
   useEffect(() => {
-    if (tool !== "adjust") setFramePreview(null);
+    if (tool !== "adjust" && tool !== "review") setFramePreview(null);
   }, [tool]);
+  const [imagePreview, setImagePreview] = useState<{
+    assetId: string;
+    result: TransformPreview;
+  } | null>(null);
+  const [imagePreviewBusy, setImagePreviewBusy] = useState(false),
+    [imagePreviewError, setImagePreviewError] = useState("");
   const [transform, setTransform] = useState<Transform>(emptyTransform);
   const [draft, setDraft] = useState("");
   const [references, setReferences] = useState<string[]>([]);
@@ -571,6 +578,52 @@ export function App() {
     await refreshRef.current();
     return updated;
   }
+  useEffect(() => {
+    let cancelled = false;
+    setImagePreview(null);
+    setImagePreviewError("");
+    setImagePreviewBusy(false);
+    if (clip || tool !== "adjust" || !currentImage) return;
+    if (
+      transform.scale === 1 &&
+      transform.offsetX === 0 &&
+      transform.offsetY === 0 &&
+      !transform.width &&
+      !transform.height
+    )
+      return;
+    const image = currentImage;
+    setImagePreviewBusy(true);
+    const timer = setTimeout(() => {
+      void api<TransformPreview>(
+        `/api/projects/${projectId}/assets/${image.id}/transform-preview`,
+        {
+          method: "POST",
+          body: JSON.stringify({ revision: image.revision, transform }),
+        },
+      )
+        .then((result) => {
+          if (!cancelled) setImagePreview({ assetId: image.id, result });
+        })
+        .catch((error) => {
+          if (!cancelled) setImagePreviewError(error.message);
+        })
+        .finally(() => {
+          if (!cancelled) setImagePreviewBusy(false);
+        });
+    }, 140);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    projectId,
+    clip?.id,
+    currentImage?.id,
+    currentImage?.revision,
+    tool,
+    transform,
+  ]);
   async function applyTransform() {
     if (!currentImage || clip) return;
     await run("正在调整图片", async () => {
@@ -599,10 +652,6 @@ export function App() {
       )
     : 1;
   const scale = zoom === "fit" ? fit : zoom;
-  const previewTransform =
-    !clip && tool === "adjust"
-      ? `translate(${transform.offsetX * scale}px,${transform.offsetY * scale}px) scale(${transform.scale})`
-      : undefined;
 
   return (
     <div
@@ -796,15 +845,16 @@ export function App() {
                             clip.frames[frameIndex]!,
                             currentImage.revision,
                           )
-                      : assetUrl(
-                          projectId,
-                          currentImage.id,
-                          currentImage.revision,
-                        )
+                      : imagePreview?.assetId === currentImage.id
+                        ? imagePreview.result.url
+                        : assetUrl(
+                            projectId,
+                            currentImage.id,
+                            currentImage.revision,
+                          )
                   }
                   alt={currentImage.name}
                   draggable={false}
-                  style={{ transform: previewTransform }}
                 />
                 {tool === "slice" &&
                   showGrid &&
@@ -862,6 +912,14 @@ export function App() {
                       )}
                     </svg>
                   )}
+                {((imagePreview?.result.blocking && !clip) ||
+                  framePreview?.warnings?.some(
+                    (w) =>
+                      w.blocking &&
+                      w.frameId === displayClip?.frames[frameIndex]?.id,
+                  )) && (
+                  <div className="canvas-overflow-border" aria-hidden="true" />
+                )}
                 <div className="canvas-corners">
                   <i />
                   <i />
@@ -911,8 +969,12 @@ export function App() {
                     transform.offsetX !== 0 ||
                     transform.offsetY !== 0)
                     ? clip
-                      ? "按帧配置渲染"
-                      : "调整预览 · 保存后生成图片"
+                      ? "按整份草稿渲染"
+                      : imagePreviewBusy
+                        ? "正在渲染预览…"
+                        : imagePreviewError
+                          ? "预览未更新"
+                          : "实际渲染预览"
                     : "固定画布"}
                 </span>
               </div>
@@ -1049,6 +1111,11 @@ export function App() {
                   key={`${projectId}-${clip.id}`}
                   projectId={projectId}
                   clip={clip}
+                  draftPreview={
+                    framePreview?.draft.clipId === clip.id
+                      ? framePreview
+                      : undefined
+                  }
                   assets={state?.assets || []}
                   reviews={state?.reviews || []}
                   focusReviewId={focusedReviewId}
@@ -1185,7 +1252,12 @@ export function App() {
                     <span className="tool-spacer" />
                     <button
                       className="secondary"
-                      disabled={!!operation}
+                      disabled={
+                        !!operation ||
+                        imagePreviewBusy ||
+                        !!imagePreviewError ||
+                        !!imagePreview?.result.blocking
+                      }
                       onClick={() => void applyTransform()}
                     >
                       {operation ? (
@@ -1196,6 +1268,24 @@ export function App() {
                       {clip ? "应用到当前帧" : "保存调整图片"}
                     </button>
                   </div>
+                  {imagePreview?.result.blocking && (
+                    <p className="interpolation-warning" role="alert">
+                      可见内容超出画布：
+                      {Object.entries(imagePreview.result.overflow)
+                        .filter(([, v]) => v)
+                        .map(
+                          ([k, v]) =>
+                            `${({ left: "左", right: "右", top: "上", bottom: "下" } as const)[k as "left"]}${v}px`,
+                        )
+                        .join("，")}
+                      。预览显示画布内部分；请调整参数或勾选允许裁切后再保存。
+                    </p>
+                  )}
+                  {imagePreviewError && (
+                    <p className="interpolation-warning" role="alert">
+                      预览未更新：{imagePreviewError}
+                    </p>
+                  )}
                   <div className="adjust-note">
                     <label>
                       <input

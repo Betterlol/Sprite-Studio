@@ -1,3 +1,4 @@
+import type { FramePreview } from "./FrameAdjustmentPanel.tsx";
 import { useEffect, useState, useRef } from "react";
 import {
   ScanEye,
@@ -18,6 +19,7 @@ import {
 } from "../studio/model.ts";
 import { api } from "./api.ts";
 type Props = {
+  draftPreview?: FramePreview;
   focusReviewId?: string;
   focusChangeId?: string;
   projectId: string;
@@ -101,6 +103,11 @@ export function AnimationPanel(props: Props) {
     return <p className="adjust-note">先向动画添加图片，再选择检查区间。</p>;
   return (
     <div className="animation-panel">
+      {props.draftPreview && (
+        <p className="review-note">
+          检查整份动画草稿（尚未保存），包含全部帧调整。
+        </p>
+      )}
       <div className="review-controls">
         <label>
           从
@@ -146,7 +153,16 @@ export function AnimationPanel(props: Props) {
             void run("检查动画", async () => {
               const result = await api<ClipReview>(
                 `/api/projects/${projectId}/reviews`,
-                { method: "POST", body: JSON.stringify(selectedRef()) },
+                {
+                  method: "POST",
+                  body: JSON.stringify({
+                    ...selectedRef(),
+                    snapshotId: props.draftPreview?.preview.id,
+                    draftId: props.draftPreview?.draft.id,
+                    documentRevision:
+                      props.draftPreview?.draft.documentRevision,
+                  }),
+                },
               );
               setReviewId(result.id);
               await props.onRefresh();

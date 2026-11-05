@@ -166,7 +166,7 @@ export class AgentHub {
       params.developerInstructions +=
         "切割配置已改为持久JSON配方：先read_document读取原图的documentId与全文，必要时get_schema查看格式，再用write_documents提交正文和expectedDocumentRevision。新配方items为空，需要明确添加待切单元；新增条目可省略ID，保存会返回ID，后续保留已有ID。slice_sheet只接收assetId、expectedDefinitionRevision和requestId，读取已保存配置执行。重复切割更新原切片而不创建动画，禁止以旧columns/rows工具参数执行。当前仅支持规则网格，动画可用create_clip创建空动画，read_document/write_documents编辑clip JSON中的frames(imageId、id、durationUs)、loop、initialFps；帧id新增可省略，重排保留id。单帧变换已有frame-edit草稿配置，按下述流程执行。";
       params.developerInstructions +=
-        "动画引用含snapshotId、clipId、版本、帧实例和时长。检查用inspect_clip看实际帧图与相邻叠图，每次最多16帧。单帧缩放、位移、裁切与时长修复：create_frame_draft取得草稿documentId，read_document读取原配置，通过write_documents修改frame-edit JSON（transform为相对源图的绝对参数，勿在上次结果上叠加），再用inspect_clip传draftId、documentRevision检查草稿。预览不会修改动画或新增图片资源。检查后调用save_frame_draft；默认等待用户Accept/Deny，拒绝理由会返回，不能把待审批或拒绝说成已保存。用户要求先看看时停在草稿预览。不要通过直接编辑clip配置或adjust_image绕过单帧修复的草稿与保存流程。其他帧实例不变。边界框变化只是线索，不自动拉平有意运动。向用户用第几帧交流，UUID用于工具。静态图和叠图不代表已观看实际速度播放，不可声称动态验收通过。";
+        "动画引用含snapshotId、clipId、版本、帧实例和时长。检查用inspect_clip看实际帧图与相邻叠图，每次最多16帧。动画帧缩放、位移、裁切与时长修复：create_frame_draft取得同一动画草稿documentId，frameId仅指定起始焦点；同一动画后续帧复用这份草稿。read_document读取配置，通过write_documents修改frame-edit v2 JSON的frames数组，每项含frameId、transform、durationUs，transform为相对源图的绝对参数；保留其他条目，不把上次修改丢掉，再用inspect_clip传draftId、documentRevision检查草稿。预览不会修改动画或新增图片资源。可以连续修改多帧，一起预览播放编排，inspect_clip返回越界warnings；有blocking警告先修正，不能把画布内截断图当作未越界。检查后调用save_frame_draft一次保存所有修改；默认等待用户Accept/Deny，拒绝理由会返回，不能把待审批或拒绝说成已保存。用户要求先看看时停在草稿预览。不要通过直接编辑clip配置或adjust_image绕过单帧修复的草稿与保存流程。其他帧实例不变。边界框变化只是线索，不自动拉平有意运动。向用户用第几帧交流，UUID用于工具。静态图和叠图不代表已观看实际速度播放，不可声称动态验收通过。";
       const result = session.threadId
         ? await client.request("thread/resume", {
             ...params,
@@ -419,8 +419,8 @@ export class AgentHub {
         read_document: "读取制作配置",
         validate_document: "检查制作配置",
         write_documents: "编辑制作配置",
-        create_frame_draft: "建立单帧配置草稿",
-        save_frame_draft: "请求保存单帧配置",
+        create_frame_draft: "建立动画调整草稿",
+        save_frame_draft: "请求保存帧调整",
         view_image: "查看图片",
         slice_sheet: "切割图集",
         adjust_image: "调整图片",
@@ -606,22 +606,35 @@ export class AgentHub {
       throw new StudioError("草稿状态已改变", 409);
     if (policy === "allow")
       return { saved: true, change: await drafts.save(pid, draftId, revision) };
-    const before = preview.before.clip.frames.find(
-      (f) => f.id === draft.frameId,
-    )!;
-    const after = preview.preview.clip.frames.find(
-      (f) => f.id === draft.frameId,
-    )!;
+    if (!preview.modifiedFrameIds.length)
+      return { saved: false, reason: "没有需要保存的帧修改" };
+    const blocked = preview.warnings.filter((w) => w.blocking);
+    if (blocked.length)
+      throw new StudioError(
+        `第 ${blocked.map((w) => w.frameNumber).join("、")} 帧可见内容超出画布，请调整后再请求保存`,
+      );
+    const frameChanges = preview.modifiedFrameIds.map((frameId) => {
+      const before = preview.before.clip.frames.find((f) => f.id === frameId)!,
+        after = preview.preview.clip.frames.find((f) => f.id === frameId)!;
+      return {
+        frameId,
+        frameNumber:
+          preview.before.clip.frames.findIndex((f) => f.id === frameId) + 1,
+        before: { transform: before.transform, durationUs: before.durationUs },
+        after: { transform: after.transform, durationUs: after.durationUs },
+      };
+    });
+    const first = frameChanges[0]!;
     const approval: FrameSaveApproval = {
       id: randomUUID(),
       draftId,
       documentRevision: revision,
       beforeSnapshotId: preview.before.id,
       previewSnapshotId: preview.preview.id,
-      before: { transform: before.transform, durationUs: before.durationUs },
-      after: { transform: after.transform, durationUs: after.durationUs },
-      frameNumber:
-        preview.before.clip.frames.findIndex((f) => f.id === draft.frameId) + 1,
+      frameChanges,
+      before: first.before,
+      after: first.after,
+      frameNumber: first.frameNumber,
       clipName: preview.before.clip.name,
     };
     drafts.persist({ ...drafts.get(pid, draftId), status: "pending" });

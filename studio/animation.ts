@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -11,6 +12,8 @@ import { StudioError, atomicJson, sha256, type ProjectStore } from "./store.ts";
 import {
   clipReferenceSchema,
   frameAdjustmentSchema,
+  frameTransformSchema,
+  type TransformPreview,
   type ClipSnapshot,
   type ClipReview,
   type FrameChange,
@@ -20,16 +23,34 @@ import {
 
 const content = (clip: ClipAsset) =>
   JSON.stringify({ frames: clip.frames, loop: clip.loop });
+type RenderedFrame = {
+  path: string;
+  image: ClipSnapshot["images"][string];
+} & Partial<Pick<TransformPreview, "bounds" | "overflow" | "blocking">>;
+const frameBatchSchema = z.object({
+  requestId: z.string().uuid(),
+  clipId: z.string().uuid(),
+  revision: z.string(),
+  frames: z
+    .array(
+      z
+        .object({
+          frameId: z.string().uuid(),
+          transform: frameTransformSchema.optional(),
+          durationUs: z.number().int().min(1000).max(60_000_000).optional(),
+        })
+        .refine((f) => f.transform !== undefined || f.durationUs !== undefined),
+    )
+    .min(1)
+    .max(128),
+});
 export class AnimationStore {
   store: ProjectStore;
   snapshots = new Map<string, ClipSnapshot>();
   reviews = new Map<string, ClipReview>();
   changes = new Map<string, FrameChange>();
   adjusting = new Map<string, Promise<FrameChange>>();
-  rendering = new Map<
-    string,
-    Promise<{ path: string; image: ClipSnapshot["images"][string] }>
-  >();
+  rendering = new Map<string, Promise<RenderedFrame>>();
   constructor(store: ProjectStore) {
     this.store = store;
     for (const projectId of store.projects.keys())
@@ -110,6 +131,7 @@ export class AnimationStore {
     pid: string,
     clip: ClipAsset,
     frozenImages?: ClipSnapshot["images"],
+    preview = false,
   ) {
     const images: ClipSnapshot["images"] = frozenImages
       ? structuredClone(frozenImages)
@@ -127,6 +149,7 @@ export class AnimationStore {
     }
     const cached = [...this.snapshots.values()].find(
       (snapshot) =>
+        snapshot.renderMode === (preview ? "preview" : undefined) &&
         snapshot.projectId === pid &&
         snapshot.clip.id === clip.id &&
         snapshot.clip.revision === clip.revision &&
@@ -135,6 +158,7 @@ export class AnimationStore {
     );
     if (cached) return cached;
     const snapshot: ClipSnapshot = {
+      renderMode: preview ? "preview" : undefined,
       id: randomUUID(),
       projectId: pid,
       createdAt: new Date().toISOString(),
@@ -155,15 +179,25 @@ export class AnimationStore {
       throw new StudioError("快照图片缺失或已经改变", 409);
     return { path, image };
   }
-  async renderFrame(pid: string, sid: string, frameId: string) {
-    const original = this.imagePath(pid, sid, frameId);
-    const transform = this.snapshot(pid, sid).clip.frames.find(
-      (f) => f.id === frameId,
-    )!.transform;
+  async renderFrame(
+    pid: string,
+    sid: string,
+    frameId: string,
+  ): Promise<RenderedFrame> {
+    const snapshot = this.snapshot(pid, sid),
+      original = this.imagePath(pid, sid, frameId),
+      transform = snapshot.clip.frames.find((f) => f.id === frameId)!.transform;
     if (!transform) return original;
-    const key = sha256(
-      JSON.stringify([pid, original.image.contentHash, transform]),
-    );
+    const preview = snapshot.renderMode === "preview",
+      key = sha256(
+        JSON.stringify([
+          "visible-alpha16-v2",
+          pid,
+          original.image.contentHash,
+          transform,
+          preview,
+        ]),
+      );
     const running = this.rendering.get(key);
     if (running) return running;
     const promise = this.store
@@ -172,21 +206,36 @@ export class AnimationStore {
         mkdirSync(folder, { recursive: true });
         const path = join(folder, key + ".png"),
           receipt = path + ".json";
-        if (
-          !existsSync(path) ||
-          !existsSync(receipt) ||
-          JSON.parse(readFileSync(receipt, "utf8")).hash !==
-            sha256(readFileSync(path))
-        ) {
+        let cached: any;
+        try {
+          cached = JSON.parse(readFileSync(receipt, "utf8"));
+          if (cached.hash !== sha256(readFileSync(path))) cached = undefined;
+        } catch {
+          cached = undefined;
+        }
+        if (!cached) {
           const result = await this.store.worker.run("transform", {
             path: original.path,
             outputDir: this.store.stage(pid),
             transform,
+            preview,
           });
           copyFileSync(result.files[0], path);
-          atomicJson(receipt, { hash: sha256(readFileSync(path)) });
+          cached = {
+            hash: sha256(readFileSync(path)),
+            bounds: result.bounds,
+            overflow: result.overflow,
+            blocking: result.blocking,
+          };
+          atomicJson(receipt, cached);
         }
-        return { path, image: { ...original.image, mime: "image/png" } };
+        return {
+          path,
+          image: { ...original.image, mime: "image/png" },
+          bounds: cached.bounds,
+          overflow: cached.overflow,
+          blocking: cached.blocking,
+        };
       })
       .finally(() => this.rendering.delete(key));
     this.rendering.set(key, promise);
@@ -323,9 +372,9 @@ export class AnimationStore {
       snapshot.clip.frames.map(async (frame, index) => ({
         ...frame,
         index,
-        path: required.has(index)
-          ? (await this.renderFrame(pid, snapshot.id, frame.id)).path
-          : this.imagePath(pid, snapshot.id, frame.id).path,
+        ...(required.has(index)
+          ? await this.renderFrame(pid, snapshot.id, frame.id)
+          : (this.imagePath(pid, snapshot.id, frame.id) as RenderedFrame)),
       })),
     );
     const result = await this.store.worker.run("review", {
@@ -341,6 +390,19 @@ export class AnimationStore {
       onion: relative(this.store.dir(pid), result.onion),
     };
     const review: ClipReview = {
+      warnings: params.flatMap((f, index) =>
+        f.bounds && f.overflow && Object.values(f.overflow).some(Boolean)
+          ? [
+              {
+                frameId: f.id,
+                frameNumber: index + 1,
+                bounds: f.bounds,
+                overflow: f.overflow,
+                blocking: !!f.blocking,
+              },
+            ]
+          : [],
+      ),
       draftId: input.draftId,
       documentRevision: input.documentRevision,
       id: randomUUID(),
@@ -374,11 +436,41 @@ export class AnimationStore {
     input: unknown,
     source: "agent" | "human" = "human",
   ): Promise<FrameChange> {
-    const spec = frameAdjustmentSchema.parse(input),
-      existing = this.changes.get(spec.requestId);
-    if (existing) return Promise.resolve(this.change(pid, spec.requestId));
-    const running = this.adjusting.get(spec.requestId);
+    const spec = frameAdjustmentSchema.parse(input);
+    return this.adjustFrames(
+      pid,
+      {
+        requestId: spec.requestId,
+        clipId: spec.clipId,
+        revision: spec.revision,
+        frames: [
+          {
+            frameId: spec.frameId,
+            transform: spec.transform,
+            durationUs: spec.durationUs,
+          },
+        ],
+      },
+      source,
+    );
+  }
+  adjustFrames(
+    pid: string,
+    input: unknown,
+    source: "agent" | "human" = "human",
+  ): Promise<FrameChange> {
+    const spec = frameBatchSchema.parse(input),
+      running = this.adjusting.get(spec.requestId);
     if (running) return running.then((change) => this.change(pid, change.id));
+    const existing = this.changes.get(spec.requestId);
+    if (
+      existing &&
+      (existing.status !== "pending" ||
+        this.clip(pid, spec.clipId).appliedFrameChangeIds?.includes(
+          existing.id,
+        ))
+    )
+      return Promise.resolve(this.change(pid, spec.requestId));
     const promise = this.store
       .reading(pid, () => this.applyAdjustment(pid, spec, source))
       .finally(() => this.adjusting.delete(spec.requestId));
@@ -387,22 +479,39 @@ export class AnimationStore {
   }
   private async applyAdjustment(
     pid: string,
-    spec: ReturnType<typeof frameAdjustmentSchema.parse>,
+    spec: z.infer<typeof frameBatchSchema>,
     source: "agent" | "human",
   ) {
     const before = this.capture(pid, spec.clipId, spec.revision),
-      frame = before.clip.frames.find((frame) => frame.id === spec.frameId);
-    if (!frame) throw new StudioError("帧不在目标动画中");
-    if (spec.transform) {
-      const preview = this.captureClip(pid, {
+      byId = new Map(spec.frames.map((f) => [f.frameId, f]));
+    if (
+      byId.size !== spec.frames.length ||
+      spec.frames.some(
+        (f) => !before.clip.frames.some((old) => old.id === f.frameId),
+      )
+    )
+      throw new StudioError("无效或重复的帧实例");
+    const frames = before.clip.frames.map((frame) => {
+      const edit = byId.get(frame.id);
+      return edit
+        ? {
+            ...frame,
+            transform: edit.transform ?? frame.transform,
+            durationUs: edit.durationUs ?? frame.durationUs,
+          }
+        : frame;
+    });
+    const preview = this.captureClip(
+      pid,
+      {
         ...before.clip,
-        revision: sha256(JSON.stringify([before.id, spec])),
-        frames: before.clip.frames.map((f) =>
-          f.id === frame.id ? { ...f, transform: spec.transform } : f,
-        ),
-      });
-      await this.renderFrame(pid, preview.id, frame.id);
-    }
+        revision: sha256(JSON.stringify([before.id, frames])),
+        frames,
+      },
+      before.images,
+    );
+    for (const edit of spec.frames)
+      await this.renderFrame(pid, preview.id, edit.frameId);
     const clip = this.clip(pid, spec.clipId);
     if (clip.revision !== spec.revision)
       throw new StudioError("动画已修改，请基于当前版本重试", 409);
@@ -411,25 +520,19 @@ export class AnimationStore {
       JSON.stringify(before.images)
     )
       throw new StudioError("底图在预览期间发生变化，请重新检查", 409);
-    const frames = clip.frames.map((current) =>
-      current.id === spec.frameId
-        ? {
-            ...current,
-            transform: spec.transform ?? current.transform,
-            durationUs: spec.durationUs ?? current.durationUs,
-          }
-        : current,
-    );
     const change: FrameChange = {
       id: spec.requestId,
       projectId: pid,
       clipId: clip.id,
-      frameId: frame.id,
+      frameId: spec.frames[0]!.frameId,
+      frameIds: spec.frames.map((f) => f.frameId),
       baseSnapshotId: before.id,
       source,
       status: "pending",
-      transform: spec.transform,
-      durationUs: spec.durationUs,
+      transform:
+        spec.frames.length === 1 ? spec.frames[0]!.transform : undefined,
+      durationUs:
+        spec.frames.length === 1 ? spec.frames[0]!.durationUs : undefined,
       resultFrames: frames,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

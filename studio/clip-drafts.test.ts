@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, renameSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -174,6 +174,23 @@ test("historical and discarded draft frame IDs stay reserved to their animation"
     const fresh = new ClipDrafts(restored); doc = fresh.read(pid, doc.documentId);
     assert.throws(() => update(fresh, pid, doc, v => { v.frames.push({ id: addedId, imageId: image.id, durationUs: 100000 }); }), /其他动画/);
   } finally { store.worker.close(); restored?.worker.close(); }
+});
+
+test("history created by updateClip is checked even with an unchanged directory timestamp", async () => {
+  const { store, pid, clip, image, drafts } = await fixture();
+  try {
+    const id = crypto.randomUUID();
+    const other = store.createClip(pid, "other", [{ id, imageId: image.id, durationUs: 100000 }]);
+    const folder = store.safePath(pid, ".studio/history"), fixed = new Date("2020-01-01T00:00:00Z");
+    utimesSync(folder, fixed, fixed);
+    const stamp = statSync(folder).mtimeMs;
+    const doc = drafts.create(pid, { clipId: clip.id, revision: clip.revision }, "human");
+    assert.ok(![...store.animation.snapshots.values()].some(s => s.clip.id === other.id));
+    store.updateClip(pid, other.id, { revision: other.revision, frames: [], loop: other.loop });
+    utimesSync(folder, fixed, fixed);
+    assert.equal(statSync(folder).mtimeMs, stamp);
+    assert.throws(() => update(drafts, pid, doc, v => { v.frames.push({ id, imageId: image.id, durationUs: 100000 }); }), /其他动画/);
+  } finally { store.worker.close(); }
 });
 
 test("discard from another service during render prevents the final save", async () => {

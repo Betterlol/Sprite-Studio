@@ -15,9 +15,9 @@ const createSchema = z.object({ clipId: z.string().uuid(), revision: z.string(),
 const body = (clip: ClipAsset): ClipEdit => ({ schemaVersion: 1, type: "clip-edit", frames: structuredClone(clip.frames), loop: clip.loop, initialFps: clip.initialFps });
 type Ownership = { clipId: string; ids: string[]; recordId?: string };
 type FolderIndex = { stamp: number; entries: Ownership[] };
-// Shared by service instances on the same store. Folder additions trigger rescans;
-// in-process draft writes update the cached project index incrementally.
-const ownershipIndexes = new WeakMap<ProjectStore, Map<string, { history?: FolderIndex; drafts?: FolderIndex }>>();
+// Draft indexes are shared by service instances on the same store. History is
+// always reread because other store services can write it independently.
+const ownershipIndexes = new WeakMap<ProjectStore, Map<string, { drafts?: FolderIndex }>>();
 
 export class ClipDrafts {
   private saving = new Map<string, Promise<ClipDraftSave>>();
@@ -81,7 +81,7 @@ export class ClipDrafts {
     if (!project) projects.set(pid, project = {});
     const folder = this.store.safePath(pid, kind === "history" ? ".studio/history" : ".studio/clip-drafts");
     const stamp = existsSync(folder) ? statSync(folder).mtimeMs : -1;
-    const cached = project[kind];
+    const cached = kind === "drafts" ? project.drafts : undefined;
     if (cached && cached.stamp === stamp) return cached.entries;
     const entries: Ownership[] = [];
     if (stamp !== -1) for (const name of readdirSync(folder).filter(f => kind === "history" ? f.endsWith(".json") : /^[0-9a-f-]{36}\.json$/i.test(f))) {
@@ -93,7 +93,7 @@ export class ClipDrafts {
         entries.push({ recordId: record.draft.id, clipId: record.draft.clipId, ids: record.ownedFrameIds ?? this.parse(record.text).frames.map(f => f.id) });
       }
     }
-    project[kind] = { stamp, entries };
+    if (kind === "drafts") project.drafts = { stamp, entries };
     return entries;
   }
   private validate(pid: string, clipId: string, value: ClipEdit) {
@@ -234,7 +234,7 @@ export class ClipDrafts {
         { path: this.path(id), bytes: bytes(saved) },
       ], { kind: "save-clip-draft", draftId: id });
       const projectIndex = ownershipIndexes.get(this.store)?.get(pid);
-      if (projectIndex) { projectIndex.drafts = undefined; projectIndex.history = undefined; }
+      if (projectIndex) projectIndex.drafts = undefined;
       return receipt;
     }).finally(() => this.saving.delete(key));
     this.saving.set(key, promise);

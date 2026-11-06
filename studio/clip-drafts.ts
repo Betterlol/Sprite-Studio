@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { bytes, clipBody } from "./documents.ts";
 import { publishFiles } from "./file-operations.ts";
-import { frameEditSchema, type ClipAsset, type ClipSnapshot, type RenderWarning } from "./model.ts";
+import { type ClipAsset, type ClipSnapshot, type RenderWarning } from "./model.ts";
 import { assetRevision, atomicJson, sha256, StudioError, type ProjectStore } from "./store.ts";
 import { clipEditSchema, type ClipDraft, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type ClipEdit } from "./workflow-model.ts";
 
@@ -44,8 +44,14 @@ export class ClipDrafts {
     }
     this.store.changed(record.draft.projectId);
   }
+  private historical(record: RecordData) {
+    return record.draft.source === "agent" && this.store.tasks && !this.store.tasks.draftHoldsLease(record.draft.projectId, record.draft);
+  }
+  private assertEditable(record: RecordData) {
+    if (this.historical(record)) throw new StudioError("所属任务/意图已结束，该Agent草稿为只读历史；请显式派生新草稿", 409);
+  }
   private document(record: RecordData): ClipDraftDocument {
-    return { documentId: record.draft.id, documentRevision: record.documentRevision, text: record.text, draft: structuredClone(record.draft) };
+    return { documentId: record.draft.id, documentRevision: record.documentRevision, text: record.text, draft: { ...structuredClone(record.draft), ...(this.historical(record) ? { readOnly: true } : {}) } };
   }
   private parse(text: string): ClipEdit {
     if (Buffer.byteLength(text) > 256 * 1024) throw new StudioError("草稿配置超过256KB");
@@ -127,14 +133,14 @@ export class ClipDrafts {
     }
     return base;
   }
-  create(pid: string, input: CreateInput, source: "human" | "agent", sessionId?: string): ClipDraftDocument {
+  create(pid: string, input: CreateInput, source: "human" | "agent", sessionId?: string, owner?: { taskId: string; intentVersion: number }): ClipDraftDocument {
     const spec = createSchema.parse(input);
     if (source !== "human" && source !== "agent") throw new StudioError("无效草稿来源");
     this.verifyFiles(pid, this.store.animation.clip(pid, spec.clipId));
     const base = this.store.animation.capture(pid, spec.clipId, spec.revision);
     if (spec.frameId && !base.clip.frames.some(f => f.id === spec.frameId)) throw new StudioError("帧不在目标动画中");
     if (!spec.fromDraftId) {
-      const existing = this.list(pid).find(d => d.clipId === spec.clipId && d.baseSnapshotId === base.id && d.source === source && d.sessionId === sessionId);
+      const existing = this.list(pid).find(d => d.clipId === spec.clipId && d.baseSnapshotId === base.id && d.source === source && d.sessionId === sessionId && !d.readOnly);
       if (existing) return this.read(pid, existing.id);
     }
     let value = body(base.clip), images = structuredClone(base.images);
@@ -149,7 +155,7 @@ export class ClipDrafts {
       } else {
         const old = this.store.frameDrafts.get(pid, spec.fromDraftId);
         if (old.clipId !== spec.clipId || old.baseSnapshotId !== base.id || old.status !== "editing") throw new StudioError("派生草稿与当前动画基线不匹配", 409);
-        const legacy = frameEditSchema.parse(JSON.parse(old.text));
+        const legacy = this.store.frameDrafts.configuration(pid, old);
         const edits = new Map(legacy.frames.map(f => [f.frameId, f]));
         if (edits.size !== legacy.frames.length || legacy.frames.some(f => !base.clip.frames.some(b => b.id === f.frameId))) throw new StudioError("旧草稿包含无效帧实例");
         value.frames = value.frames.map(f => { const edit = edits.get(f.id); return edit ? { ...f, transform: edit.transform, durationUs: edit.durationUs } : f; });
@@ -157,7 +163,7 @@ export class ClipDrafts {
     }
     this.validate(pid, spec.clipId, value);
     const text = bytes(value).toString();
-    const draft: ClipDraft = { id: randomUUID(), projectId: pid, clipId: spec.clipId, baseSnapshotId: base.id, source, sessionId, status: "editing", createdAt: new Date().toISOString() };
+    const draft: ClipDraft = { id: randomUUID(), projectId: pid, clipId: spec.clipId, baseSnapshotId: base.id, source, sessionId, ...(source === "agent" ? owner : {}), status: "editing", createdAt: new Date().toISOString() };
     const files = Object.fromEntries([base.clip.file!, base.clip.file! + ".config.json", this.store.metaPath(pid, base.clip.id)].map(path => {
       const file = this.store.safePath(pid, path);
       return [path, existsSync(file) ? sha256(readFileSync(file)) : null];
@@ -169,11 +175,41 @@ export class ClipDrafts {
   list(pid: string): ClipDraft[] {
     const folder = this.store.safePath(pid, ".studio/clip-drafts");
     if (!existsSync(folder)) return [];
-    return readdirSync(folder).filter(f => /^[0-9a-f-]{36}\.json$/i.test(f)).map(f => this.get(pid, f.slice(0, -5)).draft).filter(d => d.status === "editing").sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return readdirSync(folder).filter(f => /^[0-9a-f-]{36}\.json$/i.test(f)).map(f => this.document(this.get(pid, f.slice(0, -5))).draft).filter(d => d.status === "editing").sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  has(pid: string, id: string) {
+    return z.string().uuid().safeParse(id).success && existsSync(this.store.safePath(pid, this.path(id)));
   }
   read(pid: string, id: string): ClipDraftDocument { return this.document(this.get(pid, id)); }
+  dependencyImageIds(pid: string, id: string): string[] { return Object.keys(this.get(pid, id).images); }
+  freeze(pid: string, id: string, revision: string): ClipSnapshot {
+    const record = this.get(pid, id), base = this.check(pid, record, revision), value = this.parse(record.text);
+    this.validate(pid, record.draft.clipId, value);
+    return this.store.animation.captureClip(pid, { ...base.clip, frames: value.frames, loop: value.loop, initialFps: value.initialFps ?? 12, revision: sha256(JSON.stringify([base.id, revision])) }, record.images, true);
+  }
+  validateText(pid: string, id: string, text: string): ClipEdit {
+    const record = this.get(pid, id), value = this.parse(text);
+    this.validate(pid, record.draft.clipId, value);
+    return value;
+  }
+  prepare(pid: string, input: { documentId: string; expectedDocumentRevision: string; text: string }) {
+    const record = this.get(pid, input.documentId);
+    this.assertEditable(record);
+    this.store.assertClipMutation(pid, record.draft.clipId);
+    if (this.saving.has(`${pid}/${input.documentId}`)) throw new StudioError("草稿正在保存", 409);
+    const base = this.check(pid, record, input.expectedDocumentRevision), value = this.parse(input.text);
+    this.validate(pid, record.draft.clipId, value);
+    const captured = this.store.animation.captureClip(pid, { ...base.clip, frames: value.frames });
+    const images = { ...record.images, ...Object.fromEntries(Object.entries(captured.images).filter(([key]) => !record.images[key])) };
+    const text = bytes(value).toString();
+    const next = { ...record, images, text, documentRevision: sha256(text), ownedFrameIds: [...new Set([...(record.ownedFrameIds ?? this.parse(record.text).frames.map(f => f.id)), ...value.frames.map(f => f.id)])] };
+    return { path: this.path(input.documentId), bytes: bytes(next) };
+  }
+  invalidateIndex(pid: string) { const index = ownershipIndexes.get(this.store)?.get(pid); if (index) index.drafts = undefined; }
   write(pid: string, id: string, input: { expectedDocumentRevision: string; text: string }): ClipDraftDocument {
     const record = this.get(pid, id);
+    this.assertEditable(record);
+    this.store.assertClipMutation(pid, record.draft.clipId);
     if (record.draft.status !== "editing" || this.saving.has(`${pid}/${id}`)) throw new StudioError("草稿已结束或正在保存", 409);
     const base = this.check(pid, record, input.expectedDocumentRevision);
     const value = this.parse(input.text);
@@ -209,6 +245,8 @@ export class ClipDrafts {
     const old = this.get(pid, id);
     if (old.documentRevision !== revision) throw new StudioError("VERSION_CONFLICT：草稿已改变", 409);
     if (old.draft.status === "saved" && old.receipt) return structuredClone(old.receipt);
+    this.assertEditable(old);
+    this.store.assertClipMutation(pid, old.draft.clipId);
     if (old.draft.status !== "editing") throw new StudioError("草稿已放弃", 409);
     const key = `${pid}/${id}`, running = this.saving.get(key);
     if (running) throw new StudioError("草稿正在保存，请稍后重试", 409);
@@ -224,6 +262,8 @@ export class ClipDrafts {
       const receipt: ClipDraftSave = JSON.parse(JSON.stringify({ draftId: id, clip: next, beforeSnapshotId: base.id, afterSnapshotId: after.id }));
       const saved: RecordData = { ...record, draft: { ...record.draft, status: "saved" }, receipt };
       beforeCommit?.();
+      this.assertEditable(this.get(pid, id));
+      this.store.assertClipMutation(pid, record.draft.clipId);
       this.check(pid, this.get(pid, id), revision);
       this.validate(pid, record.draft.clipId, value);
       publishFiles(this.store, pid, [
@@ -242,6 +282,7 @@ export class ClipDrafts {
   }
   discard(pid: string, id: string, revision: string): ClipDraftDocument {
     const record = this.get(pid, id);
+    this.store.assertClipMutation(pid, record.draft.clipId);
     if (record.draft.status !== "editing" || record.documentRevision !== revision || this.saving.has(`${pid}/${id}`)) throw new StudioError("草稿状态已改变，请刷新", 409);
     record.draft.status = "discarded";
     this.persist(record);

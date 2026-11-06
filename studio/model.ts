@@ -89,6 +89,9 @@ export type FrameDraft = {
   baseSnapshotId: string;
   source: "agent" | "human";
   sessionId?: string;
+  taskId?: string;
+  intentVersion?: number;
+  readOnly?: boolean;
   status: "editing" | "pending" | "saved" | "discarded";
   createdAt: string;
   documentRevision: string;
@@ -187,6 +190,8 @@ export type DeletePlan = {
   blockers: { name: string; reason: string }[];
 };
 export type ChatMessage = {
+  context?: import("./workflow-model.ts").EditingContext;
+  taskId?: string;
   generatedIds?: string[];
   id: string;
   role: "user" | "assistant";
@@ -231,8 +236,18 @@ export type ToolApproval = {
   label: string;
   arguments: Record<string, unknown>;
   createdAt: string;
+  taskId?: string;
+  taskRevision?: number;
+  intentVersion?: number;
+  barrierVersion?: number;
+  directionRequired?: boolean;
 };
 export type Session = {
+  taskId?: string;
+  workflowIntent?: { taskId: string; intentVersion: number; barrierVersion: number };
+  editingContext?: import("./workflow-model.ts").EditingContext;
+  agentDraftId?: string;
+  workflowReferenceHashes?: string[];
   diagnostics?: SessionDiagnostic[];
   outputFolder?: string;
   id: string;

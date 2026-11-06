@@ -12,6 +12,10 @@ import {
 import { ProjectStore, StudioError, sha256 } from "./store.ts";
 import { clipDocumentSchema } from "./documents.ts";
 import { interpolationPrompt } from "./interpolation.ts";
+import { freezeEditingContext } from "./workflow-context.ts";
+import { captureTaskIntent, assertTaskIntent, precheckTaskTool, toolPolicyParents, type TaskIntent } from "./workflow-agent.ts";
+import { checkFromDraftRevision, taskActionSchema, taskDirectionSchema } from "./workflow-routes.ts";
+import { clipEditSchema, type EditingContext } from "./workflow-model.ts";
 import {
   interpolationSchema,
   agentModelSchema,
@@ -32,17 +36,27 @@ export class AgentHub {
   prompts = new Map<string, (value: any) => void>();
   frameSaves = new Map<
     string,
-    { sessionId: string; finish: (value: any) => void; timer: NodeJS.Timeout }
+    { sessionId: string; finish: (value: any) => void; timer: NodeJS.Timeout; guard?: () => void }
   >();
   toolWaits = new Map<
     string,
     {
-      finish: (decision: { accept: boolean; reason: string }) => void;
+      finish: (decision: { accept: boolean; reason: string; result?: any }) => void;
       timer: NodeJS.Timeout;
+      frozenArguments: any;
+      argumentsHash: string;
+      intent?: TaskIntent;
+      taskRevision?: number;
+      directionRequired?: boolean;
+      claimed?: boolean;
+      validate: () => void;
     }
   >();
   toolTails = new Map<string, Promise<void>>();
   toolEpochs = new Map<string, number>();
+  clientGenerationModes = new Map<string, boolean>();
+  generationIntents = new Map<string, TaskIntent & { referenceHashes?: string[] }>();
+  transitioning = new Set<string>();
   promptTails = new Map<string, Promise<void>>();
   staleTurns = new Map<string, Set<string>>();
   disabled: string[] = [];
@@ -140,8 +154,19 @@ export class AgentHub {
     }
     return message;
   }
+  private createRuntime(workspace: string, overrides: string[], env: Record<string, string>) {
+    return new AppServer(workspace, overrides, this.disabled, undefined, env);
+  }
   private async client(session: Session) {
-    if (this.clients.has(session.id)) return this.clients.get(session.id)!;
+    const task = session.taskId ? this.store.tasks.get(session.projectId, session.taskId) : undefined;
+    const generationEnabled = !task || (task.phase === "direction" && task.contract.generationLimit > 0 && task.attempts.length === 0);
+    this.clientGenerationModes ??= new Map();
+    if (this.clients.has(session.id)) {
+      if (!this.clientGenerationModes.has(session.id) || this.clientGenerationModes.get(session.id) === generationEnabled) return this.clients.get(session.id)!;
+      const old = this.clients.get(session.id)!;
+      this.clients.delete(session.id); this.tokens.delete(session.id);
+      await old.close();
+    }
     await this.bootstrapPromise;
     if (!this.status.connected)
       throw new StudioError(this.status.error || "Codex 尚未连接");
@@ -154,13 +179,13 @@ export class AgentHub {
     mkdirSync(workspace, { recursive: true });
     const token = randomBytes(32).toString("hex");
     this.tokens.set(session.id, token);
-    const client = new AppServer(
+    const client = this.createRuntime(
       workspace,
       [
         "features.shell_tool=false",
         "features.unified_exec=false",
         "features.view_image=false",
-        "features.image_generation=true",
+        `features.image_generation=${generationEnabled}`,
         `mcp_servers.sprite_studio.command=${JSON.stringify(process.execPath)}`,
         `mcp_servers.sprite_studio.args=${JSON.stringify([fileURLToPath(new URL("./mcp.ts", import.meta.url)), this.endpoint, session.id])}`,
         "mcp_servers.sprite_studio.enabled=true",
@@ -175,11 +200,10 @@ export class AgentHub {
         'mcp_servers.sprite_studio.tools.create_frame_draft.approval_mode="approve"',
         'mcp_servers.sprite_studio.tools.save_frame_draft.approval_mode="approve"',
       ],
-      this.disabled,
-      undefined,
       { SPRITE_STUDIO_TOOL_TOKEN: token },
     );
     this.clients.set(session.id, client);
+    this.clientGenerationModes.set(session.id, generationEnabled);
     client.on("notification", (message) => {
       if (this.clients.get(session.id) !== client) return;
       void this.notification(session, message).catch((error) =>
@@ -198,7 +222,16 @@ export class AgentHub {
     });
     client.serverRequest = (request) => this.requestInput(session, request);
     try {
+      const assertConnection = () => {
+        if (this.clients.get(session.id) !== client || this.stopped || this.transitioning?.has(session.id)) throw new StudioError("连接已被新的回合或阶段替换", 409);
+        if (task) assertTaskIntent(this.store, session, { taskId: task.id, intentVersion: task.intentVersion, barrierVersion: task.barrierVersion });
+      };
       await client.initialize();
+      assertConnection();
+      if (task && !generationEnabled) {
+        const effective = await client.request("config/read", { includeLayers: false });
+        if (effective.config?.features?.image_generation !== false) throw new StudioError("无法确认production runtime已关闭原生生成，拒绝启动制作回合", 409);
+      }
       const params = {
         cwd: workspace,
         model: session.model || defaultAgentModel,
@@ -215,6 +248,9 @@ export class AgentHub {
         "所有项目工具的权限由网页设置控制。需要审批时工具调用保持等待，必须等用户决定后再继续；不要把等待请求当作成功，不要尝试并行工具或换工具绕过。拒绝结果附带用户理由，按理由调整后再请求。默认只有save_image需要审批，其他项目工具为full access，用户可逐项更改。";
       params.developerInstructions +=
         "动画引用含snapshotId、clipId、版本、帧实例和时长。检查用inspect_clip看实际帧图与相邻叠图，每次最多16帧。动画帧缩放、位移、裁切与时长修复：create_frame_draft取得同一动画草稿documentId，frameId仅指定起始焦点；同一动画后续帧复用这份草稿。read_document读取配置，通过write_documents修改frame-edit v2 JSON的frames数组，每项含frameId、transform、durationUs，transform为相对源图的绝对参数；保留其他条目，不把上次修改丢掉，再用inspect_clip传draftId、documentRevision检查草稿。预览不会修改动画或新增图片资源。可以连续修改多帧，一起预览播放编排，inspect_clip返回越界warnings；有blocking警告先修正，不能把画布内截断图当作未越界。检查后调用save_frame_draft一次保存所有修改；按网页权限设置等待用户Accept/Deny或直接执行，拒绝理由会返回，不能把待审批或拒绝说成已保存。用户要求先看看时停在草稿预览。不要通过直接编辑clip配置或adjust_image绕过单帧修复的草稿与保存流程。其他帧实例不变。边界框变化只是线索，不自动拉平有意运动。向用户用第几帧交流，UUID用于工具。静态图和叠图不代表已观看实际速度播放，不可声称动态验收通过。";
+      params.developerInstructions +=
+        "制作任务与对话回合生命周期独立。任务方向未通过不得提交制作成果；方向决定与工具权限不是同一授权，allow也不跳过方向。direction阶段只有用户明确要求时可首次生成，默认额度仍1；事件日志不是硬预算，不能无人值守重生成或自动重试未知请求。方向通过后由平台切换到禁用原生image_gen的production runtime，按实际保存回执继续确定性切割、完整对象草稿编排与参数修复，不能以image_gen完成或旧专用补帧的停下作为任务完成。完整动画使用create_clip_draft/read_document/write_documents/inspect_clip/save_clip_draft；人工draft上下文必须用fromDraftId显式派生，保留人工全文，不能直接改人工稿或用旧frame草稿丢掉编排。workflow_task.check由真实renderer记录静态检查和unverified时序，模型不能自报passed；按具体finding修复，遵守修复轮次/无进展停止，无颜色结构修复工具时说明能力缺口，不用shell/安装/生成绕过。workflow_task.ready仅表示静态可交付、待人工动态播放，不代替accept。多动作使用review_sequence得到全部批次coverage与来源，不能把前16帧说成全部检查。不同保存位置被拒后用同generatedId、新requestId重提save_image，不要重生成。";
+      if (task) params.developerInstructions += `当前制作任务约定与能力边界：${JSON.stringify({ task, capabilities: this.store.quality.capabilities(), nativeGenerationEnabled: generationEnabled, preflightHardControl: false })}`;
       const result = session.threadId
         ? await client.request("thread/resume", {
             ...params,
@@ -222,6 +258,7 @@ export class AgentHub {
             excludeTurns: true,
           })
         : await client.request("thread/start", params);
+      assertConnection();
       session.threadId = result.thread.id;
       session.model = session.model || result.model || defaultAgentModel;
       const inventory = await client.request("mcpServerStatus/list", {
@@ -229,6 +266,7 @@ export class AgentHub {
         detail: "toolsAndAuthOnly",
         limit: 100,
       });
+      assertConnection();
       if (
         inventory.nextCursor ||
         inventory.data.some(
@@ -241,7 +279,9 @@ export class AgentHub {
       this.flush(session);
       return client;
     } catch (error) {
-      this.clients.delete(session.id);
+      if (this.clients.get(session.id) === client) {
+        this.clients.delete(session.id); this.tokens.delete(session.id); this.clientGenerationModes.delete(session.id);
+      }
       await client.close();
       throw error;
     }
@@ -299,6 +339,9 @@ export class AgentHub {
     clipInputs: unknown[] = [],
     outputFolder?: string,
     model?: string,
+    context?: EditingContext,
+    taskId?: string,
+    feedbackKind?: "local" | "direction",
   ) {
     const session = this.store.session(sessionId);
     if (session.messages.some((message) => message.id === requestId))
@@ -319,7 +362,22 @@ export class AgentHub {
       )
     )
       throw new StudioError("当前工程有任务正在进行，请先等待或停止", 409);
-    const references = assetIds.map((id) =>
+    const frozenContext = context ? freezeEditingContext(this.store, session.projectId, context) : undefined;
+    const boundId = taskId || session.taskId;
+    let task = boundId ? this.store.tasks.get(session.projectId, boundId) : undefined;
+    if (task && session.taskId && session.taskId !== task.id && !["stopped", "accepted"].includes(this.store.tasks.get(session.projectId, session.taskId).status) && !this.store.tasks.wasAccepted(session.projectId, session.taskId)) throw new StudioError("对话已绑定另一个制作任务", 409);
+    const wasAccepted = !!task && this.store.tasks.wasAccepted(session.projectId, task.id);
+    if (task) {
+      if (["paused", "stopped", "failed", "blocked"].includes(task.status) && !(task.status === "blocked" && wasAccepted)) throw new StudioError("请先在任务上显式恢复，再继续对话", 409);
+      task = this.store.tasks.bindSession(session.projectId, task.id, session.id);
+      if (feedbackKind || wasAccepted || ["ready", "accepted"].includes(task.status)) task = this.store.tasks.action(session.projectId, task.id, { action: "feedback", expectedRevision: task.revision, text, feedbackKind: feedbackKind || "local" }, feedbackKind && frozenContext?.clipId ? frozenContext : undefined);
+      session.taskId = task.id;
+      session.workflowIntent = { taskId: task.id, intentVersion: task.intentVersion, barrierVersion: task.barrierVersion };
+    }
+    session.editingContext = frozenContext;
+    this.cancelTools(session, "新回合已开始，旧排队操作未执行");
+    const referenceIds = [...new Set([...assetIds, ...(frozenContext?.assetId && this.store.asset(session.projectId, frozenContext.assetId).type === "image" ? [frozenContext.assetId] : []), ...(task?.referenceIds || []), ...(task?.contract.roleReferenceIds || []), ...(task?.target?.assetId && this.store.asset(session.projectId, task.target.assetId).type === "image" ? [task.target.assetId] : [])])];
+    const references = referenceIds.map((id) =>
       this.store.image(session.projectId, id),
     );
     const clipReferences = clipInputs.map((input) =>
@@ -345,6 +403,8 @@ export class AgentHub {
       text,
       displayText,
       assetIds: references.map((asset) => asset.id),
+      context: frozenContext,
+      taskId: task?.id,
       clipReferences,
       createdAt: new Date().toISOString(),
     });
@@ -370,9 +430,32 @@ export class AgentHub {
     const current = () =>
       session.messages.filter((m) => m.role === "user").at(-1)?.id ===
       messageId;
+    const intent = captureTaskIntent(this.store, session);
     const client = await this.client(session);
     if (session.status !== "starting" || !current()) return;
+    assertTaskIntent(this.store, session, intent);
     const inputs: any[] = [{ type: "text", text, text_elements: [] }];
+    const actualReferenceHashes: string[] = [];
+    const task = session.taskId ? this.store.tasks.get(session.projectId, session.taskId) : undefined;
+    const context = session.editingContext || task?.target;
+    if (task) inputs.push({ type: "text", text: `制作任务（不是本轮对话完成状态）：${JSON.stringify({ task, capabilities: this.store.quality.capabilities(), preflightHardControl: false })}`, text_elements: [] });
+    if (context) {
+      inputs.push({ type: "text", text: `冻结编辑上下文（不授予修改权限，draft必须显式派生保留完整正文）：${JSON.stringify(context)}`, text_elements: [] });
+      if (context.draftId) inputs.push({ type: "text", text: this.store.documents.read(session.projectId, context.draftId).text, text_elements: [] });
+      if (context.snapshotId) {
+        const snapshot = this.store.animation.snapshot(session.projectId, context.snapshotId), range = snapshot.clip.frames.length ? this.store.animation.range(snapshot, context.startFrameId, context.endFrameId) : { start: 0, end: -1 };
+        inputs.push({ type: "text", text: `真实快照编排：${JSON.stringify(snapshot.clip)}`, text_elements: [] });
+        const frames = context.frameId ? snapshot.clip.frames.filter(f => f.id === context.frameId) : snapshot.clip.frames.slice(range.start, Math.min(range.end + 1, range.start + 16));
+        const visualSnapshot = snapshot.renderMode === "preview" ? snapshot : this.store.animation.captureClip(session.projectId, snapshot.clip, snapshot.images, true);
+        for (const frame of frames) {
+          const rendered = await this.store.animation.renderFrame(session.projectId, visualSnapshot.id, frame.id), hash = sha256(readFileSync(rendered.path));
+          const warnings = rendered.bounds && rendered.overflow && Object.values(rendered.overflow).some(value => value > 0)
+            ? [{ frameId: frame.id, bounds: rendered.bounds, overflow: rendered.overflow, blocking: !!rendered.blocking }] : [];
+          actualReferenceHashes.push(hash);
+          inputs.push({ type: "text", text: `渲染帧引用（诊断preview，不代表保存/无越界/验收；blocking时图像可能被画布截断，必须按warnings修复）：${JSON.stringify({ sourceSnapshotId: snapshot.id, previewSnapshotId: visualSnapshot.id, frameId: frame.id, sha256: hash, warnings })}；源图hash不是实际生成参考hash`, text_elements: [] }, { type: "localImage", path: rendered.path });
+        }
+      }
+    }
     inputs.push({
       type: "text",
       text: `当前网页目录：${session.outputFolder || "项目资源根目录"}。显式保存图片时按任务选择参考图或原图素材；save_image.folder只填写所选分类内部的相对目录，空或点号为分类根目录。`,
@@ -424,6 +507,7 @@ export class AgentHub {
         ref.contentHash = sha256(readFileSync(source));
       }
       const referenceHash = sha256(readFileSync(source));
+      actualReferenceHashes.push(referenceHash);
       const snapshot = join(
         this.store.dir(session.projectId),
         ".studio",
@@ -442,7 +526,9 @@ export class AgentHub {
       );
     }
     if (session.status !== "starting" || !current()) return;
+    assertTaskIntent(this.store, session, intent);
     if (interpolation) this.store.interpolations.save(interpolation);
+    session.workflowReferenceHashes = [...new Set(actualReferenceHashes)];
     session.status = "running";
     this.flush(session);
     const result = await client.request("turn/start", {
@@ -468,12 +554,24 @@ export class AgentHub {
     )
       return;
     const eventTurnId = params.turnId || params.turn?.id;
-    if (
-      eventTurnId &&
-      (this.staleTurns?.get(session.id)?.has(eventTurnId) ||
-        (session.turnId && eventTurnId !== session.turnId))
-    )
-      return;
+    const stale = !!(eventTurnId && (this.staleTurns?.get(session.id)?.has(eventTurnId) || (session.turnId && eventTurnId !== session.turnId)));
+    const generation = params.item?.type === "imageGeneration" ? params.item : undefined;
+    if (generation && ["item/started", "item/completed"].includes(message.method!)) {
+      this.generationIntents ??= new Map();
+      const key = `${session.id}:${generation.id}`;
+      if (!stale && session.workflowIntent && !this.generationIntents.has(key)) this.generationIntents.set(key, { ...structuredClone(session.workflowIntent), referenceHashes: [...(session.workflowReferenceHashes || [])] });
+      const intent = this.generationIntents.get(key);
+      if (message.method === "item/started" && intent) {
+        this.store.tasks.observeGeneration(session.projectId, intent.taskId, { ...intent, sessionId: session.id, runtimeItemId: generation.id });
+        const task = this.store.tasks.get(session.projectId, intent.taskId);
+        if (task.phase !== "direction" || task.attempts.length > task.contract.generationLimit) void this.stop(session.id, "原生生成越过阶段/额度边界，已中断；事件日志不是调用前硬控制，未知结果保留");
+      }
+      if (message.method === "item/completed" && generation.status === "completed") {
+        const pending = this.importGenerated(session, generation, intent);
+        const list = this.imports.get(session.id) || []; list.push(pending); this.imports.set(session.id, list);
+      } else if (message.method === "item/completed" && intent) this.store.tasks.observeGeneration(session.projectId, intent.taskId, { ...intent, sessionId: session.id, runtimeItemId: generation.id, failed: true });
+    }
+    if (stale || this.transitioning?.has(session.id)) return;
     if (
       message.method === "serverRequest/resolved" &&
       session.prompt?.requestId === params.requestId
@@ -573,16 +671,6 @@ export class AgentHub {
           `${activity.label}：${detail}`,
           message.method,
         );
-      if (
-        message.method === "item/completed" &&
-        item.type === "imageGeneration" &&
-        item.status === "completed"
-      ) {
-        const pending = this.importGenerated(session, item);
-        const list = this.imports.get(session.id) || [];
-        list.push(pending);
-        this.imports.set(session.id, list);
-      }
     }
     if (message.method === "turn/completed") {
       const endedTurn = params.turn.id;
@@ -664,7 +752,12 @@ export class AgentHub {
       );
     }
   }
-  private async importGenerated(session: Session, item: any) {
+  private async importGenerated(session: Session, item: any, intent?: TaskIntent & { referenceHashes?: string[] }) {
+    const messageId = session.messages.filter(message => message.role === "user").at(-1)?.id;
+    const stillCurrent = () => {
+      const task = intent ? this.store.tasks.get(session.projectId, intent.taskId) : undefined;
+      return session.messages.filter(message => message.role === "user").at(-1)?.id === messageId && (!intent || (session.workflowIntent?.taskId === intent.taskId && session.workflowIntent.intentVersion === intent.intentVersion && session.workflowIntent.barrierVersion === intent.barrierVersion && task?.intentVersion === intent.intentVersion && task.barrierVersion === intent.barrierVersion));
+    };
     try {
       const generated = await this.store.generated.capture(
         session.projectId,
@@ -672,17 +765,19 @@ export class AgentHub {
         item,
         this.interpolation(session)?.id,
       );
-      let msg = session.messages
+      if (intent) this.store.tasks.observeGeneration(session.projectId, intent.taskId, { ...intent, sessionId: session.id, runtimeItemId: item.id, generatedId: generated.id });
+      let msg = stillCurrent() ? session.messages
         .filter((message) => message.role === "assistant")
-        .at(-1);
+        .at(-1) : undefined;
       if (!msg) msg = this.assistant(session, `image-${item.id}`);
       msg.generatedIds ??= [];
       if (!msg.generatedIds.includes(generated.id))
         msg.generatedIds.push(generated.id);
       this.flush(session);
     } catch (error) {
-      session.error = `接收生成图片失败：${String(error)}`;
-      this.flush(session);
+      const reason = `接收生成图片失败：${String(error)}`;
+      if (stillCurrent()) session.error = reason;
+      this.diagnose(session, "runtime", reason, "workflow/generation-capture");
     }
   }
   private async requestInput(session: Session, request: Message): Promise<any> {
@@ -826,6 +921,7 @@ export class AgentHub {
     session: Session,
     draftId: string,
     revision: string,
+    guard: () => void = () => {},
   ): Promise<any> {
     const drafts = this.store.frameDrafts,
       pid = session.projectId;
@@ -893,6 +989,7 @@ export class AgentHub {
         sessionId: session.id,
         finish: resolve,
         timer,
+        guard,
       });
     });
     this.diagnose(
@@ -944,11 +1041,12 @@ export class AgentHub {
     this.frameSaves.delete(approvalId);
     clearTimeout(pending.timer);
     try {
-      const change = await this.store.frameDrafts.save(
+      pending.guard?.();
+      const change = await this.store.guarded(pending.guard || (() => {}), () => this.store.frameDrafts.save(
         session.projectId,
         approval.draftId,
         approval.documentRevision,
-      );
+      ));
       const result = { saved: true, change };
       this.diagnose(
         session,
@@ -971,8 +1069,109 @@ export class AgentHub {
       this.flush(session);
     }
   }
-  async stop(sessionId: string, reason = "任务已停止，待审批操作未执行") {
+  private frozenTaskApproval(pid: string, taskId: string, binding: { sessionId: string; approvalId: string }, expectedRevision: number, runtimeGuard = true) {
+    const task = this.store.tasks.get(pid, taskId), session = this.store.session(binding.sessionId), pending = this.toolWaits?.get(binding.approvalId), approval = session.toolApproval;
+    if (task.revision !== expectedRevision || task.sessionId !== session.id || session.projectId !== pid || session.taskId !== taskId || !pending || approval?.id !== binding.approvalId || approval.tool !== "save_image" || pending.intent?.taskId !== taskId || pending.taskRevision !== expectedRevision || pending.intent.intentVersion !== task.intentVersion || pending.intent.barrierVersion !== task.barrierVersion) throw new StudioError("任务或冻结工具审批已过期/不属于该会话", 409);
+    if (runtimeGuard && pending.claimed) throw new StudioError("该冻结审批已有决定正在提交", 409);
+    if (sha256(JSON.stringify(approval.arguments)) !== pending.argumentsHash || sha256(JSON.stringify(pending.frozenArguments)) !== pending.argumentsHash) throw new StudioError("冻结审批参数已改变", 409);
+    if (this.effectivePolicy("save_image", pending.frozenArguments) === "deny") throw new StudioError("权限已禁止保存图片", 409);
+    if (runtimeGuard) pending.validate();
+    return { task, session, pending, approval };
+  }
+  async taskAction(pid: string, taskId: string, input: z.infer<typeof taskActionSchema>) {
+    const { toolApproval, ...action } = taskActionSchema.parse(input);
+    let task = this.store.tasks.get(pid, taskId);
+    if (task.revision !== action.expectedRevision) throw new StudioError("VERSION_CONFLICT：任务已变化", 409);
+    if (toolApproval && action.action !== "save-location") throw new StudioError("该动作不能携带工具决定");
+    if (toolApproval) this.frozenTaskApproval(pid, taskId, toolApproval, action.expectedRevision);
+    if (action.action === "ready") {
+      const token = { intentVersion: task.intentVersion, barrierVersion: task.barrierVersion };
+      const guard = () => { const current = this.store.tasks.get(pid, taskId); if (current.intentVersion !== token.intentVersion || current.barrierVersion !== token.barrierVersion || current.status !== "running" || current.phase !== "production") throw new StudioError("制作意图已失效", 409); };
+      const checked = await this.store.quality.checkTask(pid, taskId, guard);
+      if (action.snapshotId && action.snapshotId !== checked.snapshot.id) throw new StudioError("需要当前确切交付快照", 409);
+      task = this.store.tasks.action(pid, taskId, { ...action, expectedRevision: checked.task.revision, snapshotId: checked.snapshot.id });
+    } else task = this.store.tasks.action(pid, taskId, action);
+    if (action.action === "save-location" && toolApproval) {
+      // The typed action, not a natural-language prefix, preserves direction.
+      this.toolEpochs ??= new Map(); this.toolEpochs.set(toolApproval.sessionId, (this.toolEpochs.get(toolApproval.sessionId) || 0) + 1);
+      this.resolveToolApproval(toolApproval.sessionId, toolApproval.approvalId, false, `仅修改保存位置；保留方向与生成产物，同generatedId、新requestId重提审批：${action.text}`);
+    }
+    if (["pause", "stop", "handoff", "feedback"].includes(action.action) && task.sessionId) await this.stop(task.sessionId, action.text || (action.action === "handoff" ? "人工接手，旧Agent意图已取消" : "任务屏障已改变，旧操作未执行"), true);
+    return this.store.tasks.get(pid, taskId);
+  }
+  async decideTaskDirection(pid: string, taskId: string, input: z.infer<typeof taskDirectionSchema>) {
+    const { toolApproval, ...direction } = taskDirectionSchema.parse(input);
+    let task = this.store.tasks.get(pid, taskId);
+    const session = task.sessionId ? this.store.session(task.sessionId) : undefined;
+    if (session && this.transitioning?.has(session.id)) throw new StudioError("方向决定正在阶段切换，请等待", 409);
+    const frozen = toolApproval ? this.frozenTaskApproval(pid, taskId, toolApproval, direction.expectedRevision) : undefined;
+    if (session?.toolApproval?.directionRequired && !frozen) throw new StudioError("请一次提交方向和同一冻结save_image审批", 409);
+    if (frozen && (direction.generatedId !== frozen.pending.frozenArguments.generatedId || direction.assetId || direction.snapshotId)) throw new StudioError("方向产物与冻结save_image参数不一致", 409);
+    this.store.tasks.decideDirection(pid, taskId, direction, true);
+    if (!direction.accept) {
+      task = this.store.tasks.decideDirection(pid, taskId, direction);
+      if (session) await this.stop(session.id, direction.feedback || "方向被拒绝，保留已有产物，不自动重新生成", true);
+      return task;
+    }
+    const wasActive = !!session && ["starting", "running"].includes(session.status);
+    if (frozen) frozen.pending.claimed = true;
+    const acceptedIntent = task.intentVersion, acceptedBarrier = task.barrierVersion;
+    const oldClient = session ? this.clients.get(session.id) : undefined;
+    let result: any;
+    if (session) {
+      this.transitioning ??= new Set(); this.transitioning.add(session.id);
+      this.toolEpochs ??= new Map(); this.toolEpochs.set(session.id, (this.toolEpochs.get(session.id) || 0) + 1);
+    }
+    try {
+      // No hot native tool toggle is proven. Retire direction runtime before
+      // committing its approved save or allowing any production continuation.
+      if (oldClient && session?.turnId && session.status === "running") {
+        try { await oldClient.request("turn/interrupt", { threadId: session.threadId, turnId: session.turnId }); }
+        catch { await oldClient.close(); }
+      }
+      if (frozen && toolApproval) this.frozenTaskApproval(pid, taskId, toolApproval, direction.expectedRevision, false);
+      this.store.tasks.decideDirection(pid, taskId, direction, true);
+      task = this.store.tasks.decideDirection(pid, taskId, direction);
+      if (session && frozen && toolApproval) {
+        const intent = { taskId, intentVersion: task.intentVersion, barrierVersion: task.barrierVersion };
+        const guard = () => { if (this.toolWaits.get(toolApproval.approvalId) !== frozen.pending || session.toolApproval?.id !== toolApproval.approvalId) throw new StudioError("冻结保存决定已取消", 409); precheckTaskTool(this.store, session, intent, "save_image", frozen.pending.frozenArguments); if (this.effectivePolicy("save_image", frozen.pending.frozenArguments) === "deny") throw new StudioError("权限已禁止保存图片", 409); };
+        try { result = await this.store.guarded(guard, () => this.executeTool(session.id, "save_image", frozen.pending.frozenArguments, guard, intent)); }
+        catch (error) { result = { isError: true, content: [textContent(JSON.stringify({ saved: false, directionAccepted: true, reason: String(error), generatedId: direction.generatedId, guidance: "方向已认可，修正保存位置后用同产物新requestId重提保存；不要重生成" }))] }; }
+        this.resolveToolApproval(session.id, toolApproval.approvalId, true, "方向与冻结工具请求已一次决定；实际保存结果见回执", result);
+      }
+    } catch (error) {
+      if (session) await this.stop(session.id, `阶段切换未完成：${String(error)}`, true);
+      throw error;
+    } finally {
+      if (session) {
+        this.clients.delete(session.id); this.tokens?.delete(session.id); this.clientGenerationModes?.delete(session.id);
+        await oldClient?.close();
+        this.transitioning?.delete(session.id);
+      }
+    }
+    if (session) {
+      if (session.turnId) { this.staleTurns ??= new Map(); const turns = this.staleTurns.get(session.id) || new Set<string>(); turns.add(session.turnId); this.staleTurns.set(session.id, turns); }
+      session.status = "idle"; session.error = undefined;
+      this.cancelFrameSave(session, "方向runtime已退出，制作阶段使用完整对象草稿");
+      if (session.prompt) this.prompts.get(session.prompt.id)?.({});
+      this.diagnose(session, "runtime", "受控阶段切换：方向已认可，旧runtime已退出；production禁用原生生成，任务尚未交付", "workflow/production");
+      task = this.store.tasks.get(pid, taskId);
+      if (wasActive && task.status === "running" && task.intentVersion === acceptedIntent && task.barrierVersion === acceptedBarrier) this.send(session.id, `方向已通过，继续已认可成果的确定性制作、检查与交付。禁止重新生成。冻结保存请求的真实结果：${JSON.stringify(result || { saved: false, reason: "本次方向决定不包含图片保存" })}。完整任务：${JSON.stringify(task)}`, [], randomUUID(), "方向通过，继续确定性制作", [], session.outputFolder, session.model, undefined, taskId);
+    }
+    return this.store.tasks.get(pid, taskId);
+  }
+  async stop(sessionId: string, reason = "任务已停止，待审批操作未执行", preserveTask = false) {
     const session = this.store.session(sessionId);
+    // Invalidate writes BEFORE waiting for runtime acknowledgement. Keep blocked
+    // callbacks pending until interrupt is acknowledged, preserving old safety.
+    this.transitioning ??= new Set(); this.transitioning.add(sessionId);
+    if (session.turnId) { this.staleTurns ??= new Map(); const turns = this.staleTurns.get(sessionId) || new Set<string>(); turns.add(session.turnId); this.staleTurns.set(sessionId, turns); }
+    this.toolEpochs ??= new Map();
+    this.toolEpochs.set(sessionId, (this.toolEpochs.get(sessionId) || 0) + 1);
+    if (session.taskId && !preserveTask) {
+      const task = this.store.tasks.get(session.projectId, session.taskId);
+      if (!["paused", "stopped", "accepted", "ready"].includes(task.status)) this.store.tasks.action(session.projectId, task.id, { expectedRevision: task.revision, action: "pause" });
+    }
     const client = this.clients.get(sessionId);
     const interruptedTurn = session.turnId;
     const interruptedMessage = session.messages
@@ -980,6 +1179,10 @@ export class AgentHub {
       .at(-1)?.id;
     // Interrupt the model before releasing blocked tool calls, so it cannot resume
     // reasoning from a timeout/cancellation result while still running.
+    if (client && session.status === "starting") {
+      if (this.clients.get(sessionId) === client) { this.clients.delete(sessionId); this.tokens?.delete(sessionId); this.clientGenerationModes?.delete(sessionId); }
+      await client.close();
+    }
     if (client && session.turnId && session.status === "running") {
       try {
         await client.request("turn/interrupt", {
@@ -994,8 +1197,10 @@ export class AgentHub {
       (session.turnId && session.turnId !== interruptedTurn) ||
       session.messages.filter((m) => m.role === "user").at(-1)?.id !==
         interruptedMessage
-    )
+    ) {
+      this.transitioning.delete(sessionId);
       return;
+    }
     session.status = "interrupted";
     session.error = reason;
     this.diagnose(session, "runtime", reason, "turn/interrupt");
@@ -1009,6 +1214,7 @@ export class AgentHub {
       job.error = "补帧已停止，没有自动重试。";
       this.store.interpolations.save(job);
     }
+    this.transitioning.delete(sessionId);
   }
   private fail(session: Session, error: unknown) {
     const client = this.clients.get(session.id);
@@ -1019,6 +1225,7 @@ export class AgentHub {
     this.cancelFrameSave(session, "任务失败，修改未保存");
     session.status = "failed";
     session.error = error instanceof Error ? error.message : String(error);
+    if (session.taskId) this.store.tasks.pauseForRuntime(session.projectId, session.taskId, session.error, session.error.includes("无法确认production"));
     this.diagnose(session, "runtime", session.error, "runtime/failure");
     if (session.prompt) this.prompts.get(session.prompt.id)?.({});
     for (const msg of session.messages)
@@ -1040,6 +1247,8 @@ export class AgentHub {
         session.toolApproval.id,
         false,
         reason,
+        undefined,
+        true,
       );
   }
   resolveToolApproval(
@@ -1047,11 +1256,18 @@ export class AgentHub {
     approvalId: string,
     accept: boolean,
     reason = "",
+    resolvedResult?: any,
+    internalCancel = false,
   ) {
     const session = this.store.session(sessionId);
     const pending = this.toolWaits?.get(approvalId);
     if (!pending || session.toolApproval?.id !== approvalId)
       throw new StudioError("审批已结束，请刷新", 409);
+    if (pending.claimed && resolvedResult === undefined && !internalCancel) throw new StudioError("该冻结审批已有决定正在提交", 409);
+    if (accept && resolvedResult === undefined) {
+      if (pending.directionRequired) throw new StudioError("需要一次明确的任务方向+工具决定，请使用任务direction入口", 409);
+      pending.validate();
+    }
     clearTimeout(pending.timer);
     this.toolWaits.delete(approvalId);
     session.toolApproval = undefined;
@@ -1062,18 +1278,27 @@ export class AgentHub {
     );
     pending.finish({
       accept,
+      result: resolvedResult,
       reason:
         reason || (accept ? "用户已允许" : "用户拒绝此次操作，请调整方案"),
     });
     return { accepted: accept };
   }
+  private effectivePolicy(name: PermissionTool, input: any) {
+    const policies = this.store.permissions.read(), values = [name, ...toolPolicyParents(name, input)].map(key => policies[key]);
+    return values.includes("deny") ? "deny" : values.includes("ask") ? "ask" : "allow";
+  }
   private async approveTool(
     session: Session,
     name: PermissionTool,
     input: any,
+    validate: () => void,
+    intent?: TaskIntent,
   ) {
-    const policy = this.store.permissions.read()[name];
-    if (policy === "allow") return { accept: true, reason: "" };
+    const policy = this.effectivePolicy(name, input);
+    const task = intent ? this.store.tasks.get(session.projectId, intent.taskId) : undefined;
+    const directionRequired = name === "save_image" && !!task && !this.store.tasks.directionCurrent(session.projectId, task);
+    if (policy === "allow" && !directionRequired) return { accept: true, reason: "", result: undefined as any };
     if (policy === "deny")
       return {
         accept: false,
@@ -1085,10 +1310,11 @@ export class AgentHub {
       id,
       tool: name,
       label: permissionTools.find((t) => t.name === name)!.label,
-      arguments: input,
+      arguments: structuredClone(input),
       createdAt: new Date().toISOString(),
+      taskId: task?.id, taskRevision: task?.revision, intentVersion: task?.intentVersion, barrierVersion: task?.barrierVersion, directionRequired,
     };
-    const result = new Promise<{ accept: boolean; reason: string }>(
+    const result = new Promise<{ accept: boolean; reason: string; result?: any }>(
       (finish) => {
         const timer = setTimeout(
           () => {
@@ -1096,7 +1322,10 @@ export class AgentHub {
           },
           23 * 60 * 60_000,
         );
-        this.toolWaits.set(id, { finish, timer });
+        this.toolWaits.set(id, { finish, timer, frozenArguments: structuredClone(input), argumentsHash: sha256(JSON.stringify(input)), intent, taskRevision: task?.revision, directionRequired, validate: () => {
+          validate();
+          if (session.toolApproval?.id !== id || sha256(JSON.stringify(session.toolApproval.arguments)) !== sha256(JSON.stringify(input))) throw new StudioError("冻结审批参数已改变", 409);
+        } });
       },
     );
     this.diagnose(
@@ -1114,7 +1343,15 @@ export class AgentHub {
     this.toolTails ??= new Map();
     this.toolEpochs ??= new Map();
     const args = structuredClone(input);
+    if (this.transitioning?.has(sessionId)) throw new StudioError("任务正在阶段切换或中断，操作未执行", 409);
+    const intent = captureTaskIntent(this.store, session);
+    precheckTaskTool(this.store, session, intent, name, args);
     const epoch = this.toolEpochs.get(sessionId) || 0;
+    const guard = () => {
+      if ((this.toolEpochs.get(sessionId) || 0) !== epoch || this.stopped || this.transitioning?.has(sessionId)) throw new StudioError("任务已取消，排队操作未执行", 409);
+      precheckTaskTool(this.store, session, intent, name, args);
+      if (this.effectivePolicy(name as PermissionTool, args) === "deny") throw new StudioError("权限已禁止此操作，结果未发布", 409);
+    };
     const previous = this.toolTails.get(sessionId);
     let release!: () => void;
     const tail = new Promise<void>((resolve) => {
@@ -1125,13 +1362,17 @@ export class AgentHub {
     try {
       if ((this.toolEpochs.get(sessionId) || 0) !== epoch)
         throw new StudioError("任务已取消，排队操作未执行", 409);
+      precheckTaskTool(this.store, session, intent, name, args);
       // Frame saves keep their existing image comparison and exact-revision approval.
       if (name !== "save_frame_draft") {
         const decision = await this.approveTool(
           session,
           name as PermissionTool,
           args,
+          guard,
+          intent,
         );
+        if (decision.result !== undefined) return decision.result;
         if (!decision.accept)
           return {
             isError: true,
@@ -1142,9 +1383,8 @@ export class AgentHub {
             ],
           };
       }
-      if ((this.toolEpochs.get(sessionId) || 0) !== epoch)
-        throw new StudioError("任务已取消，操作未执行", 409);
-      return await this.executeTool(sessionId, name, args);
+      guard();
+      return await this.store.guarded(guard, () => this.executeTool(sessionId, name, args, guard, intent));
     } catch (error) {
       this.diagnose(
         session,
@@ -1158,15 +1398,57 @@ export class AgentHub {
         this.toolTails.delete(sessionId);
     }
   }
-  private async executeTool(sessionId: string, name: string, input: any) {
+  private async executeTool(sessionId: string, name: string, input: any, guard: () => void = () => {}, intent?: TaskIntent) {
     const session = this.store.session(sessionId);
     const pid = session.projectId;
+    if (name === "create_clip_draft") {
+      const { expectedFromDocumentRevision, ...spec } = z.object({ clipId: z.string().uuid(), revision: z.string(), frameId: z.string().uuid().optional(), fromDraftId: z.string().uuid().optional(), expectedFromDocumentRevision: z.string().optional() }).strict().parse(input);
+      checkFromDraftRevision(this.store, pid, spec.fromDraftId, expectedFromDocumentRevision);
+      const source = session.editingContext?.mode === "draft" ? session.editingContext : intent ? this.store.tasks.get(pid, intent.taskId).target : undefined;
+      if (source?.mode === "draft" && source.clipId === spec.clipId && (source.draftId !== spec.fromDraftId || source.documentRevision !== expectedFromDocumentRevision)) throw new StudioError("需要从上下文确切正文显式派生完整草稿", 409);
+      guard();
+      const document = this.store.clipDrafts.create(pid, spec, "agent", session.id, intent ? { taskId: intent.taskId, intentVersion: intent.intentVersion } : undefined);
+      if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: document.documentId, kind: "clip" });
+      session.agentDraftId = document.documentId; this.flush(session);
+      return { content: [textContent(JSON.stringify(document))] };
+    }
+    if (name === "save_clip_draft") {
+      const spec = z.object({ draftId: z.string().uuid(), documentRevision: z.string() }).strict().parse(input);
+      const draft = this.store.clipDrafts.read(pid, spec.draftId).draft;
+      if (draft.sessionId !== session.id || draft.source !== "agent") throw new StudioError("草稿不属于当前Agent会话", 409);
+      if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: spec.draftId, kind: "clip" });
+      try {
+        const saved = await this.store.clipDrafts.save(pid, spec.draftId, spec.documentRevision, guard);
+        return { content: [textContent(JSON.stringify({ saved: true, ...saved }))] };
+      } catch (error) {
+        // Failed publication is still a real attempted repair. Renderer-backed
+        // draft checks cannot satisfy delivery, but do bound repeated no-progress.
+        if (intent && this.store.clipDrafts.read(pid, spec.draftId).draft.status === "editing") {
+          try { await this.store.quality.checkDraft(pid, intent.taskId, spec.draftId, spec.documentRevision, guard); } catch {}
+        }
+        throw error;
+      }
+    }
+    if (name === "workflow_task") {
+      const spec = z.object({ action: z.enum(["status", "check", "ready"]) }).strict().parse(input);
+      if (!intent) throw new StudioError("当前会话没有制作任务");
+      if (spec.action === "status") return { content: [textContent(JSON.stringify(this.store.tasks.get(pid, intent.taskId)))] };
+      const current = this.store.tasks.get(pid, intent.taskId);
+      if (current.phase !== "production" || current.status !== "running" || !this.store.tasks.directionCurrent(pid, current)) throw new StudioError("请先通过任务方向并恢复制作", 409);
+      const checked = await this.store.quality.checkTask(pid, intent.taskId, guard);
+      if (spec.action === "ready") {
+        guard(); checked.task = this.store.tasks.action(pid, intent.taskId, { expectedRevision: checked.task.revision, action: "ready", snapshotId: checked.snapshot.id });
+      }
+      return { content: [textContent(JSON.stringify({ ...checked, pendingHumanDynamicReview: true }))] };
+    }
     if (name === "get_schema")
       return {
         content: [
           textContent(
             JSON.stringify(
-              input.type === "frame-edit"
+              input.type === "clip-edit"
+                ? z.toJSONSchema(clipEditSchema)
+                : input.type === "frame-edit"
                 ? z.toJSONSchema(frameEditSchema)
                 : input.type === "clip"
                   ? z.toJSONSchema(clipDocumentSchema)
@@ -1215,10 +1497,15 @@ export class AgentHub {
         .max(16)
         .parse(input.documents);
       for (const doc of documents) {
-        if (this.store.frameDrafts.has(doc.documentId)) {
+        if (this.store.clipDrafts.has(pid, doc.documentId)) {
+          const draft = this.store.clipDrafts.read(pid, doc.documentId).draft;
+          if (draft.source !== "agent" || draft.sessionId !== sessionId) throw new StudioError("请显式派生当前会话的对象草稿，不能修改人工正文", 409);
+          if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: doc.documentId, kind: "clip" });
+        } else if (this.store.frameDrafts.has(doc.documentId)) {
           const draft = this.store.frameDrafts.get(pid, doc.documentId);
           if (draft.sessionId !== sessionId)
             throw new StudioError("请使用当前对话创建的单帧草稿");
+          if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: doc.documentId, kind: "frame" });
         } else {
           const asset = this.store.asset(pid, doc.documentId);
           if (asset.type === "clip") {
@@ -1272,6 +1559,7 @@ export class AgentHub {
         .parse(input);
       const asset = this.store.generated.save(pid, spec),
         generated = this.store.generated.record(pid, spec.generatedId);
+      if (intent) this.store.tasks.recordSavedImage(pid, intent.taskId, { sessionId, intentVersion: intent.intentVersion, barrierVersion: intent.barrierVersion, generatedId: generated.id, assetId: asset.id });
       if (generated.interpolationId && spec.type === "resource")
         this.store.interpolations.receive(
           pid,
@@ -1311,7 +1599,12 @@ export class AgentHub {
           textContent(
             JSON.stringify(
               (() => {
-                const clip = this.store.documents.createClip(pid, spec);
+                const clip = this.store.documents.createClip(pid, spec, intent ? { sessionId, ...intent } : undefined);
+                if (intent) {
+                  guard();
+                  const task = this.store.tasks.get(pid, intent.taskId);
+                  this.store.tasks.bindProducedClip(pid, intent.taskId, { expectedRevision: task.revision, sessionId, requestId: spec.requestId, clipId: clip.id, intentVersion: intent.intentVersion, barrierVersion: intent.barrierVersion });
+                }
                 return { ...clip, documentId: clip.id };
               })(),
             ),
@@ -1351,6 +1644,19 @@ export class AgentHub {
         ).toString("base64"),
       })),
     ];
+    if (name === "review_sequence") {
+      const spec = z.object({ action: z.enum(["list", "create", "update", "capture", "inspect", "archive"]), sequenceId: z.string().uuid().optional(), snapshotId: z.string().uuid().optional(), definition: z.record(z.string(), z.unknown()).optional(), expectedRevision: z.string().optional(), archived: z.boolean().optional() }).strict().parse(input);
+      if (spec.action === "list") return { content: [textContent(JSON.stringify(this.store.reviewSequences.list(pid)))] };
+      if (spec.action === "create") return { content: [textContent(JSON.stringify(this.store.reviewSequences.create(pid, spec.definition)))] };
+      if (!spec.sequenceId) throw new StudioError("需要sequenceId");
+      if (spec.action === "update") return { content: [textContent(JSON.stringify(this.store.reviewSequences.update(pid, spec.sequenceId, spec.definition)))] };
+      if (spec.action === "archive") return { content: [textContent(JSON.stringify(this.store.reviewSequences.archive(pid, spec.sequenceId, { expectedRevision: spec.expectedRevision, archived: spec.archived })))] };
+      if (spec.action === "capture") return { content: [textContent(JSON.stringify(this.store.reviewSequences.capture(pid, spec.sequenceId)))] };
+      const inspected = await this.store.reviewSequences.inspect(pid, spec.sequenceId, { snapshotId: spec.snapshotId });
+      guard();
+      for (const review of inspected.sequence.reviews) attach("reviewIds", review.id);
+      return { content: [textContent(JSON.stringify({ ...inspected.sequence, reviews: inspected.sequence.reviews.map(r => ({ ...r, files: undefined, hashes: undefined })), observation: "全部批次静态证据；时序仍unverified，不代表实际速度播放验收" })), ...inspected.sequence.reviews.flatMap(r => evidence(r).slice(1))] };
+    }
     if (name === "inspect_clip") {
       const spec = z
         .object({
@@ -1367,40 +1673,38 @@ export class AgentHub {
           "请提供快照或动画身份",
         )
         .parse(input);
-      if (spec.draftId) {
-        if (!spec.documentRevision)
-          throw new StudioError("检查草稿必须指定documentRevision");
-        const result = await this.store.frameDrafts.preview(
-          pid,
-          spec.draftId,
-          spec.documentRevision,
-        );
-        spec.snapshotId = result.preview.id;
-      }
+      const context = freezeEditingContext(this.store, pid, { ...spec, mode: spec.draftId ? "draft" : "saved" });
+      spec.snapshotId = context.snapshotId;
       const review = await this.store.animation.inspect(pid, spec);
+      guard();
+      let taskQuality;
+      if (intent && spec.draftId && this.store.tasks.get(pid, intent.taskId).phase === "production") {
+        const document = this.store.documents.read(pid, spec.draftId);
+        if (document.draft.source === "agent" && document.draft.sessionId === session.id && !document.draft.readOnly) {
+          this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: spec.draftId, kind: this.store.clipDrafts.has(pid, spec.draftId) ? "clip" : "frame" });
+          taskQuality = await this.store.quality.checkDraft(pid, intent.taskId, spec.draftId, spec.documentRevision!, guard);
+        }
+      }
       attach("reviewIds", review.id);
-      return { content: evidence(review) };
+      return { content: evidence({ ...review, ...(taskQuality ? { taskQuality } : {}) }) };
     }
     if (name === "create_frame_draft") {
-      return {
-        content: [
-          textContent(
-            JSON.stringify(
-              this.store.frameDrafts.create(pid, input, "agent", sessionId),
-            ),
-          ),
-        ],
-      };
+      const document = this.store.frameDrafts.create(pid, input, "agent", sessionId, intent ? { taskId: intent.taskId, intentVersion: intent.intentVersion } : undefined);
+      if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: document.documentId, kind: "frame" });
+      session.agentDraftId = document.documentId; this.flush(session);
+      return { content: [textContent(JSON.stringify(document))] };
     }
     if (name === "save_frame_draft") {
       const spec = z
         .object({ draftId: z.string().uuid(), documentRevision: z.string() })
         .strict()
         .parse(input);
+      if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: spec.draftId, kind: "frame" });
       const result = await this.requestFrameSave(
         session,
         spec.draftId,
         spec.documentRevision,
+        guard,
       );
       if (result.saved && result.change) attach("changeIds", result.change.id);
       return { content: [textContent(JSON.stringify(result))] };

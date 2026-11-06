@@ -24,7 +24,8 @@ export type ProductionContract = z.infer<typeof productionContractSchema>;
 export type GenerationAttempt = {
   id: string; intentVersion: number; status: "reserved" | "running" | "completed" | "failed" | "cancelled" | "unknown";
   generatedId?: string; assetId?: string; contentHash?: string; reason?: string; createdAt: string; updatedAt: string;
-  preflightVerified: false; unattendedAllowed: false;
+  preflightVerified: false; unattendedAllowed: false; runtimeItemId?: string;
+  referenceEvidence?: { expectedHashes: string[]; receivedHashes: string[]; verified: boolean };
 };
 export type DirectionDecision = {
   accept: boolean; feedback?: string; generatedId?: string; assetId?: string; snapshotId?: string;
@@ -38,7 +39,7 @@ export type QualityFinding = {
 export type QualityCheck = {
   id: string; kind: "static" | "temporal"; snapshotId: string; scope: QualityScope;
   status: "passed" | "suspect" | "failed" | "unverified"; findings: QualityFinding[]; createdAt: string;
-  dependencies?: string[];
+  dependencies?: string[]; draftId?: string; documentRevision?: string;
 };
 export type QualityCapabilities = {
   static: { verified: boolean; categories: string[] }; temporal: { verified: boolean; categories: string[] };
@@ -56,10 +57,12 @@ export type ProductionTask = {
   target?: EditingContext; referenceIds: string[]; contract: ProductionContract; attempts: GenerationAttempt[];
   direction?: DirectionDecision; directionHistory: DirectionDecision[]; findings: QualityFinding[]; checks: QualityCheck[];
   sessionId?: string; readySnapshotId?: string; acceptedSnapshotId?: string;
+  repairRounds?: { issueId: string; snapshotId: string; intentVersion: number; improved: boolean }[];
+  drafts?: { draftId: string; kind: "clip" | "frame"; intentVersion: number }[];
   acceptanceHistory: { snapshotId: string; intentVersion: number; createdAt: string }[];
   createdAt: string; updatedAt: string; error?: string;
 };
-export type ClipDraft = { id: string; projectId: string; clipId: string; baseSnapshotId: string; source: "human" | "agent"; sessionId?: string; status: "editing" | "saved" | "discarded"; createdAt: string };
+export type ClipDraft = { id: string; projectId: string; clipId: string; baseSnapshotId: string; source: "human" | "agent"; sessionId?: string; taskId?: string; intentVersion?: number; readOnly?: boolean; status: "editing" | "saved" | "discarded"; createdAt: string };
 export const clipEditSchema = z.object({
   schemaVersion: z.literal(1), type: z.literal("clip-edit"),
   frames: z.array(z.object({ id, imageId: id, durationUs: z.number().int().min(1000).max(60_000_000), transform: frameTransformSchema.optional() }).strict()).max(128),
@@ -71,6 +74,6 @@ export type ClipDraftPreview = { draft: ClipDraft; before: ClipSnapshot; preview
 export type ClipDraftSave = { draftId: string; clip: ClipAsset; beforeSnapshotId: string; afterSnapshotId: string };
 export const reviewSegmentSchema = z.object({ id, clipId: id, startFrameId: id.optional(), endFrameId: id.optional(), repeat: z.number().int().min(1).default(1), speed: z.number().positive().default(1) }).strict();
 export type ReviewSegment = z.infer<typeof reviewSegmentSchema>;
-export type ReviewSequenceDefinition = { id: string; projectId: string; revision: string; name: string; loop: boolean; segments: ReviewSegment[] };
+export type ReviewSequenceDefinition = { id: string; projectId: string; revision: string; name: string; loop: boolean; segments: ReviewSegment[]; archived?: boolean };
 export type ReviewSequenceSnapshot = { id: string; definitionId: string; definitionRevision: string; projectId: string; createdAt: string; snapshotId: string; dependencies: { clipId: string; snapshotId: string; revision: string }[]; segments: { segmentId: string; frameIds: string[] }[]; stale: boolean };
 export type { ClipFrame };

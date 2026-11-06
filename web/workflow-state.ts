@@ -1,5 +1,5 @@
 import type { ClipAsset, Asset, Session, FrameDraft, FrameTransform } from "../studio/model.ts";
-import { clipEditSchema, type ClipEdit, type ClipDraftDocument, type EditingContext, type ProductionTask } from "../studio/workflow-model.ts";
+import { clipEditSchema, type ClipEdit, type ClipDraftDocument, type EditingContext, type ProductionTask, type ReviewSequenceDefinition } from "../studio/workflow-model.ts";
 
 export const clipEdit = (clip: ClipAsset): ClipEdit => ({ schemaVersion: 1, type: "clip-edit", frames: structuredClone(clip.frames), loop: clip.loop, initialFps: clip.initialFps });
 export type EditorState = { present: ClipEdit; past: ClipEdit[]; future: ClipEdit[]; version: number };
@@ -141,6 +141,39 @@ export function assertConversation(tasks: ProductionTask[], selection: Conversat
 export function conversationDestination(tasks: ProductionTask[], selection: ConversationSelection) {
   assertConversation(tasks, selection);
   return { sessionId: selection.sessionId, taskId: selection.taskId || undefined, needsSession: !selection.sessionId };
+}
+
+export type TaskCreationScope = "selection" | "frame" | "whole";
+export function taskCreationTarget(context: EditingContext | undefined, scope: TaskCreationScope): EditingContext | undefined {
+  if (!context) return undefined;
+  if (!context.clipId) return { ...context };
+  const { frameId, startFrameId, endFrameId, ...whole } = context;
+  if (scope === "whole") return whole;
+  if (scope === "frame") {
+    if (!frameId) throw new Error("当前上下文没有帧实例，不能选择当前帧范围");
+    return { ...whole, frameId };
+  }
+  if (startFrameId || endFrameId) return { ...whole, ...(startFrameId ? {startFrameId} : {}), ...(endFrameId ? {endFrameId} : {}) };
+  return frameId ? { ...whole, frameId } : whole;
+}
+export function taskTargetSummary(target: EditingContext | undefined): string {
+  if (!target) return "未指定目标，任务需要先明确范围";
+  if (target.clipId) {
+    if (target.startFrameId || target.endFrameId) return `当前区间：${target.startFrameId || "首帧"} → ${target.endFrameId || "末帧"}（不扩大为整个动画）`;
+    if (target.frameId) return `当前帧实例：${target.frameId}（不是整个动画）`;
+    return `整个当前动画：${target.clipId}（无帧/区间限定）`;
+  }
+  return target.assetId ? `当前图片：${target.assetId}` : `固定快照：${target.snapshotId || target.draftId}`;
+}
+
+export type ArchivableReviewDefinition = ReviewSequenceDefinition & { archived?: boolean };
+export function assertReviewWritable(definition?: ArchivableReviewDefinition) {
+  if (definition?.archived) throw new Error("Review 已归档，不能编辑保存或捕获新快照；历史检查与播放仍可访问");
+}
+export function reviewArchivePayload(definition: ArchivableReviewDefinition | undefined, expectedRevision: string, dirty: boolean, archived: boolean) {
+  if (dirty) throw new Error("先保存或明确放弃未保存的定义修改，再归档/恢复；输入未改变");
+  if (!definition || definition.revision !== expectedRevision) throw new Error("Review 定义版本已变化，请核对后重试；输入未改变");
+  return { expectedRevision, archived };
 }
 
 export type ReviewIdentity = Pick<import("../studio/workflow-model.ts").ReviewSequenceSnapshot, "id" | "snapshotId" | "definitionId" | "projectId">;

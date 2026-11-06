@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { ClipAsset, ClipReview } from "../studio/model.ts";
-import type { ReviewSegment, ReviewSequenceDefinition, ReviewSequenceSnapshot } from "../studio/workflow-model.ts";
+import type { ReviewSegment, ReviewSequenceSnapshot } from "../studio/workflow-model.ts";
 import { api } from "./api.ts";
-import { reviewInspectionReducer, sameReviewIdentity, type ReviewInspection, type ReviewInspectionAction } from "./workflow-state.ts";
+import { setReviewArchived } from "./review-archive.ts";
+import { reviewInspectionReducer, sameReviewIdentity, assertReviewWritable, type ArchivableReviewDefinition, type ReviewInspection, type ReviewInspectionAction } from "./workflow-state.ts";
 
 type Evidence = ClipReview & {
   sequence: ReviewSequenceSnapshot & {
@@ -15,8 +16,9 @@ type Evidence = ClipReview & {
   };
 };
 
-export function ReviewSequences({ projectId, clips, definitions, onRefresh, onPlay }: {
-  projectId: string; clips: ClipAsset[]; definitions: ReviewSequenceDefinition[];
+export function ReviewSequences({ projectId, clips, definitions, onDefinition, onRefresh, onPlay }: {
+  projectId: string; clips: ClipAsset[]; definitions: ArchivableReviewDefinition[];
+  onDefinition: (definition: ArchivableReviewDefinition) => void;
   onRefresh: () => Promise<void>; onPlay: (id: string) => void;
 }) {
   const [id, setId] = useState(""), [name, setName] = useState("动作 Review");
@@ -58,6 +60,7 @@ export function ReviewSequences({ projectId, clips, definitions, onRefresh, onPl
   }
   const definition = definitions.find(definition => definition.id === id);
   const staleDefinition = !!definition && definition.revision !== revision;
+  const archived = definition?.archived === true;
   const selected = snapshots.find(snapshot => sameReviewIdentity(inspection.selected, snapshot));
   const evidence = selected && inspection.evidence && sameReviewIdentity(selected, inspection.evidence.sequence) ? inspection.evidence : null;
   const isStale = (snapshot: ReviewSequenceSnapshot) => snapshot.stale ||
@@ -68,22 +71,25 @@ export function ReviewSequences({ projectId, clips, definitions, onRefresh, onPl
     setDirty(true); setSegments(old => old.map((segment, i) => i === index ? { ...segment, ...patch } : segment));
   }
   async function save() {
-    inspectState({ type: "select", snapshot: null });
     await run("保存定义", async () => {
+      assertReviewWritable(definition);
+      inspectState({ type: "select", snapshot: null });
       const body = { name, loop, segments }, key = JSON.stringify(body);
       if (request.current.key !== key) request.current = { key, id: crypto.randomUUID() };
-      const next = await api<ReviewSequenceDefinition>(`/api/projects/${projectId}/review-sequences${id ? `/${id}` : ""}`, {
+      const next = await api<ArchivableReviewDefinition>(`/api/projects/${projectId}/review-sequences${id ? `/${id}` : ""}`, {
         method: id ? "PUT" : "POST",
         body: JSON.stringify(id ? { ...body, expectedRevision: revision } : { ...body, requestId: request.current.id }),
       });
       if (!mounted.current) return;
+      onDefinition(next);
       setId(next.id); setRevision(next.revision); setDirty(false);
       await onRefresh(); await loadSnapshots(next.id);
     });
   }
   async function capture() {
-    inspectState({ type: "select", snapshot: null });
     await run("捕获快照", async () => {
+      assertReviewWritable(definition);
+      inspectState({ type: "select", snapshot: null });
       const next = await api<ReviewSequenceSnapshot>(`/api/projects/${projectId}/review-sequences/${id}/capture`, { method: "POST", body: "{}" });
       if (!mounted.current) return;
       setSnapshots(old => [next, ...old.filter(snapshot => snapshot.id !== next.id)]);
@@ -91,6 +97,20 @@ export function ReviewSequences({ projectId, clips, definitions, onRefresh, onPl
       await loadSnapshots(id);
       if (mounted.current) onPlay(next.snapshotId);
     });
+  }
+  async function changeArchive(archivedValue: boolean) {
+    await run(archivedValue ? "归档定义" : "恢复定义", async () => {
+      const next = await setReviewArchived(projectId, definition, revision, dirty, archivedValue);
+      if (!mounted.current) return;
+      // Publish the acknowledged flag before refresh; an older list must not briefly enable capture.
+      onDefinition(next); setRevision(next.revision);
+      await onRefresh();
+    });
+  }
+  function discardDefinitionEdits() {
+    if (!definition || !dirty || !window.confirm("明确放弃当前未保存的 Review 定义修改，恢复已保存定义？历史快照不会删除。")) return;
+    setName(definition.name); setLoop(definition.loop); setSegments(structuredClone(definition.segments));
+    setRevision(definition.revision); setDirty(false); setError("");
   }
   async function inspect() {
     if (!selected) return;
@@ -109,9 +129,14 @@ export function ReviewSequences({ projectId, clips, definitions, onRefresh, onPl
     <h3>多动作 Review</h3>
     <p>仅播放明确选择的动画与区间；不按文件名推断组合。保存定义后捕获固定依赖快照。</p>
     <label>Review 定义<select value={id} disabled={!!busy} onChange={event => choose(event.target.value)}>
-      <option value="">新定义</option>{definitions.map(definition => <option key={definition.id} value={definition.id}>{definition.name}</option>)}
+      <option value="">新定义</option>{definitions.map(definition => <option key={definition.id} value={definition.id}>{definition.name}{definition.archived ? " · 已归档" : ""}</option>)}
     </select></label>
-    <fieldset disabled={!!busy}><legend>Review 定义编排（与动画草稿分开）</legend>
+    {id && <div className="review-archive">
+      <p role="status">{archived ? "已归档：定义只读，不能捕获新快照；历史快照、检查与播放仍可使用。" : "归档可恢复，不删除资源或历史快照；仍被活动任务要求时服务会拒绝归档。"}</p>
+      <button className="secondary" disabled={!!busy || !definition || dirty || staleDefinition} onClick={() => void changeArchive(!archived)}>{archived ? "恢复 Review 定义" : "归档 Review 定义"}</button>
+      {dirty && <><small>有未保存的定义修改，先保存或明确放弃，再归档/恢复。</small><button disabled={!!busy || !definition} onClick={discardDefinitionEdits}>明确放弃未保存定义修改</button></>}
+    </div>}
+    <fieldset disabled={!!busy || archived}><legend>Review 定义编排（与动画草稿分开）</legend>
       <label>名称<input value={name} maxLength={100} onChange={event => { setName(event.target.value); setDirty(true); }}/></label>
       <label><input type="checkbox" checked={loop} onChange={event => { setLoop(event.target.checked); setDirty(true); }}/>整个序列循环</label>
       {segments.map((segment, index) => {
@@ -133,8 +158,8 @@ export function ReviewSequences({ projectId, clips, definitions, onRefresh, onPl
       })}
       <div className="task-actions">
         <button disabled={!clips.length} onClick={() => { setSegments(old => [...old, { id: crypto.randomUUID(), clipId: clips[0]!.id, repeat: 1, speed: 1 }]); setDirty(true); }}>添加片段</button>
-        <button className="secondary" disabled={!!busy || !name.trim() || !segments.length || staleDefinition} onClick={() => void save()}>保存 Review 定义</button>
-        <button className="secondary" disabled={!!busy || !id || dirty || staleDefinition} onClick={() => void capture()}>捕获并播放固定快照</button>
+        <button className="secondary" disabled={!!busy || archived || !name.trim() || !segments.length || staleDefinition} onClick={() => void save()}>保存 Review 定义</button>
+        <button className="secondary" disabled={!!busy || archived || !id || dirty || staleDefinition} onClick={() => void capture()}>捕获并播放固定快照</button>
       </div>
     </fieldset>
     {staleDefinition && <p className="interpolation-warning">定义版本已变化。输入保留，请复制后重新选择此定义，不能静默覆盖。</p>}

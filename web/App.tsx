@@ -5,7 +5,7 @@ import { ClipWorkbench, type ClipEditorBridge } from "./ClipWorkbench.tsx";
 import { TaskCenter, QualityStatus } from "./TaskCenter.tsx";
 import { ReviewSequences } from "./ReviewSequences.tsx";
 import { SnapshotPlayer } from "./SnapshotPlayer.tsx";
-import { editingBlock, ordinaryConversation, taskConversation, assertConversation, conversationDestination, messageContinuation, type TaskContinuation, type ConversationSelection } from "./workflow-state.ts";
+import { editingBlock, ordinaryConversation, taskConversation, assertConversation, conversationDestination, messageContinuation, type TaskContinuation, type ArchivableReviewDefinition, type ConversationSelection } from "./workflow-state.ts";
 import type { EditingContext, ProductionTask, QualityCapabilities, ReviewSequenceDefinition } from "../studio/workflow-model.ts";
 import { PermissionSettings } from "./PermissionSettings.tsx";
 import { ToolApprovals } from "./ToolApprovals.tsx";
@@ -543,6 +543,13 @@ export function App() {
     if (task.projectId !== projectRef.current) return;
     setState(old => old ? {...old,tasks:[...(old.tasks || []).filter(item=>item.id!==task.id),task]} : old);
     selectConversation(taskConversation(task));
+  }
+  function publishReviewDefinition(definition: ArchivableReviewDefinition) {
+    setState(old => {
+      if (!old || old.project.id !== definition.projectId) return old;
+      const definitions = old.reviewSequences || [];
+      return {...old,reviewSequences:definitions.some(item=>item.id===definition.id) ? definitions.map(item=>item.id===definition.id?definition:item) : [...definitions,definition]};
+    });
   }
   async function deleteSession() {
     if (!session || active(session)) return;
@@ -1374,7 +1381,7 @@ export function App() {
             </div>
             <div className="checks-view" hidden={rightTab !== "checks"}>
               <QualityStatus capabilities={state?.qualityCapabilities}/>
-              <ReviewSequences key={projectId} projectId={projectId} clips={(state?.assets || []).filter((a): a is ClipAsset => a.type === "clip")} definitions={state?.reviewSequences || []} onRefresh={() => refreshRef.current()} onPlay={id => void playSnapshot(id)}/>
+              <ReviewSequences key={projectId} projectId={projectId} clips={(state?.assets || []).filter((a): a is ClipAsset => a.type === "clip")} definitions={state?.reviewSequences || []} onDefinition={publishReviewDefinition} onRefresh={() => refreshRef.current()} onPlay={id => void playSnapshot(id)}/>
               {clip && <details open><summary>单动画检查与旧修改历史</summary><AnimationPanel key={`${projectId}-${clip.id}`} projectId={projectId} clip={clip} disabled={!!blocker} assets={state?.assets || []} reviews={state?.reviews || []} focusReviewId={focusedReviewId} focusChangeId={focusedChangeId} changes={state?.frameChanges || []} onRefresh={() => refreshRef.current()} onReference={addClipReference} onFrame={(id, frame) => previewClip(id,frame,false)} onAdjust={() => setRightTab("properties")} onCompare={compareChange} onPreview={id => previewClip(id)}/></details>}
             </div>
             <div className="chat-header">
@@ -1448,7 +1455,7 @@ export function App() {
               </select>
             )}
             <div className="messages">
-              <TaskCenter key={projectId} projectId={projectId} tasks={state?.tasks || []} sessions={state?.sessions || []} assets={state?.assets || []} referenceIds={references} selectedTaskId={taskId} onSelect={chooseTask} onCreated={createdTask} onRefresh={() => refreshRef.current()} onHandoff={task => setHandoffs(old => ({...old,[task.id]:task.barrierVersion}))} stabilize={stableContext} onPlay={id => void playSnapshot(id)} onBrowse={setSelectedId}/>
+              <TaskCenter key={projectId} projectId={projectId} tasks={state?.tasks || []} sessions={state?.sessions || []} assets={state?.assets || []} referenceIds={references} context={useContext ? displayedContext || undefined : undefined} selectedTaskId={taskId} onSelect={chooseTask} onCreated={createdTask} onRefresh={() => refreshRef.current()} onHandoff={task => setHandoffs(old => ({...old,[task.id]:task.barrierVersion}))} stabilize={stableContext} onPlay={id => void playSnapshot(id)} onBrowse={setSelectedId}/>
 
               {!session?.messages.length && (
                 <div className="chat-empty">

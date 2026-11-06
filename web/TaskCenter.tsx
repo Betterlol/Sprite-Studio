@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api.ts";
-import { directionMaterial, directionPayload, taskFeedbackPayload, taskSaveApproval } from "./workflow-state.ts";
+import { directionMaterial, directionPayload, taskFeedbackPayload, taskSaveApproval, taskCreationTarget, taskTargetSummary, type TaskCreationScope } from "./workflow-state.ts";
 import { assetUrl, type Asset, type Session } from "../studio/model.ts";
 import type { EditingContext, ProductionTask, QualityCapabilities } from "../studio/workflow-model.ts";
 const phases = {direction:"方向确认",production:"制作中",delivery:"交付"};
@@ -9,13 +9,17 @@ const reasons = {direction:"等待方向决定",tool_approval:"等待工具审�
 export function QualityStatus({capabilities}:{capabilities?:QualityCapabilities}) {
   return <div className="quality-capabilities"><strong>检查能力边界</strong><p>静态检查：{capabilities?.static.verified ? capabilities.static.categories.join("、") || "可用" : "尚未验证"}。具体通过范围以快照证据为准。</p><p>动态时序：{capabilities?.temporal.verified ? `受控类别 ${capabilities.temporal.categories.join("、")}；仍需人工播放验收` : "未验证 · 待人工实际播放验收"}。</p><p>无人值守重生成不可用。{capabilities?.reason || "尚无已验证的生成调用前预算硬限制。"}</p></div>;
 }
-export function TaskCenter({projectId,tasks,sessions,assets,referenceIds,selectedTaskId,onSelect,onCreated,onRefresh,onHandoff,stabilize,onPlay,onBrowse}: {
-  projectId:string; tasks:ProductionTask[]; sessions:Session[]; assets:Asset[]; referenceIds:string[]; selectedTaskId:string;
+export function TaskCenter({projectId,tasks,sessions,assets,referenceIds,context:editingContext,selectedTaskId,onSelect,onCreated,onRefresh,onHandoff,stabilize,onPlay,onBrowse}: {
+  projectId:string; tasks:ProductionTask[]; sessions:Session[]; assets:Asset[]; referenceIds:string[]; context?:EditingContext; selectedTaskId:string;
   onSelect:(id:string)=>void; onCreated:(task:ProductionTask)=>void; onRefresh:()=>Promise<void>; onHandoff:(task:ProductionTask)=>void;
   stabilize:()=>Promise<EditingContext | undefined>; onPlay:(snapshotId:string)=>void; onBrowse:(id:string)=>void;
 }) {
   const [description,setDescription]=useState(""),[feedback,setFeedback]=useState<Record<string,string>>({}),[busy,setBusy]=useState(""),[errors,setErrors]=useState<Record<string,string>>({});
   const [feedbackKinds,setFeedbackKinds]=useState<Record<string,"local"|"direction">>({}),[locations,setLocations]=useState<Record<string,string>>({});
+  const [creationScope,setCreationScope]=useState<TaskCreationScope>("selection");
+  useEffect(()=>setCreationScope("selection"),[editingContext?.clipId,editingContext?.assetId]);
+  const invalidScope=creationScope==="frame" && !!editingContext?.clipId && !editingContext.frameId;
+  const scopePreview=invalidScope?undefined:taskCreationTarget(editingContext,creationScope);
   const request=useRef({key:"",id:crypto.randomUUID()}), mounted=useRef(true);
   useEffect(() => { mounted.current=true; return () => { mounted.current=false; }; },[]);
   const target=tasks.find(t=>t.id===selectedTaskId);
@@ -24,12 +28,12 @@ export function TaskCenter({projectId,tasks,sessions,assets,referenceIds,selecte
   async function run(key:string,action:()=>Promise<void>) { setBusy(key);setErrors(v=>({...v,[key]:""}));try{await action();}catch(error){setErrors(v=>({...v,[key]:(error as Error).message}));}finally{setBusy("");} }
   async function create() {
     await run("create",async()=>{
-      const context=await stabilize();
+      const context=taskCreationTarget(await stabilize(),creationScope);
       const key=JSON.stringify({description,target:context,referenceIds});
       if(request.current.key!==key)request.current={key,id:crypto.randomUUID()};
       const task=await api<ProductionTask>(`/api/projects/${projectId}/tasks`,{method:"POST",body:JSON.stringify({requestId:request.current.id,title:description.trim().slice(0,80),description:description.trim(),target:context,referenceIds})});
       if (!mounted.current) return;
-      onCreated(task);setDescription("");await onRefresh();
+      onCreated(task);setDescription("");setCreationScope("selection");await onRefresh();
     });
   }
   async function action(task:ProductionTask,action:string) {
@@ -54,7 +58,12 @@ export function TaskCenter({projectId,tasks,sessions,assets,referenceIds,selecte
     });
   }
   return <section className="task-center" aria-label="制作任务">
-    <details><summary>从当前目标创建制作任务</summary><label>制作描述<textarea aria-label="新任务描述" disabled={!!busy} value={description} onChange={e=>setDescription(e.target.value)} maxLength={2000}/></label><button className="secondary" disabled={!!busy || !description.trim()} onClick={()=>void create()}>用此目标创建任务</button>{errors.create&&<p role="alert">{errors.create}</p>}</details>
+    <details><summary>从明确目标范围创建制作任务</summary>
+      {editingContext?.clipId && <label>任务目标范围<select aria-label="新任务目标范围" disabled={!!busy} value={creationScope} onChange={event=>setCreationScope(event.target.value as TaskCreationScope)}><option value="selection">当前选择（有区间则保留区间）</option><option value="frame" disabled={!editingContext.frameId}>仅当前帧实例</option><option value="whole">整个动画（明确取消帧/区间限定）</option></select></label>}
+      <p className="context-chip">{invalidScope?"当前帧已不可解析，请明确重选任务范围":taskTargetSummary(scopePreview)}</p>
+      <label>制作描述<textarea aria-label="新任务描述" disabled={!!busy} value={description} onChange={e=>setDescription(e.target.value)} maxLength={2000}/></label>
+      <button className="secondary" disabled={!!busy || !description.trim() || invalidScope} onClick={()=>void create()}>按此明确范围创建任务</button>{errors.create&&<p role="alert">{errors.create}</p>}
+    </details>
     <label>正在讨论的任务（浏览素材不改任务目标）<select value={selectedTaskId} onChange={e=>onSelect(e.target.value)}><option value="">普通对话 · 不关联任务</option>{tasks.map(task=><option key={task.id} value={task.id}>{task.title} · {statuses[task.status]}</option>)}</select></label>
     <div className="task-list">{tasks.map(task => <button className="text-button" key={task.id} onClick={() => onSelect(task.id)}>{task.title} · {phases[task.phase]} / {statuses[task.status]}{task.waitReason ? ` · ${reasons[task.waitReason]}` : ""}</button>)}</div>
     {cards.map(task=>{

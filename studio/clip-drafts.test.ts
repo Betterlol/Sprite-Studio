@@ -107,3 +107,76 @@ test("empty animations and deletion of all frames are supported", async () => {
     await assert.rejects(drafts.save(pid, empty.documentId, empty.documentRevision), /外部修改/);
   } finally { store.worker.close(); }
 });
+
+test("creation rejects preexisting external clip, config and metadata changes", async () => {
+  const { store, pid, clip, drafts } = await fixture();
+  try {
+    writeFileSync(store.safePath(pid, clip.file! + ".config.json"), JSON.stringify({ schemaVersion: 1, type: "clip", frames: clip.frames, loop: clip.loop, initialFps: clip.initialFps || 12 }));
+    for (const path of [clip.file!, clip.file! + ".config.json", store.metaPath(pid, clip.id)]) {
+      const file = store.safePath(pid, path), original = readFileSync(file, "utf8"), changed = JSON.parse(original);
+      if (path.endsWith(".config.json")) changed.loop = !changed.loop;
+      else if (path.endsWith(".meta.json")) changed.name = "external";
+      else changed.frames = [];
+      writeFileSync(file, JSON.stringify(changed));
+      assert.throws(() => drafts.create(pid, { clipId: clip.id, revision: clip.revision }, "human"), /外部修改/);
+      assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), changed);
+      writeFileSync(file, original);
+    }
+    assert.ok(drafts.create(pid, { clipId: clip.id, revision: clip.revision }, "human"));
+  } finally { store.worker.close(); }
+});
+
+test("historical and discarded draft frame IDs stay reserved to their animation", async () => {
+  const { store, pid, image, clip, drafts } = await fixture(); let restored: ProjectStore | undefined;
+  try {
+    const oldId = crypto.randomUUID();
+    const other = store.createClip(pid, "other", [{ id: oldId, imageId: image.id, durationUs: 100000 }]);
+    store.animation.capture(pid, other.id);
+    store.updateClip(pid, other.id, { revision: other.revision, frames: [], loop: other.loop });
+    let doc = drafts.create(pid, { clipId: clip.id, revision: clip.revision }, "human");
+    assert.throws(() => update(drafts, pid, doc, v => { v.frames.push({ id: oldId, imageId: image.id, durationUs: 100000 }); }), /其他动画/);
+    const currentOther = store.animation.clip(pid, other.id);
+    let otherDoc = drafts.create(pid, { clipId: other.id, revision: currentOther.revision }, "human");
+    const addedId = crypto.randomUUID();
+    otherDoc = update(drafts, pid, otherDoc, v => { v.frames.push({ id: addedId, imageId: image.id, durationUs: 100000 }); });
+    otherDoc = update(drafts, pid, otherDoc, v => { v.frames = []; });
+    drafts.discard(pid, otherDoc.documentId, otherDoc.documentRevision);
+    restored = new ProjectStore(store.root);
+    const fresh = new ClipDrafts(restored); doc = fresh.read(pid, doc.documentId);
+    assert.throws(() => update(fresh, pid, doc, v => { v.frames.push({ id: addedId, imageId: image.id, durationUs: 100000 }); }), /其他动画/);
+  } finally { store.worker.close(); restored?.worker.close(); }
+});
+
+test("discard from another service during render prevents the final save", async () => {
+  const { store, pid, clip, drafts } = await fixture();
+  try {
+    let doc = drafts.create(pid, { clipId: clip.id, revision: clip.revision }, "human");
+    doc = update(drafts, pid, doc, v => { v.loop = false; });
+    const render = store.animation.renderFrame.bind(store.animation);
+    let release!: () => void, started!: () => void;
+    const waiting = new Promise<void>(r => { release = r; }), entered = new Promise<void>(r => { started = r; });
+    store.animation.renderFrame = async (...args) => { started(); await waiting; return render(...args); };
+    const pending = drafts.save(pid, doc.documentId, doc.documentRevision);
+    await entered;
+    new ClipDrafts(store).discard(pid, doc.documentId, doc.documentRevision);
+    release();
+    await assert.rejects(pending, /结束|改变/);
+    assert.equal(drafts.read(pid, doc.documentId).draft.status, "discarded");
+    assert.equal(store.animation.clip(pid, clip.id).revision, clip.revision);
+  } finally { store.worker.close(); }
+});
+
+test("new image dependencies freeze at write and reject subsequent pixel changes", async () => {
+  const { store, pid, clip, drafts, image } = await fixture();
+  try {
+    const added = await store.importImage(pid, "added.png", readFileSync(store.imagePath(pid, image.id)));
+    let doc = drafts.create(pid, { clipId: clip.id, revision: clip.revision }, "human");
+    doc = update(drafts, pid, doc, v => { v.frames.push({ id: crypto.randomUUID(), imageId: added.id, durationUs: 100000 }); });
+    const preview = await drafts.preview(pid, doc.documentId, doc.documentRevision);
+    assert.equal(preview.preview.images[added.id]!.contentHash, added.contentHash);
+    writeFileSync(store.imagePath(pid, added.id), "external pixel change");
+    await assert.rejects(drafts.preview(pid, doc.documentId, doc.documentRevision), /修改|变化/);
+    await assert.rejects(drafts.save(pid, doc.documentId, doc.documentRevision), /修改|变化/);
+    assert.equal(store.animation.clip(pid, clip.id).revision, clip.revision);
+  } finally { store.worker.close(); }
+});

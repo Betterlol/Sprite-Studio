@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { bytes, clipBody } from "./documents.ts";
 import { publishFiles } from "./file-operations.ts";
@@ -8,7 +9,7 @@ import { frameEditSchema, type ClipAsset, type ClipSnapshot, type RenderWarning 
 import { assetRevision, atomicJson, sha256, StudioError, type ProjectStore } from "./store.ts";
 import { clipEditSchema, type ClipDraft, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type ClipEdit } from "./workflow-model.ts";
 
-type RecordData = { draft: ClipDraft; text: string; documentRevision: string; images: ClipSnapshot["images"]; files: Record<string, string | null>; receipt?: ClipDraftSave };
+type RecordData = { draft: ClipDraft; text: string; documentRevision: string; images: ClipSnapshot["images"]; files: Record<string, string | null>; ownedFrameIds?: string[]; receipt?: ClipDraftSave };
 type CreateInput = { clipId: string; revision: string; frameId?: string; fromDraftId?: string };
 const createSchema = z.object({ clipId: z.string().uuid(), revision: z.string(), frameId: z.string().uuid().optional(), fromDraftId: z.string().uuid().optional() }).strict();
 const body = (clip: ClipAsset): ClipEdit => ({ schemaVersion: 1, type: "clip-edit", frames: structuredClone(clip.frames), loop: clip.loop, initialFps: clip.initialFps });
@@ -40,16 +41,49 @@ export class ClipDrafts {
     try { return clipEditSchema.parse(JSON.parse(text)); }
     catch (error) { throw new StudioError("无效动画草稿配置：" + String(error)); }
   }
+  private verifyFiles(pid: string, clip: ClipAsset) {
+    const read = (path: string) => JSON.parse(readFileSync(this.store.safePath(pid, path), "utf8"));
+    const clean = (value: unknown) => JSON.parse(JSON.stringify(value));
+    try {
+      const disk = read(clip.file!);
+      if (!isDeepStrictEqual(disk, clean(clipBody(clip)))) throw new Error("clip");
+      const configPath = this.store.safePath(pid, clip.file! + ".config.json");
+      if (existsSync(configPath) && !isDeepStrictEqual(read(clip.file! + ".config.json"), clean({ schemaVersion: 1, type: "clip", frames: clip.frames, loop: clip.loop, initialFps: clip.initialFps || 12 }))) throw new Error("config");
+      const metadata = read(this.store.metaPath(pid, clip.id));
+      const { frames, loop, origin, appliedInterpolationIds, appliedFrameChangeIds, revertedFrameChangeIds, ...compact } = clip;
+      if (!isDeepStrictEqual(metadata, clean(clip)) && !isDeepStrictEqual(metadata, clean(compact))) throw new Error("metadata");
+    } catch {
+      throw new StudioError("动画文件已被外部修改或与当前资源不一致", 409);
+    }
+  }
   private validate(pid: string, clipId: string, value: ClipEdit) {
     const ids = value.frames.map(f => f.id);
     if (new Set(ids).size !== ids.length) throw new StudioError("草稿中的帧实例不能重复");
-    const otherIds = new Set([...this.store.projects.keys()].flatMap(projectId => this.store.assets(projectId).flatMap(a => a.type === "clip" && (projectId !== pid || a.id !== clipId) ? a.frames.map(f => f.id) : [])));
+    const otherIds = new Set<string>();
+    const add = (projectId: string, owner: string, frames: { id: string }[]) => {
+      if (projectId !== pid || owner !== clipId) for (const frame of frames) otherIds.add(frame.id);
+    };
+    for (const projectId of this.store.projects.keys()) {
+      for (const asset of this.store.assets(projectId)) if (asset.type === "clip") add(projectId, asset.id, asset.frames);
+      const history = this.store.safePath(projectId, ".studio/history");
+      if (existsSync(history)) for (const name of readdirSync(history).filter(f => f.endsWith(".json"))) {
+        const asset = JSON.parse(readFileSync(join(history, name), "utf8"));
+        if (asset.type === "clip" && typeof asset.id === "string" && Array.isArray(asset.frames)) add(projectId, asset.id, asset.frames);
+      }
+      const folder = this.store.safePath(projectId, ".studio/clip-drafts");
+      if (existsSync(folder)) for (const name of readdirSync(folder).filter(f => /^[0-9a-f-]{36}\.json$/i.test(f))) {
+        const record = this.get(projectId, name.slice(0, -5));
+        const retained = record.ownedFrameIds ?? this.parse(record.text).frames.map(f => f.id);
+        add(projectId, record.draft.clipId, retained.map(id => ({ id })));
+      }
+    }
+    for (const snapshot of this.store.animation.snapshots.values()) add(snapshot.projectId, snapshot.clip.id, snapshot.clip.frames);
     if (ids.some(id => otherIds.has(id))) throw new StudioError("草稿引用了其他动画的帧实例");
     const images = value.frames.map(f => this.store.image(pid, f.imageId));
     if (images.some(i => i.frameCount !== 1) || new Set(images.map(i => `${i.width}x${i.height}`)).size > 1) throw new StudioError("动画帧需要相同画布的静态图片");
   }
   private check(pid: string, record: RecordData, revision: string) {
-    if (record.documentRevision !== revision) throw new StudioError("VERSION_CONFLICT：草稿已改变", 409);
+    if (record.documentRevision !== revision || record.draft.status !== "editing") throw new StudioError("VERSION_CONFLICT：草稿已改变或已结束", 409);
     const base = this.store.animation.snapshot(pid, record.draft.baseSnapshotId);
     this.store.animation.capture(pid, record.draft.clipId, base.clip.revision);
     for (const [path, hash] of Object.entries(record.files)) {
@@ -66,6 +100,7 @@ export class ClipDrafts {
   create(pid: string, input: CreateInput, source: "human" | "agent", sessionId?: string): ClipDraftDocument {
     const spec = createSchema.parse(input);
     if (source !== "human" && source !== "agent") throw new StudioError("无效草稿来源");
+    this.verifyFiles(pid, this.store.animation.clip(pid, spec.clipId));
     const base = this.store.animation.capture(pid, spec.clipId, spec.revision);
     if (spec.frameId && !base.clip.frames.some(f => f.id === spec.frameId)) throw new StudioError("帧不在目标动画中");
     if (!spec.fromDraftId) {
@@ -97,7 +132,7 @@ export class ClipDrafts {
       const file = this.store.safePath(pid, path);
       return [path, existsSync(file) ? sha256(readFileSync(file)) : null];
     }));
-    const record: RecordData = { draft, text, documentRevision: sha256(text), images, files };
+    const record: RecordData = { draft, text, documentRevision: sha256(text), images, files, ownedFrameIds: value.frames.map(f => f.id) };
     this.persist(record);
     return this.document(record);
   }
@@ -117,7 +152,7 @@ export class ClipDrafts {
     const captured = this.store.animation.captureClip(pid, { ...base.clip, frames: value.frames });
     const images = { ...record.images, ...Object.fromEntries(Object.entries(captured.images).filter(([key]) => !record.images[key])) };
     const text = bytes(value).toString();
-    const next = { ...record, images, text, documentRevision: sha256(text) };
+    const next = { ...record, images, text, documentRevision: sha256(text), ownedFrameIds: [...new Set([...(record.ownedFrameIds ?? this.parse(record.text).frames.map(f => f.id)), ...value.frames.map(f => f.id)])] };
     this.persist(next);
     return this.document(next);
   }
@@ -160,6 +195,7 @@ export class ClipDrafts {
       const saved: RecordData = { ...record, draft: { ...record.draft, status: "saved" }, receipt };
       beforeCommit?.();
       this.check(pid, this.get(pid, id), revision);
+      this.validate(pid, record.draft.clipId, value);
       publishFiles(this.store, pid, [
         { path: current.file! + ".config.json", bytes: bytes({ schemaVersion: 1, type: "clip", initialFps: next.initialFps, loop: next.loop, frames: next.frames }) },
         { path: current.file!, bytes: bytes(clipBody(next)) },

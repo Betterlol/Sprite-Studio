@@ -24,7 +24,8 @@ export type ProductionContract = z.infer<typeof productionContractSchema>;
 export type GenerationAttempt = {
   id: string; intentVersion: number; status: "reserved" | "running" | "completed" | "failed" | "cancelled" | "unknown";
   generatedId?: string; assetId?: string; contentHash?: string; reason?: string; createdAt: string; updatedAt: string;
-  preflightVerified: false; unattendedAllowed: false;
+  preflightVerified: false; unattendedAllowed: false; runtimeItemId?: string;
+  referenceEvidence?: { expectedHashes: string[]; receivedHashes: string[]; verified: boolean };
 };
 export type DirectionDecision = {
   accept: boolean; feedback?: string; generatedId?: string; assetId?: string; snapshotId?: string;
@@ -38,7 +39,7 @@ export type QualityFinding = {
 export type QualityCheck = {
   id: string; kind: "static" | "temporal"; snapshotId: string; scope: QualityScope;
   status: "passed" | "suspect" | "failed" | "unverified"; findings: QualityFinding[]; createdAt: string;
-  dependencies?: string[];
+  dependencies?: string[]; draftId?: string; documentRevision?: string;
 };
 export type QualityCapabilities = {
   static: { verified: boolean; categories: string[] }; temporal: { verified: boolean; categories: string[] };
@@ -56,6 +57,7 @@ export type ProductionTask = {
   target?: EditingContext; referenceIds: string[]; contract: ProductionContract; attempts: GenerationAttempt[];
   direction?: DirectionDecision; directionHistory: DirectionDecision[]; findings: QualityFinding[]; checks: QualityCheck[];
   sessionId?: string; readySnapshotId?: string; acceptedSnapshotId?: string;
+  repairRounds?: { issueId: string; snapshotId: string; intentVersion: number; improved: boolean }[];
   acceptanceHistory: { snapshotId: string; intentVersion: number; createdAt: string }[];
   createdAt: string; updatedAt: string; error?: string;
 };

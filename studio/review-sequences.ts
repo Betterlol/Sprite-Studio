@@ -226,6 +226,10 @@ export class ReviewSequences {
       return false;
     } catch { return true; }
   }
+  snapshotStale(pid: string, snapshotId: string): boolean | undefined {
+    const sequence = [...this.snapshots.values()].find(s => s.projectId === pid && s.snapshotId === snapshotId);
+    return sequence ? this.stale(sequence) : undefined;
+  }
   listSnapshots(pid: string, id: string): SequenceSnapshot[] {
     this.record(pid, id);
     return [...this.snapshots.values()].filter(s => s.projectId === pid && s.definitionId === id)

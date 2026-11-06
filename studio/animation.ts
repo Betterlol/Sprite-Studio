@@ -259,6 +259,14 @@ export class AnimationStore {
     return { ...ref, snapshotId: snapshot.id, name: snapshot.clip.name };
   }
   stale(review: ClipReview) {
+    const sequenceStale = this.store.reviewSequences?.snapshotStale(review.projectId, review.snapshotId);
+    if (sequenceStale !== undefined) return sequenceStale;
+    if (review.draftId && this.store.clipDrafts?.has(review.projectId, review.draftId)) {
+      try {
+        const document = this.store.clipDrafts.read(review.projectId, review.draftId);
+        return document.documentRevision !== review.documentRevision || document.draft.status !== "editing" || this.store.clipDrafts.freeze(review.projectId, review.draftId, document.documentRevision).id !== review.snapshotId;
+      } catch { return true; }
+    }
     try {
       const snapshot = this.snapshot(review.projectId, review.snapshotId);
       const draft = review.draftId

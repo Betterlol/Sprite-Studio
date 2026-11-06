@@ -504,6 +504,17 @@ export class ResourceLibrary {
           reason: "未完成的补帧任务仍需要所选资源",
         });
     }
+    for (const sequence of this.store.reviewSequences.list(pid)) {
+      if (sequence.segments.some(s => ids.has(s.clipId))) blockers.push({ name: sequence.name, reason: "Review定义仍引用所选动画" });
+    }
+    for (const task of this.store.tasks.list(pid)) {
+      const protectedIds = new Set([...task.referenceIds, ...task.contract.roleReferenceIds, task.target?.assetId, task.target?.clipId, task.contract.scope?.clipId, task.direction?.assetId, ...task.attempts.map(a => a.assetId), ...task.attempts.flatMap(a => a.generatedId ? this.store.generated.record(pid, a.generatedId).assetIds : [])]);
+      if ([...ids].some(id => protectedIds.has(id))) blockers.push({ name: task.title, reason: "制作任务仍持有所选资源引用" });
+    }
+    for (const draft of this.store.clipDrafts.list(pid)) {
+      const value = JSON.parse(this.store.clipDrafts.read(pid, draft.id).text);
+      if (ids.has(draft.clipId) || value.frames.some((f: { imageId: string }) => ids.has(f.imageId))) blockers.push({ name: "动画草稿", reason: "未结束的对象草稿仍引用所选资源" });
+    }
     return { selection, assetIds: [...ids], folders: chosen.folders, blockers };
   }
   trash(pid: string) {

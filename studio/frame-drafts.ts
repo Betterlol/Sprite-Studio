@@ -229,6 +229,7 @@ export class FrameDrafts {
     },
   ) {
     const draft = this.get(pid, input.documentId);
+    this.store.assertClipMutation(pid, draft.clipId);
     if (draft.status !== "editing")
       throw new StudioError(
         draft.mergedInto
@@ -322,6 +323,7 @@ export class FrameDrafts {
       throw new StudioError("草稿已改变，请重新提交保存", 409);
     if (old.status === "saved")
       return this.store.animation.change(pid, old.changeId!);
+    this.store.assertClipMutation(pid, old.clipId);
     if (old.status === "discarded") throw new StudioError("草稿已放弃", 409);
     const running = this.saving.get(id);
     if (running) return running;
@@ -363,6 +365,7 @@ export class FrameDrafts {
   }
   discard(pid: string, id: string, revision: string) {
     const draft = this.get(pid, id);
+    this.store.assertClipMutation(pid, draft.clipId);
     if (draft.status !== "editing" || draft.documentRevision !== revision)
       throw new StudioError("草稿状态已改变，请刷新", 409);
     return this.persist({ ...draft, status: "discarded" });

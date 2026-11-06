@@ -1,4 +1,9 @@
 import { ToolPermissions } from "./tool-permissions.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { ProductionTasks } from "./tasks.ts";
+import { ClipDrafts } from "./clip-drafts.ts";
+import { ReviewSequences } from "./review-sequences.ts";
+import { WorkflowQuality } from "./workflow-quality.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -78,6 +83,24 @@ export class ProjectStore extends EventEmitter {
   documents: ProjectDocuments;
   generated: GeneratedImages;
   frameDrafts: FrameDrafts;
+  clipDrafts: ClipDrafts;
+  reviewSequences: ReviewSequences;
+  tasks: ProductionTasks;
+  quality: WorkflowQuality;
+  private writeGuards = new AsyncLocalStorage<() => void>();
+  guarded<T>(guard: () => void, operation: () => T): T { return this.writeGuards.run(guard, operation); }
+  assertWriteAllowed() { this.writeGuards.getStore()?.(); }
+  assertHumanClipWrite(pid: string, clipId: string) {
+    const owner = this.tasks?.list(pid).find(task =>
+      (task.contract.scope?.clipId || task.target?.clipId) === clipId &&
+      ["running", "waiting"].includes(task.status) && task.sessionId &&
+      ["starting", "running"].includes(this.sessions.get(task.sessionId)?.status || ""));
+    if (owner) throw new StudioError("该动画有正在运行的制作任务，请先handoff人工接手再保存", 409);
+  }
+  assertClipMutation(pid: string, clipId: string) {
+    if (this.writeGuards.getStore()) this.assertWriteAllowed();
+    else this.assertHumanClipWrite(pid, clipId);
+  }
   permissions: ToolPermissions;
   metadataPaths = new Map<string, Map<string, string>>();
   resourceReaders = new Map<string, number>();
@@ -129,6 +152,10 @@ export class ProjectStore extends EventEmitter {
     this.documents = new ProjectDocuments(this);
     this.generated = new GeneratedImages(this);
     this.frameDrafts = new FrameDrafts(this);
+    this.clipDrafts = new ClipDrafts(this);
+    this.reviewSequences = new ReviewSequences(this);
+    this.tasks = new ProductionTasks(this);
+    this.quality = new WorkflowQuality(this);
   }
   project(id: string) {
     const project = this.projects.get(id);
@@ -261,6 +288,7 @@ export class ProjectStore extends EventEmitter {
     return path;
   }
   private saveAsset(projectId: string, asset: Asset) {
+    this.assertWriteAllowed();
     if (!asset.file) {
       const folder = this.library.destination(
         projectId,
@@ -358,6 +386,7 @@ export class ProjectStore extends EventEmitter {
       const temp = join(stage, "input" + extension);
       writeFileSync(temp, bytes);
       const info = await this.worker.run("inspect", { path: temp });
+      this.assertWriteAllowed();
       const id = randomUUID();
       const location = this.library.uniqueName(
         projectId,
@@ -579,6 +608,7 @@ export class ProjectStore extends EventEmitter {
     interpolationId?: string,
     frameChange?: { id: string; action: "apply" | "revert" },
   ) {
+    this.assertClipMutation(projectId, id);
     const old = this.asset(projectId, id);
     if (old.type !== "clip") throw new StudioError("请选择动画资源");
     const spec = clipSchema.parse(input);
@@ -668,6 +698,7 @@ export class ProjectStore extends EventEmitter {
   }
   deleteSession(id: string) {
     const session = this.session(id);
+    if (this.tasks.protectsSession(session.projectId, id)) throw new StudioError("制作任务仍绑定该会话，请先停止任务", 409);
     if (["starting", "running"].includes(session.status))
       throw new StudioError("请先停止任务，再删除对话", 409);
     unlinkSync(
@@ -717,6 +748,10 @@ export class ProjectStore extends EventEmitter {
       reviews: this.animation.listReviews(projectId),
       frameChanges: this.animation.listChanges(projectId),
       frameDrafts: this.frameDrafts.list(projectId),
+      clipDrafts: this.clipDrafts.list(projectId),
+      tasks: this.tasks.list(projectId),
+      reviewSequences: this.reviewSequences.list(projectId),
+      qualityCapabilities: this.quality.capabilities(),
       sessions: [...this.sessions.values()]
         .filter((session) => session.projectId === projectId)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),

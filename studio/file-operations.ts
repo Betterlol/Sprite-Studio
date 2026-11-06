@@ -60,6 +60,7 @@ export function publishFiles(
   writes: { path: string; bytes: Buffer }[],
   result: unknown,
 ) {
+  store.assertWriteAllowed();
   const prefix = `.studio/config-operations/${randomUUID()}`;
   mkdirSync(store.safePath(pid, prefix), { recursive: true });
   const directories = new Set<string>();

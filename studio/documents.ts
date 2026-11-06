@@ -65,6 +65,7 @@ export class ProjectDocuments {
     this.store = store;
   }
   read(pid: string, id: string): any {
+    if (this.store.clipDrafts?.has(pid, id)) return this.store.clipDrafts.read(pid, id);
     if (this.store.frameDrafts.has(id))
       return this.store.frameDrafts.read(pid, id);
     const asset = this.store.asset(pid, id);
@@ -94,6 +95,7 @@ export class ProjectDocuments {
     };
   }
   parse(pid: string, id: string, text: string) {
+    if (this.store.clipDrafts?.has(pid, id)) return this.store.clipDrafts.validateText(pid, id, text);
     if (this.store.frameDrafts.has(id)) {
       this.store.frameDrafts.get(pid, id);
       return this.store.frameDrafts.parse(text);
@@ -142,11 +144,22 @@ export class ProjectDocuments {
       new Set(documents.map((d) => d.documentId)).size !== documents.length
     )
       throw new StudioError("每次提交1至16份不同配置");
+    const stagedOwners = new Map<string, string>();
+    for (const input of documents) {
+      if (!this.store.clipDrafts?.has(pid, input.documentId)) continue;
+      const document = this.store.clipDrafts.read(pid, input.documentId), value = this.store.clipDrafts.validateText(pid, input.documentId, input.text);
+      for (const frame of value.frames) {
+        if (stagedOwners.has(frame.id) && stagedOwners.get(frame.id) !== document.draft.clipId) throw new StudioError("同一批配置不能把帧实例分配给不同动画");
+        stagedOwners.set(frame.id, document.draft.clipId);
+      }
+    }
     const writes = documents.flatMap((input) => {
+      if (this.store.clipDrafts?.has(pid, input.documentId)) return [this.store.clipDrafts.prepare(pid, input)];
       if (this.store.frameDrafts.has(input.documentId))
         return [this.store.frameDrafts.prepare(pid, input)];
       const asset = this.store.asset(pid, input.documentId);
       if (asset.type !== "clip") return [this.store.sheets.prepare(pid, input)];
+      this.store.assertClipMutation(pid, asset.id);
       const current = this.read(pid, asset.id);
       if (current.documentRevision !== input.expectedDocumentRevision)
         throw new StudioError(
@@ -181,11 +194,13 @@ export class ProjectDocuments {
       kind: "write-documents",
       documentIds: documents.map((d) => d.documentId),
     });
+    this.store.clipDrafts?.invalidateIndex(pid);
     return documents.map((d) => this.read(pid, d.documentId));
   }
   createClip(
     pid: string,
     input: { name: string; fps: number; folder?: string; requestId: string },
+    provenance?: { sessionId: string; taskId: string; intentVersion: number; barrierVersion: number },
   ) {
     z.string().uuid().parse(input.requestId);
     z.number().min(1).max(60).parse(input.fps);
@@ -240,7 +255,7 @@ export class ProjectDocuments {
             frames: [],
           }),
         },
-        { path: receiptPath, bytes: bytes({ id: asset.id, intent }) },
+        { path: receiptPath, bytes: bytes({ id: asset.id, intent, provenance }) },
       ],
       { kind: "create-clip", id: asset.id },
     );

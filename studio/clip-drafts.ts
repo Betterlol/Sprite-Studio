@@ -171,9 +171,36 @@ export class ClipDrafts {
     if (!existsSync(folder)) return [];
     return readdirSync(folder).filter(f => /^[0-9a-f-]{36}\.json$/i.test(f)).map(f => this.get(pid, f.slice(0, -5)).draft).filter(d => d.status === "editing").sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
+  has(pid: string, id: string) {
+    return z.string().uuid().safeParse(id).success && existsSync(this.store.safePath(pid, this.path(id)));
+  }
   read(pid: string, id: string): ClipDraftDocument { return this.document(this.get(pid, id)); }
+  freeze(pid: string, id: string, revision: string): ClipSnapshot {
+    const record = this.get(pid, id), base = this.check(pid, record, revision), value = this.parse(record.text);
+    this.validate(pid, record.draft.clipId, value);
+    return this.store.animation.captureClip(pid, { ...base.clip, frames: value.frames, loop: value.loop, initialFps: value.initialFps ?? 12, revision: sha256(JSON.stringify([base.id, revision])) }, record.images, true);
+  }
+  validateText(pid: string, id: string, text: string): ClipEdit {
+    const record = this.get(pid, id), value = this.parse(text);
+    this.validate(pid, record.draft.clipId, value);
+    return value;
+  }
+  prepare(pid: string, input: { documentId: string; expectedDocumentRevision: string; text: string }) {
+    const record = this.get(pid, input.documentId);
+    this.store.assertClipMutation(pid, record.draft.clipId);
+    if (this.saving.has(`${pid}/${input.documentId}`)) throw new StudioError("草稿正在保存", 409);
+    const base = this.check(pid, record, input.expectedDocumentRevision), value = this.parse(input.text);
+    this.validate(pid, record.draft.clipId, value);
+    const captured = this.store.animation.captureClip(pid, { ...base.clip, frames: value.frames });
+    const images = { ...record.images, ...Object.fromEntries(Object.entries(captured.images).filter(([key]) => !record.images[key])) };
+    const text = bytes(value).toString();
+    const next = { ...record, images, text, documentRevision: sha256(text), ownedFrameIds: [...new Set([...(record.ownedFrameIds ?? this.parse(record.text).frames.map(f => f.id)), ...value.frames.map(f => f.id)])] };
+    return { path: this.path(input.documentId), bytes: bytes(next) };
+  }
+  invalidateIndex(pid: string) { const index = ownershipIndexes.get(this.store)?.get(pid); if (index) index.drafts = undefined; }
   write(pid: string, id: string, input: { expectedDocumentRevision: string; text: string }): ClipDraftDocument {
     const record = this.get(pid, id);
+    this.store.assertClipMutation(pid, record.draft.clipId);
     if (record.draft.status !== "editing" || this.saving.has(`${pid}/${id}`)) throw new StudioError("草稿已结束或正在保存", 409);
     const base = this.check(pid, record, input.expectedDocumentRevision);
     const value = this.parse(input.text);
@@ -209,6 +236,7 @@ export class ClipDrafts {
     const old = this.get(pid, id);
     if (old.documentRevision !== revision) throw new StudioError("VERSION_CONFLICT：草稿已改变", 409);
     if (old.draft.status === "saved" && old.receipt) return structuredClone(old.receipt);
+    this.store.assertClipMutation(pid, old.draft.clipId);
     if (old.draft.status !== "editing") throw new StudioError("草稿已放弃", 409);
     const key = `${pid}/${id}`, running = this.saving.get(key);
     if (running) throw new StudioError("草稿正在保存，请稍后重试", 409);
@@ -224,6 +252,7 @@ export class ClipDrafts {
       const receipt: ClipDraftSave = JSON.parse(JSON.stringify({ draftId: id, clip: next, beforeSnapshotId: base.id, afterSnapshotId: after.id }));
       const saved: RecordData = { ...record, draft: { ...record.draft, status: "saved" }, receipt };
       beforeCommit?.();
+      this.store.assertClipMutation(pid, record.draft.clipId);
       this.check(pid, this.get(pid, id), revision);
       this.validate(pid, record.draft.clipId, value);
       publishFiles(this.store, pid, [
@@ -242,6 +271,7 @@ export class ClipDrafts {
   }
   discard(pid: string, id: string, revision: string): ClipDraftDocument {
     const record = this.get(pid, id);
+    this.store.assertClipMutation(pid, record.draft.clipId);
     if (record.draft.status !== "editing" || record.documentRevision !== revision || this.saving.has(`${pid}/${id}`)) throw new StudioError("草稿状态已改变，请刷新", 409);
     record.draft.status = "discarded";
     this.persist(record);

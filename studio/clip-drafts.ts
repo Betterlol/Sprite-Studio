@@ -57,10 +57,17 @@ export class ClipDrafts {
     const clean = (value: unknown) => JSON.parse(JSON.stringify(value));
     try {
       const disk = read(clip.file!);
-      if (!isDeepStrictEqual(disk, clean(clipBody(clip)))) throw new Error("clip");
+      const expectedBody = clean(clipBody(clip));
+      // The pre-FPS clip writer omitted initialFps entirely.
+      if (!("initialFps" in disk) && clip.initialFps === undefined) delete expectedBody.initialFps;
+      if (!isDeepStrictEqual(disk, expectedBody)) throw new Error("clip");
       const configPath = this.store.safePath(pid, clip.file! + ".config.json");
       if (existsSync(configPath) && !isDeepStrictEqual(read(clip.file! + ".config.json"), clean({ schemaVersion: 1, type: "clip", frames: clip.frames, loop: clip.loop, initialFps: clip.initialFps || 12 }))) throw new Error("config");
       const metadata = read(this.store.metaPath(pid, clip.id));
+      // loadAssets supplies the directory and the conventional legacy path only
+      // when absent; explicit values still have to match the loaded resource.
+      if (!("folder" in metadata)) metadata.folder = clip.folder;
+      if (!("file" in metadata)) metadata.file = `Assets${clip.folder ? "/" + clip.folder : ""}/${clip.id}.clip.json`;
       const { frames, loop, origin, appliedInterpolationIds, appliedFrameChangeIds, revertedFrameChangeIds, ...compact } = clip;
       if (!isDeepStrictEqual(metadata, clean(clip)) && !isDeepStrictEqual(metadata, clean(compact))) throw new Error("metadata");
     } catch {

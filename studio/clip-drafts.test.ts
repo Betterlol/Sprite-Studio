@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -126,6 +126,35 @@ test("creation rejects preexisting external clip, config and metadata changes", 
   } finally { store.worker.close(); }
 });
 
+test("legacy metadata defaults and pre-FPS clips load without trusting explicit wrong paths", async () => {
+  const { store, pid, clip } = await fixture(); let restored: ProjectStore | undefined;
+  try {
+    const metaPath = store.safePath(pid, store.metaPath(pid, clip.id));
+    const metadata = JSON.parse(readFileSync(metaPath, "utf8"));
+    delete metadata.file; delete metadata.folder; delete metadata.initialFps;
+    writeFileSync(metaPath, JSON.stringify(metadata));
+    const oldPath = store.safePath(pid, clip.file!);
+    const legacyPath = store.safePath(pid, `Assets/${clip.folder}/${clip.id}.clip.json`);
+    const raw = JSON.parse(readFileSync(oldPath, "utf8")); delete raw.initialFps;
+    writeFileSync(oldPath, JSON.stringify(raw)); renameSync(oldPath, legacyPath);
+    restored = new ProjectStore(store.root);
+    const loaded = restored.animation.clip(pid, clip.id), drafts = new ClipDrafts(restored);
+    assert.equal(loaded.file, `Assets/${clip.folder}/${clip.id}.clip.json`);
+    const doc = drafts.create(pid, { clipId: clip.id, revision: loaded.revision }, "human");
+    assert.equal((await drafts.preview(pid, doc.documentId, doc.documentRevision)).preview.clip.frames.length, 3);
+    const bad = { ...metadata, file: `Assets/${clip.folder}/wrong.clip.json` };
+    writeFileSync(metaPath, JSON.stringify(bad));
+    assert.throws(() => drafts.create(pid, { clipId: clip.id, revision: loaded.revision }, "human"), /外部修改/);
+    assert.deepEqual(JSON.parse(readFileSync(metaPath, "utf8")), bad);
+    writeFileSync(metaPath, JSON.stringify({ ...metadata, folder: "wrong" }));
+    assert.throws(() => drafts.create(pid, { clipId: clip.id, revision: loaded.revision }, "human"), /外部修改/);
+    writeFileSync(metaPath, JSON.stringify(metadata));
+    const resumed = drafts.create(pid, { clipId: clip.id, revision: loaded.revision }, "human");
+    assert.equal(resumed.documentId, doc.documentId);
+    assert.equal((await drafts.save(pid, doc.documentId, doc.documentRevision)).clip.frames.length, 3);
+  } finally { store.worker.close(); restored?.worker.close(); }
+});
+
 test("historical and discarded draft frame IDs stay reserved to their animation", async () => {
   const { store, pid, image, clip, drafts } = await fixture(); let restored: ProjectStore | undefined;
   try {
@@ -176,6 +205,8 @@ test("identity index updates across service instances after in-place draft write
     b = update(peer, pid, b, v => { v.frames.push({ id: reserved, imageId: image.id, durationUs: 100000 }); });
     assert.throws(() => update(drafts, pid, a, v => { v.frames.push({ id: reserved, imageId: image.id, durationUs: 100000 }); }), /其他动画/);
     b = update(peer, pid, b, v => { v.frames = []; });
+    assert.throws(() => update(drafts, pid, a, v => { v.frames.push({ id: reserved, imageId: image.id, durationUs: 100000 }); }), /其他动画/);
+    peer.discard(pid, b.documentId, b.documentRevision);
     assert.throws(() => update(drafts, pid, a, v => { v.frames.push({ id: reserved, imageId: image.id, durationUs: 100000 }); }), /其他动画/);
   } finally { store.worker.close(); }
 });

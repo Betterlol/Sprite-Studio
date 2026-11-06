@@ -1,9 +1,11 @@
+import { MessageRecoveries } from "./MessageRecoveries.tsx";
+import { sendMessageAttempt, postMessageInput, messageRecoveries, clearSubmittedComposer, restoreMessageInput, dismissMessageRecovery, MessageAttemptError, type MessageRecovery, type MessageInput, type ComposerInput } from "./message-recovery.ts";
 import { createPortal } from "react-dom";
 import { ClipWorkbench, type ClipEditorBridge } from "./ClipWorkbench.tsx";
 import { TaskCenter, QualityStatus } from "./TaskCenter.tsx";
 import { ReviewSequences } from "./ReviewSequences.tsx";
 import { SnapshotPlayer } from "./SnapshotPlayer.tsx";
-import { editingBlock, ordinaryConversation, taskConversation, assertConversation, conversationDestination, type ConversationSelection } from "./workflow-state.ts";
+import { editingBlock, ordinaryConversation, taskConversation, assertConversation, conversationDestination, messageContinuation, type TaskContinuation, type ConversationSelection } from "./workflow-state.ts";
 import type { EditingContext, ProductionTask, QualityCapabilities, ReviewSequenceDefinition } from "../studio/workflow-model.ts";
 import { PermissionSettings } from "./PermissionSettings.tsx";
 import { ToolApprovals } from "./ToolApprovals.tsx";
@@ -13,7 +15,7 @@ import { FrameSaveApprovals } from "./FrameSaveApprovals.tsx";
 import { GeneratedPreview } from "./GeneratedPreview.tsx";
 import type { GeneratedImageInfo } from "../studio/generated.ts";
 import type { SheetRecipe } from "../studio/sheet-schema.ts";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InterpolationPanel } from "./InterpolationPanel.tsx";
 import { NewClipDialog } from "./NewClipDialog.tsx";
 import { AnimationPanel } from "./AnimationPanel.tsx";
@@ -231,6 +233,17 @@ export function App() {
   const [propertiesHost, setPropertiesHost] = useState<HTMLDivElement | null>(null);
   const [context, setContext] = useState<EditingContext | null>(null);
   const [useContext, setUseContext] = useState(true), [shareDraft, setShareDraft] = useState(false);
+  const [restoredMessage, setRestoredMessage] = useState<MessageRecovery | null>(null);
+  const [taskContinuation, setTaskContinuation] = useState<TaskContinuation>("none");
+  const [recoveryVersion, setRecoveryVersion] = useState(0);
+  const activeMessageRequest = useRef("");
+  const composerInput = useRef<ComposerInput>({text:draft,assetIds:references,clipReferences});
+  const displayedContext = restoredMessage ? restoredMessage.input.context : context;
+  composerInput.current = {text:draft,assetIds:references,clipReferences,context:useContext?displayedContext || undefined:undefined,taskId:taskId || undefined,model:agentModel,outputFolder:restoredMessage?.input.outputFolder ?? folder,feedbackKind:taskContinuation === "none"?undefined:taskContinuation,recoverySourceId:restoredMessage?.requestId};
+  const recoveries = useMemo(() => messageRecoveries(localStorage,projectId,sessionId),[projectId,sessionId,recoveryVersion]);
+  const selectedTask = state?.tasks?.find(task => task.id === taskId);
+  const continuationClipId = useContext && displayedContext?.clipId && displayedContext.clipId === (selectedTask?.target?.clipId || selectedTask?.contract.scope?.clipId) ? displayedContext.clipId : "";
+  useEffect(() => { if (!continuationClipId && !restoredMessage) setTaskContinuation("none"); }, [continuationClipId, restoredMessage?.requestId]);
   const [handoffs, setHandoffs] = useState<Record<string, number>>({});
   const [fixedSnapshot, setFixedSnapshot] = useState<ClipSnapshot | null>(null);
   const [sending, setSending] = useState(false);
@@ -243,6 +256,19 @@ export function App() {
   async function stableContext(): Promise<EditingContext | undefined> {
     if (!useContext) return undefined;
     const bridge = editorBridge.current;
+    if (restoredMessage) {
+      const original = restoredMessage.input.context;
+      if (original?.mode === "draft") {
+        if (!shareDraft) throw new Error("请明确勾选将恢复记录中的人工草稿作为助手输入");
+        if (!restoredMessage.contextFrozen) {
+          if (!bridge || bridge.clipId !== original.clipId || selectedId !== original.clipId) throw new Error("此恢复上下文尚未稳定，请先返回原动画草稿，或明确改用当前工作对象");
+          const stable = await bridge.stabilize();
+          if (original.draftId && stable.draftId !== original.draftId) throw new Error("原草稿已切换，请明确选择新的上下文；没有自动替换恢复记录中的目标");
+          return {...stable,frameId:original.frameId,startFrameId:original.startFrameId,endFrameId:original.endFrameId};
+        }
+      }
+      return original;
+    }
     if (context?.mode === "draft" && !shareDraft) throw new Error("当前为人工动画草稿，请明确勾选将我的未保存草稿交给助手，或移除上下文后发送。");
     if (bridge && bridge.clipId === selectedId) return bridge.stabilize();
     if (context?.mode === "draft") throw new Error("请返回草稿工作对象，等待精确版本暂存后再发送；固定快照播放不会替代草稿上下文。");
@@ -488,7 +514,7 @@ export function App() {
     }
   }
   function chooseProject(id: string) {
-    conversationEpoch.current++; setConversation({taskId:"",sessionId:""}); setHandoffs({}); setContext(null); setShareDraft(false); setFixedSnapshot(null);
+    conversationEpoch.current++; setConversation({taskId:"",sessionId:""}); setRestoredMessage(null); setTaskContinuation("none"); setHandoffs({}); setContext(null); setShareDraft(false); setFixedSnapshot(null);
     setComparison(null);
     setClipReferences([]);
     projectRef.current = id;
@@ -500,6 +526,7 @@ export function App() {
   function selectConversation(next: ConversationSelection) {
     conversationEpoch.current++;
     setConversation(next);
+    setRestoredMessage(null); setTaskContinuation("none"); setShareDraft(false);
     setDraft(localStorage.getItem(`studio.draft.${projectId}.${next.sessionId}`) || "");
     setReferences([]); setClipReferences([]); setPromptAnswers({});
   }
@@ -635,54 +662,69 @@ export function App() {
       notify(`已导入 ${files.length} 张图片`);
     });
   }
+  function restoreMessage(record: MessageRecovery) {
+    if (record.projectId !== projectRef.current || record.sessionId !== sessionId || activeMessageRequest.current === record.requestId) return;
+    const input = restoreMessageInput(record,composerInput.current);
+    if (!input) { notify("当前已有新输入，不会覆盖；原消息及引用仍保留在恢复记录中",true); return; }
+    conversationEpoch.current++;
+    setConversation({taskId:input.taskId || "",sessionId:record.sessionId});
+    setDraft(input.text); setReferences(input.assetIds); setClipReferences(input.clipReferences);
+    setAgentModel(input.model); setRestoredMessage(record); setUseContext(!!input.context);
+    setShareDraft(record.contextFrozen && input.context?.mode === "draft");
+    setTaskContinuation(input.feedbackKind || "none");
+    notify("已恢复完整草稿，没有发送；未确认的原请求可能已经发送，请先核对对话");
+  }
+  function dismissRecovery(record: MessageRecovery) {
+    if (activeMessageRequest.current === record.requestId || !window.confirm("移除此本地恢复记录？不会撤回任何可能已发送的消息，当前输入也不会改变。")) return;
+    dismissMessageRecovery(localStorage,record); setRecoveryVersion(version=>version+1);
+  }
   async function sendMessage() {
     if (!draft.trim() || agentBusy || sendingRef.current) return;
     sendingRef.current = true; setSending(true);
-    const text = draft.trim(),
-      attached = [...references],
-      attachedClips = [...clipReferences],
-      originalProject = projectId;
-    const submittedSelection = conversation, submittedEpoch = conversationEpoch.current;
+    const originalProject = projectId, submittedSelection = conversation, submittedEpoch = conversationEpoch.current;
+    const requestId = crypto.randomUUID(), sourceRecovery = restoredMessage;
+    const input: MessageInput = {
+      text:draft, assetIds:[...references], clipReferences:structuredClone(clipReferences),
+      context:useContext ? displayedContext || undefined : undefined,
+      taskId:submittedSelection.taskId || undefined,
+      feedbackKind:taskContinuation === "none" ? undefined : taskContinuation,
+      model:agentModel, outputFolder:sourceRecovery?.input.outputFolder ?? folder,
+    };
+    activeMessageRequest.current = requestId;
     try {
-      const destination = conversationDestination(latestTasks.current, submittedSelection);
-      const frozenContext = await stableContext();
-      if (projectRef.current !== originalProject || submittedEpoch !== conversationEpoch.current) throw new Error("工程或对话已切换，消息未发送");
-      const target = destination.needsSession ? await makeSession(submittedEpoch) : {id:destination.sessionId};
-      if (projectRef.current !== originalProject || submittedEpoch !== conversationEpoch.current) throw new Error("工程或对话已切换，消息未发送");
-      assertConversation(latestTasks.current,{taskId:submittedSelection.taskId,sessionId:target.id});
-      setDraft(old => old.trim() === text ? "" : old);
-      setReferences(old => old.filter(id => !attached.includes(id)));
-      setClipReferences(old => old.filter(ref => !attachedClips.some(item => item.clipId === ref.clipId)));
-      const updated = await api<Session>(
-        `/api/sessions/${target.id}/messages`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            text,
-            context: frozenContext,
-            taskId: submittedSelection.taskId || undefined,
-            model: agentModel,
-            assetIds: attached,
-            outputFolder: folder,
-            clipReferences: attachedClips,
-            requestId: crypto.randomUUID(),
-          }),
+      const updated = await sendMessageAttempt<Session>({
+        store:localStorage, projectId:originalProject, sessionId:submittedSelection.sessionId, requestId, input,
+        recoveredFrom:sourceRecovery || undefined, initialContextFrozen:sourceRecovery?.contextFrozen,
+        onChange:()=>setRecoveryVersion(version=>version+1),
+        prepare:async()=>{
+          const destination = conversationDestination(latestTasks.current,submittedSelection);
+          const frozenContext = await stableContext();
+          if (projectRef.current !== originalProject || submittedEpoch !== conversationEpoch.current) throw new Error("工程或对话已切换，消息接口尚未提交");
+          const target = destination.needsSession ? await makeSession(submittedEpoch) : {id:destination.sessionId};
+          if (projectRef.current !== originalProject || submittedEpoch !== conversationEpoch.current) throw new Error("工程或对话已切换，消息接口尚未提交");
+          assertConversation(latestTasks.current,{taskId:submittedSelection.taskId,sessionId:target.id});
+          const kind = messageContinuation(latestTasks.current.find(task=>task.id===submittedSelection.taskId),frozenContext,taskContinuation);
+          return {sessionId:target.id,input:{...input,context:frozenContext,feedbackKind:kind}};
         },
-      );
-      if (projectRef.current === originalProject)
-        setState((old) =>
-          old
-            ? { ...old, sessions: mergeSessions(old.sessions, [updated]) }
-            : old,
-        );
+        onPrepared:record=>{
+          if (projectRef.current !== originalProject || submittedEpoch !== conversationEpoch.current) throw new Error("工程或对话已切换，消息接口尚未提交");
+          const current = composerInput.current, cleared = clearSubmittedComposer(current,{...record.input,recoverySourceId:sourceRecovery?.requestId});
+          if (cleared !== current) {
+            setDraft(cleared.text); setReferences(cleared.assetIds); setClipReferences(cleared.clipReferences);
+            setRestoredMessage(null); setTaskContinuation("none");
+          }
+        },
+        send:postMessageInput,
+      });
+      if (projectRef.current === originalProject) setState(old=>old?{...old,sessions:mergeSessions(old.sessions,[updated])}:old);
     } catch (error) {
-      if (projectRef.current === originalProject && submittedEpoch === conversationEpoch.current) {
-        setDraft((old) => old || text);
-        setReferences(old => [...new Set([...old,...attached])]);
-        setClipReferences(old => [...old,...attachedClips.filter(ref => !old.some(item => item.clipId === ref.clipId))]);
-        notify((error as Error).message, true);
-      }
-    } finally { sendingRef.current = false; setSending(false); }
+      if (error instanceof MessageAttemptError) {
+        const unknown = error.recovery.status === "unknown";
+        notify(`${unknown?"发送结果未确认，可能已经发送":"消息未完成"}；完整输入已保留在原工程/会话的恢复记录中，请在该会话核对错误与内容。`,true);
+      } else notify(`本地恢复记录写入失败，消息未提交，输入未清空：${(error as Error).message}`,true);
+    } finally {
+      activeMessageRequest.current = ""; sendingRef.current = false; setSending(false); setRecoveryVersion(version=>version+1);
+    }
   }
   useEffect(() => {
     let cancelled = false;
@@ -1716,9 +1758,12 @@ export function App() {
               max={350}
             />
             <div className="composer-area">
+              <MessageRecoveries records={recoveries} activeRequestId={activeMessageRequest.current} composerHasInput={!!draft.length || !!references.length || !!clipReferences.length || taskContinuation!=="none"} onRestore={restoreMessage} onDismiss={dismissRecovery}/>
               <div className="composer">
-                {context && <div className="context-chip"><label><input type="checkbox" checked={useContext} onChange={e => setUseContext(e.target.checked)}/>正在讨论：{state?.assets.find(a => a.id === (context.clipId || context.assetId))?.name || "工作对象"}{context.frameId ? ` · 第 ${frameIndex + 1} 帧实例` : ""} · {context.mode === "draft" ? "我的草稿" : context.snapshotId ? "固定快照" : "保存版本"}</label><small>{context.frameId || context.snapshotId || context.clipId || context.assetId} · {context.documentRevision || context.revision}</small>{context.mode === "draft" && useContext && <label><input type="checkbox" checked={shareDraft} onChange={e => setShareDraft(e.target.checked)}/>明确将未保存草稿作为助手输入（不授权覆盖我的草稿）</label>}</div>}
-                {taskId && <small className="context-chip">关联任务：{state?.tasks?.find(t => t.id === taskId)?.title}；任务目标保持不变</small>}
+                {restoredMessage && <div className="context-chip"><strong>恢复的原输入：不会自动发送</strong><small>上下文/保存建议目录锁定为原记录，浏览资源不会替换。{restoredMessage.contextFrozen?"原上下文已稳定；版本过期会被拒绝，不自动刷新。":"原上下文尚未稳定，发送前须返回原草稿重新核对。"} · 目录：{restoredMessage.input.outputFolder || "项目根目录"} · 续接意图：{restoredMessage.input.feedbackKind || "仅讨论"}</small><button className="text-button" onClick={()=>{setRestoredMessage(null);setTaskContinuation("none");setUseContext(true);setShareDraft(false);}}>明确改用当前工作对象与目录</button></div>}
+                {displayedContext && <div className="context-chip"><label><input type="checkbox" checked={useContext} onChange={e => setUseContext(e.target.checked)}/>正在讨论：{state?.assets.find(a => a.id === (displayedContext.clipId || displayedContext.assetId))?.name || "工作对象"}{displayedContext.frameId ? restoredMessage ? ` · 帧实例 ${displayedContext.frameId.slice(0,8)}` : ` · 第 ${frameIndex + 1} 帧实例` : ""} · {displayedContext.mode === "draft" ? "人工草稿" : displayedContext.snapshotId ? "固定快照" : "保存版本"}</label><small>{displayedContext.frameId || displayedContext.snapshotId || displayedContext.clipId || displayedContext.assetId} · {displayedContext.documentRevision || displayedContext.revision}</small>{displayedContext.mode === "draft" && useContext && <label><input type="checkbox" checked={shareDraft} onChange={e => setShareDraft(e.target.checked)}/>明确将此人工草稿作为助手输入（不授权覆盖原稿）</label>}</div>}
+                {continuationClipId && selectedTask && <label className="context-chip">以当前草稿/版本续接任务<select aria-label="消息任务续接意图" value={taskContinuation} onChange={e=>setTaskContinuation(e.target.value as TaskContinuation)}><option value="none">仅讨论（不更新任务目标）</option><option value="local" disabled={selectedTask.status==="paused" || !(selectedTask.direction?.accept&&selectedTask.direction.intentVersion===selectedTask.intentVersion)}>局部续接（同来源像素，保留方向）</option><option value="direction" disabled={selectedTask.status==="paused"}>方向续接（新来源/方向，重新确认）</option></select><small>必须显式选择才发送 feedbackKind；普通浏览不更新任务基线。新增/更换来源像素请选方向续接；暂停任务须先继续。</small></label>}
+                {taskId && <small className="context-chip">关联任务：{state?.tasks?.find(t => t.id === taskId)?.title || taskId}；浏览不会改变任务目标</small>}
 
                 {!!clipReferences.length && (
                   <div className="reference-chips">
@@ -1838,7 +1883,7 @@ export function App() {
               </div>
               <p
                 className="composer-note generation-location"
-                title={`资源/${categoryFolder("原图素材", folder)}`}
+                title={`资源/${categoryFolder("原图素材", restoredMessage?.input.outputFolder ?? folder)}`}
               >
                 生成后由助手命名并选择目录保存
               </p>

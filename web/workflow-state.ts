@@ -116,6 +116,16 @@ export function taskFeedbackPayload(task: ProductionTask, action: "feedback" | "
   return { expectedRevision: task.revision, action, text, ...(action === "feedback" ? { feedbackKind } : approval ? { toolApproval: { sessionId: session!.id, approvalId: approval.id } } : {}) };
 }
 
+export type TaskContinuation = "none" | "local" | "direction";
+export function messageContinuation(task: ProductionTask | undefined, context: EditingContext | undefined, choice: TaskContinuation): "local" | "direction" | undefined {
+  if (choice === "none") return undefined;
+  const targetClipId = task?.target?.clipId || task?.contract.scope?.clipId;
+  if (!task || !context?.clipId || context.clipId !== targetClipId) throw new Error("续接任务须明确使用同一动画的草稿或版本；浏览其他对象不改变任务目标");
+  if (task.status === "paused") throw new Error("任务已暂停，请先明确继续任务，再续接当前版本");
+  if (choice === "local" && !(task.direction?.accept && task.direction.intentVersion === task.intentVersion)) throw new Error("局部续接需要已有有效方向；新来源像素或方向变化请明确重新确认方向");
+  return choice;
+}
+
 export type ConversationSelection = { taskId: string; sessionId: string };
 export const taskConversation = (task: ProductionTask): ConversationSelection => ({ taskId: task.id, sessionId: task.sessionId || "" });
 export function ordinaryConversation(tasks: ProductionTask[], sessionId: string): ConversationSelection {

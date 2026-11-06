@@ -1,3 +1,8 @@
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) { super(message); this.name = "ApiError"; this.status = status; }
+}
+
 export async function api<T = any>(
   url: string,
   options: RequestInit = {},
@@ -11,6 +16,6 @@ export async function api<T = any>(
   });
   const result = await response.json();
   if (!response.ok)
-    throw new Error(result.message || result.error || "操作失败");
+    throw new ApiError(result.message || result.error || "操作失败", response.status);
   return result;
 }

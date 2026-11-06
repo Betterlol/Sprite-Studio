@@ -83,6 +83,10 @@ export function InterpolationPanel(props: Props) {
   const [columns, setColumns] = useState(2),
     [rows, setRows] = useState(2),
     [includesEndpoints, setIncludesEndpoints] = useState(true);
+  const [timingPolicy, setTimingPolicy] = useState<"preserve-duration" | "fps">("preserve-duration");
+  const [interiorPolicy, setInteriorPolicy] = useState<"preserve" | "replace">("preserve");
+  const [layoutTiming, setLayoutTiming] = useState<"preserve-duration" | "fps">("preserve-duration");
+  const [layoutInterior, setLayoutInterior] = useState<"preserve" | "replace">("preserve");
   const [layoutFps, setLayoutFps] = useState(12);
   const [operation, setOperation] = useState(""),
     [error, setError] = useState("");
@@ -105,6 +109,9 @@ export function InterpolationPanel(props: Props) {
     setRows(job.rows);
     setIncludesEndpoints(true);
     setLayoutFps(job.fps);
+    const policies = job as Interpolation & { timingPolicy?: "preserve-duration" | "fps"; interiorPolicy?: "preserve" | "replace" };
+    setLayoutTiming(policies.timingPolicy || "preserve-duration");
+    setLayoutInterior(policies.interiorPolicy || "preserve");
     setError("");
   }, [job?.id]);
   useEffect(() => {
@@ -131,6 +138,8 @@ export function InterpolationPanel(props: Props) {
       endFrameId: clip.frames[end]!.id,
       count,
       fps,
+      timingPolicy,
+      interiorPolicy,
       description,
     };
     const key = JSON.stringify(body),
@@ -162,6 +171,8 @@ export function InterpolationPanel(props: Props) {
             rows,
             includesEndpoints,
             fps: layoutFps,
+            timingPolicy: layoutTiming,
+            interiorPolicy: layoutInterior,
           }),
         },
       );
@@ -222,6 +233,8 @@ export function InterpolationPanel(props: Props) {
     <div className="interpolation-panel">
       <div className="interpolation-create">
         <div className="endpoint-pair">
+          <label>时长策略<select aria-label="补帧时长策略" value={timingPolicy} onChange={e => setTimingPolicy(e.target.value as typeof timingPolicy)}><option value="preserve-duration">保持 [首帧开始,尾帧开始) 原总时长</option><option value="fps">使用显式 fps（改变区间总时长）</option></select></label>
+          <label>原内部帧<select aria-label="补帧内部帧策略" value={interiorPolicy} onChange={e => setInteriorPolicy(e.target.value as typeof interiorPolicy)}><option value="preserve">保留原内部帧，新增帧插在首帧后</option><option value="replace">明确替换原内部帧（旧图片保留）</option></select></label>
           {endpoint(start, "首帧")}
           <ArrowRight size={15} />
           {endpoint(end, "尾帧")}
@@ -239,9 +252,10 @@ export function InterpolationPanel(props: Props) {
             />
           </label>
           <label>
-            新增帧率
+            显式 fps
             <input
               aria-label="补帧帧率"
+              disabled={timingPolicy !== "fps"}
               type="number"
               min="1"
               max="60"
@@ -279,9 +293,10 @@ export function InterpolationPanel(props: Props) {
         </div>
         <p className="interpolation-note">
           生成 {grid.columns} 列 × {grid.rows} 行、含首尾的图集；原首尾保留。
-          {end - start > 1
-            ? `确认后替换区间内 ${end - start - 1} 帧，旧图片仍保留。`
-            : "确认后将中间帧加入两帧之间。"}
+          {interiorPolicy === "replace" && end - start > 1
+            ? `将明确替换区间内 ${end - start - 1} 帧，旧图片仍保留。`
+            : "保留原内部帧和端点，新增帧插在首帧之后。"}
+          {timingPolicy === "preserve-duration" ? "按整数微秒重新分配区间内时长，原总时长不变，尾帧时长不变。" : "使用显式 fps，区间总时长将改变。"}
         </p>
       </div>
       {job && (
@@ -357,6 +372,8 @@ export function InterpolationPanel(props: Props) {
               </details>
               {job.status !== "applied" && (
                 <div className="interpolation-layout">
+                  <label>插入时长<select aria-label="插入时长策略" value={layoutTiming} onChange={e => setLayoutTiming(e.target.value as typeof layoutTiming)}><option value="preserve-duration">保持原区间总时长</option><option value="fps">显式 fps（改变时长）</option></select></label>
+                  <label>原内部帧<select aria-label="插入内部帧策略" value={layoutInterior} onChange={e => setLayoutInterior(e.target.value as typeof layoutInterior)}><option value="preserve">保留内部帧</option><option value="replace">明确替换内部帧</option></select></label>
                   <label>
                     列
                     <input
@@ -401,7 +418,8 @@ export function InterpolationPanel(props: Props) {
                   <label>
                     fps
                     <input
-                      aria-label="预览补帧帧率"
+                      aria-label="插入显式帧率"
+                      disabled={layoutTiming !== "fps"}
                       type="number"
                       min="1"
                       max="60"
@@ -415,7 +433,7 @@ export function InterpolationPanel(props: Props) {
                   </label>
                   <button
                     className="secondary"
-                    disabled={!!operation || !layoutMatches || stale}
+                    disabled={!!operation || props.busy || !layoutMatches || stale}
                     onClick={() => void insert()}
                   >
                     {operation === "正在加入动画" ? (

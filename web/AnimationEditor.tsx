@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent } from "react";
+import { useState, type DragEvent } from "react";
 import {
   Film,
   Play,
@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import {
   assetUrl,
-  clipFrameUrl,
   snapshotFrameUrl,
   type ClipSnapshot,
   type Asset,
@@ -28,7 +27,8 @@ export function AnimationEditor({
   playing,
   onFrame,
   onPlaying,
-  onSave,
+  onChange,
+  onUndo, onRedo, canUndo, canRedo,
   onTool,
   disabled,
 }: {
@@ -40,69 +40,26 @@ export function AnimationEditor({
   playing: boolean;
   onFrame: (index: number) => void;
   onPlaying: (value: boolean) => void;
-  onSave: (clip: ClipAsset) => Promise<ClipAsset>;
+  onChange: (clip: ClipAsset) => void;
+  onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean;
   onTool: (tool: "interpolate" | "review") => void;
   disabled: boolean;
 }) {
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
-    [picked, setPicked] = useState<string[]>([]),
-    [search, setSearch] = useState("");
-  const [undo, setUndo] = useState<ClipAsset[]>([]),
-    [redo, setRedo] = useState<ClipAsset[]>([]);
-  const pending = useRef(false),
-    lastRevision = useRef(clip.revision);
-  useEffect(() => {
-    if (!pending.current && lastRevision.current !== clip.revision) {
-      setUndo([]);
-      setRedo([]);
-    }
-    lastRevision.current = clip.revision;
-  }, [clip.revision]);
+  const busy = false;
+  const [error, setError] = useState(""), [picked, setPicked] = useState<string[]>([]), [search, setSearch] = useState("");
   const images = assets.filter(
     (asset): asset is ImageAsset =>
       asset.type === "image" && asset.frameCount === 1,
   );
   const current = clip.frames[frameIndex];
-  async function commit(
-    next: ClipAsset,
-    selectedId?: string,
-    mode: "normal" | "undo" | "redo" = "normal",
-  ) {
-    if (busy || disabled) return;
-    setBusy(true);
-    pending.current = true;
+  function commit(next: ClipAsset, selectedId?: string) {
+    if (disabled) return;
     setError("");
     onPlaying(false);
     try {
-      const updated = await onSave({ ...next, revision: clip.revision });
-      lastRevision.current = updated.revision;
-      if (mode === "normal") {
-        setUndo((old) => [...old.slice(-49), clip]);
-        setRedo([]);
-      }
-      if (mode === "undo") {
-        setUndo((old) => old.slice(0, -1));
-        setRedo((old) => [...old, clip]);
-      }
-      if (mode === "redo") {
-        setRedo((old) => old.slice(0, -1));
-        setUndo((old) => [...old, clip]);
-      }
-      onFrame(
-        selectedId
-          ? Math.max(
-              0,
-              updated.frames.findIndex((frame) => frame.id === selectedId),
-            )
-          : Math.max(0, Math.min(frameIndex, updated.frames.length - 1)),
-      );
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      pending.current = false;
-      setBusy(false);
-    }
+      onChange(next);
+      onFrame(selectedId ? Math.max(0, next.frames.findIndex(f => f.id === selectedId)) : Math.max(0, Math.min(frameIndex, next.frames.length - 1)));
+    } catch (error) { setError((error as Error).message); }
   }
   function add(ids: string[], at: number) {
     const frames = ids.map((id) => {
@@ -212,7 +169,7 @@ export function AnimationEditor({
               min="1"
               max="60"
               defaultValue={clip.initialFps || 12}
-              key={clip.revision}
+              key={`${clip.revision}-${clip.initialFps}`}
               onBlur={(e) => {
                 const fps = Number(e.target.value);
                 if (fps >= 1 && fps <= 60 && fps !== (clip.initialFps || 12))
@@ -263,7 +220,7 @@ export function AnimationEditor({
                           previewSnapshot.id,
                           frame.id,
                         )
-                      : clipFrameUrl(projectId, clip, frame, image.revision)
+                      : assetUrl(projectId, image.id, image.revision)
                   }
                   alt={image.name}
                 />
@@ -282,6 +239,7 @@ export function AnimationEditor({
         </div>
       </div>
       <div className="frame-settings">
+        {([-1, 1] as const).map(direction => <button key={direction} disabled={!current || disabled || frameIndex + direction < 0 || frameIndex + direction >= clip.frames.length} onClick={() => { const frames = [...clip.frames]; [frames[frameIndex], frames[frameIndex + direction]] = [frames[frameIndex + direction]!, frames[frameIndex]!]; commit({...clip, frames}, current!.id); }}>{direction < 0 ? "前移帧" : "后移帧"}</button>)}
         <button
           className="secondary"
           disabled={!current || busy || disabled}
@@ -309,18 +267,18 @@ export function AnimationEditor({
           移除帧
         </button>
         <button
-          title="撤销编排"
-          aria-label="撤销编排"
-          disabled={!undo.length || busy || disabled}
-          onClick={() => void commit(undo.at(-1)!, undefined, "undo")}
+          title="撤销草稿"
+          aria-label="撤销草稿"
+          disabled={!canUndo || disabled}
+          onClick={onUndo}
         >
           <Undo2 size={14} />
         </button>
         <button
-          title="重做编排"
-          aria-label="重做编排"
-          disabled={!redo.length || busy || disabled}
-          onClick={() => void commit(redo.at(-1)!, undefined, "redo")}
+          title="重做草稿"
+          aria-label="重做草稿"
+          disabled={!canRedo || disabled}
+          onClick={onRedo}
         >
           <Redo2 size={14} />
         </button>
@@ -333,7 +291,7 @@ export function AnimationEditor({
               min="1"
               max="60000"
               defaultValue={current.durationUs / 1000}
-              key={`${clip.revision}-${current.id}`}
+              key={`${clip.revision}-${current.id}-${current.durationUs}`}
               onBlur={(e) => {
                 const us = Math.round(Number(e.target.value) * 1000);
                 if (us >= 1000 && us <= 60000000 && us !== current.durationUs)

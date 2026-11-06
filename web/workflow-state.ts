@@ -74,8 +74,12 @@ export function samePreview(request: PreviewIdentity, current: PreviewIdentity) 
 export function taskTargets(task: ProductionTask, assetId: string) {
   return task.target?.clipId === assetId || task.target?.assetId === assetId || task.contract.scope?.clipId === assetId;
 }
-export function editingBlock(tasks: ProductionTask[], assetId: string, handoffs: Record<string, number>) {
+export function editingBlock(tasks: ProductionTask[], assetId: string, handoffs: Record<string, number>, sessions: Pick<Session, "id" | "status">[] = []) {
   return tasks.find(task => taskTargets(task, assetId) && !["accepted", "stopped", "failed"].includes(task.status) &&
+    // Historical acceptance becoming stale is not a new Agent execution lease.
+    !(task.phase === "delivery" && task.status === "blocked" && task.waitReason === "version_conflict" &&
+      (task.acceptedSnapshotId || task.acceptanceHistory.length > 0) &&
+      !sessions.some(session => session.id === task.sessionId && ["starting", "running"].includes(session.status))) &&
     !(task.status === "paused" && handoffs[task.id] === task.barrierVersion));
 }
 export function contextFor(clip: ClipAsset, frameId?: string, document?: ClipDraftDocument): EditingContext {

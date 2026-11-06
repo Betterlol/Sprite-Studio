@@ -237,7 +237,7 @@ export function App() {
   const sendingRef = useRef(false);
   const snapshotRequest = useRef(0);
   const editorBridge = useRef<ClipEditorBridge | null>(null);
-  const blocker = editingBlock(state?.tasks || [], selectedId, handoffs);
+  const blocker = editingBlock(state?.tasks || [], selectedId, handoffs, state?.sessions || []);
   const setBridge = useCallback((bridge: ClipEditorBridge | null) => { editorBridge.current = bridge; }, []);
   const updateContext = useCallback((next: EditingContext) => setContext(next), []);
   async function stableContext(): Promise<EditingContext | undefined> {
@@ -874,7 +874,7 @@ export function App() {
           onImport={() => upload.current?.click()}
           onNewClip={() => setNewClip(true)}
           disabled={!!operation}
-          blockedAssetIds={(state?.assets || []).filter(asset => editingBlock(state?.tasks || [], asset.id, handoffs)).map(asset => asset.id)}
+          blockedAssetIds={(state?.assets || []).filter(asset => editingBlock(state?.tasks || [], asset.id, handoffs, state?.sessions || [])).map(asset => asset.id)}
         />
         <ResizeHandle
           name="资源栏宽度"

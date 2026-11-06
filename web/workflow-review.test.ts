@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { ClipAsset, FrameDraft, Session } from "../studio/model.ts";
 import type { ProductionTask } from "../studio/workflow-model.ts";
 import {
-  directionMaterial, directionPayload, taskFeedbackPayload, taskConversation, ordinaryConversation,
+  directionMaterial, directionPayload, taskFeedbackPayload, taskConversation, ordinaryConversation, editingBlock,
   conversationDestination, assertConversation, reviewInspectionReducer, type ReviewInspection,
   type ReviewIdentity, legacyDraftsFor, legacyDerivation, finishFrameDrag, clipEdit,
 } from "./workflow-state.ts";
@@ -141,6 +141,20 @@ test("M1 drag commits only its starting frame, or cancels on frame change/deleti
   assert.equal(changed.frames[1]!.transform, undefined);
   assert.equal(finishFrameDrag(before, id(42), id(41), transform), null);
   assert.equal(finishFrameDrag({ ...before, frames: before.frames.slice(1) }, id(41), id(41), transform), null);
+});
+
+test("accepted delivery becoming stale does not reclaim manual editing without an active runtime", () => {
+  const accepted = task({ phase: "delivery", status: "accepted", target: { clipId: clip.id, mode: "saved" }, acceptedSnapshotId: id(70), acceptanceHistory: [{ snapshotId: id(70), intentVersion: 2, createdAt: "now" }] });
+  const idle = { id: accepted.sessionId!, status: "idle" as const };
+  assert.equal(editingBlock([accepted], clip.id, {}, [idle]), undefined);
+  const stale = { ...accepted, status: "blocked" as const, waitReason: "version_conflict" as const };
+  assert.equal(editingBlock([stale], clip.id, {}, [idle]), undefined);
+  assert.equal(editingBlock([{ ...stale, revision: stale.revision + 1 }], clip.id, {}, [idle]), undefined);
+  assert.equal(editingBlock([{ ...stale, acceptedSnapshotId: undefined }], clip.id, {}, [idle]), undefined);
+  assert.equal(editingBlock([stale], clip.id, {}, [{ ...idle, status: "running" }]), stale);
+  assert.equal(editingBlock([stale], clip.id, {}, [{ ...idle, status: "starting" }]), stale);
+  const unaccepted = { ...stale, acceptedSnapshotId: undefined, acceptanceHistory: [] };
+  assert.equal(editingBlock([unaccepted], clip.id, {}, [idle]), unaccepted);
 });
 
 test("save-location is a machine action with frozen approval, not direction feedback or new save args", () => {

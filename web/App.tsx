@@ -1,12 +1,15 @@
+import { createPortal } from "react-dom";
+import { ClipWorkbench, type ClipEditorBridge } from "./ClipWorkbench.tsx";
+import { TaskCenter, QualityStatus } from "./TaskCenter.tsx";
+import { ReviewSequences } from "./ReviewSequences.tsx";
+import { SnapshotPlayer } from "./SnapshotPlayer.tsx";
+import { editingBlock } from "./workflow-state.ts";
+import type { EditingContext, ProductionTask, QualityCapabilities, ReviewSequenceDefinition } from "../studio/workflow-model.ts";
 import { PermissionSettings } from "./PermissionSettings.tsx";
 import { ToolApprovals } from "./ToolApprovals.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
-import {
-  FrameAdjustmentPanel,
-  type FramePreview,
-} from "./FrameAdjustmentPanel.tsx";
+import type { FramePreview } from "./FrameAdjustmentPanel.tsx";
 import { FrameSaveApprovals } from "./FrameSaveApprovals.tsx";
-import { AnimationEditor } from "./AnimationEditor.tsx";
 import { GeneratedPreview } from "./GeneratedPreview.tsx";
 import type { GeneratedImageInfo } from "../studio/generated.ts";
 import type { SheetRecipe } from "../studio/sheet-schema.ts";
@@ -81,6 +84,9 @@ import {
 } from "../studio/model.ts";
 
 type State = {
+  tasks?: ProductionTask[];
+  qualityCapabilities?: QualityCapabilities;
+  reviewSequences?: ReviewSequenceDefinition[];
   project: Project;
   assets: Asset[];
   generatedImages: GeneratedImageInfo[];
@@ -139,6 +145,7 @@ export function App() {
   const [state, setState] = useState<State | null>(null);
   const [projectId, setProjectId] = useState("");
   const projectRef = useRef("");
+  const loadVersion = useRef(0), initialLoad = useRef("");
   const [selectedId, setSelectedId] = useState("");
   const [sessionId, setSessionId] = useState("");
   const [connection, setConnection] = useState<Connection>({
@@ -217,6 +224,36 @@ export function App() {
     {},
   );
   const [chatVisible, setChatVisible] = useState(true);
+  const [rightTab, setRightTab] = useState<"properties" | "assistant" | "checks">("properties");
+  const [propertiesHost, setPropertiesHost] = useState<HTMLDivElement | null>(null);
+  const [context, setContext] = useState<EditingContext | null>(null);
+  const [useContext, setUseContext] = useState(true), [shareDraft, setShareDraft] = useState(false);
+  const [taskId, setTaskId] = useState("");
+  const [handoffs, setHandoffs] = useState<Record<string, number>>({});
+  const [fixedSnapshot, setFixedSnapshot] = useState<ClipSnapshot | null>(null);
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const snapshotRequest = useRef(0);
+  const editorBridge = useRef<ClipEditorBridge | null>(null);
+  const blocker = editingBlock(state?.tasks || [], selectedId, handoffs);
+  const setBridge = useCallback((bridge: ClipEditorBridge | null) => { editorBridge.current = bridge; }, []);
+  const updateContext = useCallback((next: EditingContext) => setContext(next), []);
+  async function stableContext(): Promise<EditingContext | undefined> {
+    if (!useContext) return undefined;
+    const bridge = editorBridge.current;
+    if (context?.mode === "draft" && !shareDraft) throw new Error("当前为人工动画草稿，请明确勾选将我的未保存草稿交给助手，或移除上下文后发送。");
+    if (bridge && bridge.clipId === selectedId) return bridge.stabilize();
+    if (context?.mode === "draft") throw new Error("请返回草稿工作对象，等待精确版本暂存后再发送；固定快照播放不会替代草稿上下文。");
+    return context || undefined;
+  }
+  async function playSnapshot(snapshotId: string) {
+    const original = projectId, token = ++snapshotRequest.current;
+    await run("载入固定快照", async () => {
+      const value = await api<ClipSnapshot>(`/api/projects/${projectId}/snapshots/${snapshotId}`);
+      if (projectRef.current === original && token === snapshotRequest.current) { setFixedSnapshot(value); setComparison(null); setShareDraft(false); setContext({clipId:value.clip.id,revision:value.clip.revision,snapshotId:value.id,mode:"saved"}); }
+    });
+  }
+
   const upload = useRef<HTMLInputElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
@@ -258,8 +295,10 @@ export function App() {
   const agentBusy = !!state?.sessions.some((session) => active(session));
 
   const loadProject = useCallback(async (id: string, initial = false) => {
+    const token = ++loadVersion.current;
+    if (initial) initialLoad.current = id;
     const next = await api<State>(`/api/projects/${id}`);
-    if (projectRef.current !== id) return;
+    if (projectRef.current !== id || token !== loadVersion.current) return;
     setState((old) =>
       old?.project.id === id
         ? {
@@ -273,7 +312,8 @@ export function App() {
           }
         : next,
     );
-    if (initial) {
+    if (initialLoad.current === id) {
+      initialLoad.current = "";
       const storedFolder =
         localStorage.getItem(`studio.folder.${id}`) || "参考图";
       const storedAsset = localStorage.getItem(`studio.asset.${id}`);
@@ -330,7 +370,7 @@ export function App() {
       }
       if (message.type === "status") setConnection(message.data);
       if (
-        message.type === "assets" &&
+        ["assets", "tasks", "task", "review-sequences", "clip-drafts"].includes(message.type) &&
         message.data.projectId === projectRef.current
       )
         void refreshRef.current();
@@ -382,6 +422,10 @@ export function App() {
     setTransform(emptyTransform);
     setFramePreview(null);
     setZoom("fit");
+    snapshotRequest.current++; setFixedSnapshot(null); setShareDraft(false);
+    const asset = state?.assets.find(a => a.id === selectedId);
+    if (asset?.type === "image") setContext({assetId: asset.id, revision: asset.revision, mode: "saved"});
+    else setContext(asset ? {clipId: asset.id, revision: asset.revision, mode: "saved"} : null);
   }, [selectedId]);
   useEffect(() => {
     if (
@@ -399,7 +443,7 @@ export function App() {
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [state, chatVisible]);
+  }, [state, chatVisible, selectedId, fixedSnapshot?.id, comparing?.nonce]);
   useEffect(() => {
     chatEnd.current?.scrollIntoView({ block: "end", behavior: "smooth" });
   }, [
@@ -420,36 +464,9 @@ export function App() {
       waitingSession
     ) {
       displayedApproval.current = waitingId;
-      setChatVisible(true);
+      setChatVisible(true); setRightTab("assistant");
     }
   }, [waitingId]);
-  useEffect(() => {
-    if (!playing || !displayClip || !displayClip.frames.length) return;
-    let index = Math.min(frameIndex, displayClip.frames.length - 1),
-      elapsed = 0,
-      last = performance.now(),
-      request = 0;
-    const tick = (time: number) => {
-      elapsed += Math.min(time - last, 100);
-      last = time;
-      let guard = 0;
-      while (
-        elapsed >= displayClip.frames[index]!.durationUs / 1000 &&
-        guard++ < 128
-      ) {
-        elapsed -= displayClip.frames[index]!.durationUs / 1000;
-        if (index === displayClip.frames.length - 1 && !displayClip.loop) {
-          setPlaying(false);
-          return;
-        }
-        index = (index + 1) % displayClip.frames.length;
-        setFrameIndex(index);
-      }
-      request = requestAnimationFrame(tick);
-    };
-    request = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(request);
-  }, [playing, displayClip?.revision, playbackRun]);
   useEffect(() => {
     if (!clip) return;
     setFrameIndex((index) =>
@@ -469,6 +486,7 @@ export function App() {
     }
   }
   function chooseProject(id: string) {
+    setTaskId(""); setHandoffs({}); setContext(null); setShareDraft(false); setFixedSnapshot(null);
     setComparison(null);
     setClipReferences([]);
     projectRef.current = id;
@@ -483,6 +501,11 @@ export function App() {
     setReferences([]);
     setClipReferences([]);
     setPromptAnswers({});
+  }
+  function chooseTask(id: string) {
+    setTaskId(id);
+    const task = state?.tasks?.find(task => task.id === id);
+    chooseSession(task?.sessionId || "");
   }
   async function deleteSession() {
     if (!session || active(session)) return;
@@ -500,13 +523,15 @@ export function App() {
     }
   }
   async function makeSession() {
+    const originalProject = projectId;
     const created = await api<Session>(`/api/projects/${projectId}/sessions`, {
       method: "POST",
     });
+    if (projectRef.current !== originalProject) throw new Error("工程已切换，对话未作为当前对话打开");
     setState((old) =>
       old ? { ...old, sessions: mergeSessions(old.sessions, [created]) } : old,
     );
-    chooseSession(created.id);
+    setSessionId(created.id);
     return created;
   }
   function addReference(id?: string) {
@@ -527,7 +552,7 @@ export function App() {
           ? [...old, ref]
           : (notify("一次最多引用 3 段动画"), old),
     );
-    setChatVisible(true);
+    setChatVisible(true); setRightTab("assistant");
   }
   function previewClip(id: string, frameId?: string, play = true) {
     if (
@@ -540,7 +565,7 @@ export function App() {
       return;
     }
     setComparison(null);
-    setTool("review");
+    setTool("review"); setRightTab("checks");
     setPlaying(false);
     if (id === selectedId) {
       setFrameIndex(
@@ -565,7 +590,7 @@ export function App() {
     if (!change) throw new Error("修改记录正在同步，请稍后再试");
     const originalProject = projectId;
     setPlaying(false);
-    setTool("review");
+    setTool("review"); setRightTab("checks");
     if (change.clipId !== selectedId) setSelectedId(change.clipId);
     const result = await api<{ before: ClipSnapshot; after: ClipSnapshot }>(
       `/api/projects/${projectId}/frame-changes/${id}/compare`,
@@ -601,22 +626,28 @@ export function App() {
     });
   }
   async function sendMessage() {
-    if (!draft.trim() || agentBusy) return;
+    if (!draft.trim() || agentBusy || sendingRef.current) return;
+    sendingRef.current = true; setSending(true);
     const text = draft.trim(),
       attached = [...references],
       attachedClips = [...clipReferences],
       originalProject = projectId;
     try {
+      const frozenContext = await stableContext();
+      if (projectRef.current !== originalProject) throw new Error("工程已切换，消息未发送");
       const target = session || (await makeSession());
-      setDraft("");
-      setReferences([]);
-      setClipReferences([]);
+      if (projectRef.current !== originalProject) throw new Error("工程已切换，消息未发送");
+      setDraft(old => old.trim() === text ? "" : old);
+      setReferences(old => old.filter(id => !attached.includes(id)));
+      setClipReferences(old => old.filter(ref => !attachedClips.some(item => item.clipId === ref.clipId)));
       const updated = await api<Session>(
         `/api/sessions/${target.id}/messages`,
         {
           method: "POST",
           body: JSON.stringify({
             text,
+            context: frozenContext,
+            taskId: taskId || undefined,
             model: agentModel,
             assetIds: attached,
             outputFolder: folder,
@@ -632,27 +663,13 @@ export function App() {
             : old,
         );
     } catch (error) {
-      setDraft((old) => old || text);
-      setReferences(attached);
-      setClipReferences(attachedClips);
-      notify((error as Error).message, true);
-    }
-  }
-  async function saveClip(next: ClipAsset) {
-    const updated = await api<ClipAsset>(
-      `/api/projects/${projectId}/clips/${next.id}`,
-      {
-        method: "PATCH",
-        body: JSON.stringify({
-          revision: next.revision,
-          frames: next.frames,
-          initialFps: next.initialFps || 12,
-          loop: next.loop,
-        }),
-      },
-    );
-    await refreshRef.current();
-    return updated;
+      if (projectRef.current === originalProject) {
+        setDraft((old) => old || text);
+        setReferences(old => [...new Set([...old,...attached])]);
+        setClipReferences(old => [...old,...attachedClips.filter(ref => !old.some(item => item.clipId === ref.clipId))]);
+        notify((error as Error).message, true);
+      }
+    } finally { sendingRef.current = false; setSending(false); }
   }
   useEffect(() => {
     let cancelled = false;
@@ -701,7 +718,7 @@ export function App() {
     transform,
   ]);
   async function applyTransform() {
-    if (!currentImage || clip) return;
+    if (!currentImage || clip || blocker) return;
     await run("正在调整图片", async () => {
       const result = await api<ImageAsset>(
         `/api/projects/${projectId}/assets/${currentImage.id}/transform`,
@@ -721,8 +738,8 @@ export function App() {
     ? Math.max(
         0.05,
         Math.min(
-          (stageSize.width - 16) / currentImage.width,
-          (stageSize.height - 16) / currentImage.height,
+          stageSize.width / currentImage.width,
+          stageSize.height / currentImage.height,
           2,
         ),
       )
@@ -843,7 +860,8 @@ export function App() {
           onChanged={() => refreshRef.current()}
           onImport={() => upload.current?.click()}
           onNewClip={() => setNewClip(true)}
-          disabled={!!operation || agentBusy}
+          disabled={!!operation}
+          blockedAssetIds={(state?.assets || []).filter(asset => editingBlock(state?.tasks || [], asset.id, handoffs)).map(asset => asset.id)}
         />
         <ResizeHandle
           name="资源栏宽度"
@@ -872,7 +890,7 @@ export function App() {
               {currentImage && (
                 <button
                   className="text-button"
-                  title={clip ? "引用当前动画到聊天" : "引用当前图片到聊天"}
+                  title={clip ? "引用已保存动画到聊天（草稿通过上下文单独传入）" : "引用当前图片到聊天"}
                   onClick={() => {
                     if (clip)
                       addClipReference({
@@ -880,7 +898,7 @@ export function App() {
                         revision: clip.revision,
                       });
                     else addReference(currentImage.id);
-                    setChatVisible(true);
+                    setChatVisible(true); setRightTab("assistant");
                   }}
                 >
                   <Link2 size={14} />
@@ -903,26 +921,15 @@ export function App() {
               )}
             </div>
           </div>
-          {framePreview?.draft.clipId === clip?.id && framePreview && (
-            <div className="frame-preview-banner" role="status">
-              草稿预览 · 尚未保存
-              <button
-                className="text-button"
-                onClick={() => setFramePreview(null)}
-              >
-                查看已保存版本
-              </button>
-            </div>
-          )}
+          {fixedSnapshot ? <SnapshotPlayer key={fixedSnapshot.id} snapshot={fixedSnapshot} onClose={() => { setFixedSnapshot(null); if (selected?.type === "image") setContext({assetId:selected.id,revision:selected.revision,mode:"saved"}); }}/> : comparing ? <div className="stage checker"><ComparisonPlayer key={comparing.nonce} before={comparing.before} after={comparing.after} onClose={() => setComparison(null)}/></div> : clip ? <ClipWorkbench
+            key={`${projectId}-${clip.id}`} projectId={projectId} clip={clip} assets={state?.assets || []}
+            frameIndex={frameIndex} onFrame={setFrameIndex} playing={playing} onPlaying={setPlaying} propertiesHost={propertiesHost}
+            locked={blocker ? `任务“${blocker.title}”持有此对象` : undefined}
+            onContext={updateContext} onBridge={setBridge} onSaved={() => refreshRef.current()}
+            onTool={value => { setTool(value); setRightTab(value === "review" ? "checks" : "properties"); }}
+          /> : <>
           <div className={`stage ${background}`} ref={stage}>
-            {comparing ? (
-              <ComparisonPlayer
-                key={comparing.nonce}
-                before={comparing.before}
-                after={comparing.after}
-                onClose={() => setComparison(null)}
-              />
-            ) : currentImage ? (
+            {currentImage ? (
               <div
                 className="artboard"
                 style={{
@@ -932,20 +939,7 @@ export function App() {
               >
                 <img
                   src={
-                    clip && displayClip?.frames[frameIndex]
-                      ? framePreview?.draft.clipId === clip.id
-                        ? snapshotFrameUrl(
-                            projectId,
-                            framePreview.preview.id,
-                            displayClip.frames[frameIndex]!.id,
-                          )
-                        : clipFrameUrl(
-                            projectId,
-                            clip,
-                            clip.frames[frameIndex]!,
-                            currentImage.revision,
-                          )
-                      : imagePreview?.assetId === currentImage.id
+                    imagePreview?.assetId === currentImage.id
                         ? imagePreview.result.url
                         : assetUrl(
                             projectId,
@@ -1012,12 +1006,7 @@ export function App() {
                       )}
                     </svg>
                   )}
-                {((imagePreview?.result.blocking && !clip) ||
-                  framePreview?.warnings?.some(
-                    (w) =>
-                      w.blocking &&
-                      w.frameId === displayClip?.frames[frameIndex]?.id,
-                  )) && (
+                {imagePreview?.result.blocking && (
                   <div className="canvas-overflow-border" aria-hidden="true" />
                 )}
                 <div className="canvas-corners">
@@ -1125,59 +1114,9 @@ export function App() {
               </div>
             )}
           </div>
-          {clip && (
-            <ResizeHandle
-              name="动画编排高度"
-              target=".animation-editor"
-              variable="--timeline-height"
-              reverse
-              min={110}
-              max={500}
-            />
-          )}
-          {clip && (
-            <AnimationEditor
-              key={`${projectId}-${clip.id}`}
-              projectId={projectId}
-              clip={displayClip!}
-              previewSnapshot={
-                framePreview?.draft.clipId === clip?.id
-                  ? framePreview?.preview
-                  : undefined
-              }
-              assets={state?.assets || []}
-              frameIndex={frameIndex}
-              playing={playing}
-              onFrame={(index) => {
-                setFrameIndex(index);
-                setComparison(null);
-                setTransform(emptyTransform);
-              }}
-              onPlaying={(value) => {
-                setPlaying(value);
-                setComparison(null);
-              }}
-              onSave={saveClip}
-              onTool={(value) => {
-                setTool(value);
-                setPlaying(false);
-                setComparison(null);
-              }}
-              disabled={!!operation || agentBusy || !!framePreview}
-            />
-          )}
-          {(currentImage || clip) && (
-            <ResizeHandle
-              name="工具栏高度"
-              target=".tools-panel"
-              variable="--tools-height"
-              reverse
-              min={110}
-              max={600}
-            />
-          )}
-          {(currentImage || clip) && (
-            <section className="tools-panel">
+          </>}
+          {!clip && currentImage && propertiesHost && createPortal(
+            <section className="tools-panel image-tools">
               <div className="tools-tabs">
                 <button
                   className={tool === "slice" ? "active" : ""}
@@ -1199,89 +1138,8 @@ export function App() {
                   <SlidersHorizontal size={14} />
                   调整{clip ? "当前帧" : "图片"}
                 </button>
-                {interpolationClip && (
-                  <button
-                    className={tool === "interpolate" ? "active" : ""}
-                    onClick={() => {
-                      setTool("interpolate");
-                      setPlaying(false);
-                      setTransform(emptyTransform);
-                    }}
-                  >
-                    <Sparkles size={14} />
-                    首尾补帧
-                  </button>
-                )}
-                {clip && (
-                  <button
-                    className={tool === "review" ? "active" : ""}
-                    onClick={() => {
-                      setTool("review");
-                      setPlaying(false);
-                      setTransform(emptyTransform);
-                    }}
-                  >
-                    <ScanEye size={14} />
-                    动画检查
-                  </button>
-                )}
               </div>
-              {tool === "review" && clip ? (
-                <AnimationPanel
-                  key={`${projectId}-${clip.id}`}
-                  projectId={projectId}
-                  clip={clip}
-                  draftPreview={
-                    framePreview?.draft.clipId === clip.id
-                      ? framePreview
-                      : undefined
-                  }
-                  assets={state?.assets || []}
-                  reviews={state?.reviews || []}
-                  focusReviewId={focusedReviewId}
-                  focusChangeId={focusedChangeId}
-                  changes={state?.frameChanges || []}
-                  onRefresh={() => refreshRef.current()}
-                  onReference={addClipReference}
-                  onFrame={(clipId, frameId) =>
-                    previewClip(clipId, frameId, false)
-                  }
-                  onAdjust={() => {
-                    setTool("adjust");
-                    setComparison(null);
-                    setPlaying(false);
-                  }}
-                  onCompare={compareChange}
-                  onPreview={(id) => previewClip(id)}
-                />
-              ) : tool === "interpolate" && interpolationClip ? (
-                <InterpolationPanel
-                  key={`${projectId}-${interpolationClip.id}`}
-                  projectId={projectId}
-                  clip={interpolationClip}
-                  assets={state?.assets || []}
-                  jobs={state?.interpolations || []}
-                  sessions={state?.sessions || []}
-                  connected={connection.connected}
-                  model={agentModel}
-                  busy={agentBusy}
-                  refresh={() => refreshRef.current()}
-                  onSession={(id) => {
-                    chooseSession(id);
-                    setChatVisible(true);
-                  }}
-                  onPreview={(id) => {
-                    setComparison(null);
-                    setFrameIndex(0);
-                    setPlaybackRun((value) => value + 1);
-                    if (id === selectedId) setPlaying(true);
-                    else {
-                      playbackIntent.current = id;
-                      setSelectedId(id);
-                    }
-                  }}
-                />
-              ) : tool === "slice" ? (
+              {tool === "slice" ? (
                 !clip &&
                 currentImage &&
                 !currentImage.producer &&
@@ -1297,28 +1155,13 @@ export function App() {
                     onGrid={setSliceGrid}
                     gridVisible={showGrid}
                     onGridVisible={setShowGrid}
-                    disabled={!!operation || agentBusy}
+                    disabled={!!operation || !!blocker}
                   />
                 ) : (
                   <p className="adjust-note">
                     请在原图素材或参考图中选择静态原图配置切割；动画帧可在调整页编辑。
                   </p>
                 )
-              ) : clip ? (
-                <FrameAdjustmentPanel
-                  key={projectId + clip.id}
-                  projectId={projectId}
-                  clip={clip}
-                  frameId={clip.frames[frameIndex]?.id || ""}
-                  playing={playing}
-                  drafts={state?.frameDrafts || []}
-                  onPreview={setFramePreview}
-                  onRefresh={() => refreshRef.current()}
-                />
-              ) : !currentImage ? (
-                <p className="adjust-note">
-                  向动画添加图片后，可在这里调整当前帧。
-                </p>
               ) : (
                 <div className="adjust-content">
                   <div className="tool-content">
@@ -1375,6 +1218,7 @@ export function App() {
                       className="secondary"
                       disabled={
                         !!operation ||
+                        !!blocker ||
                         imagePreviewBusy ||
                         !!imagePreviewError ||
                         !!imagePreview?.result.blocking
@@ -1427,7 +1271,7 @@ export function App() {
                   </div>
                 </div>
               )}
-            </section>
+            </section>, propertiesHost
           )}
         </section>
         {chatVisible && (
@@ -1443,7 +1287,8 @@ export function App() {
         )}
         {chatVisible && (
           <aside
-            className="chat-panel"
+            className="chat-panel workflow-right"
+            data-tab={rightTab}
             onDragOver={(event) => {
               if (
                 event.dataTransfer.types.includes("application/x-sprite-asset")
@@ -1461,6 +1306,21 @@ export function App() {
               }
             }}
           >
+            <div className="right-tabs" role="tablist" aria-label="右侧工作区">
+              {(["properties", "assistant", "checks"] as const).map(tab => <button key={tab} role="tab" aria-selected={rightTab === tab} onClick={() => setRightTab(tab)}>{tab === "properties" ? "属性" : tab === "assistant" ? "助手" : "检查"}</button>)}
+              <button aria-label="重置工作区尺寸" title="重置工作区尺寸" onClick={() => { for (const name of ["--library-width", "--chat-width", "--timeline-height", "--tools-height"]) document.documentElement.style.removeProperty(name); for (const key of Object.keys(localStorage)) if (key.startsWith("studio.layout.")) localStorage.removeItem(key); }}>重置</button>
+            </div>
+            <div className="properties-view" hidden={rightTab !== "properties"}>
+              <div ref={setPropertiesHost}/>
+              {clip && <details open={tool === "interpolate"}><summary>区间补帧（先保存动画草稿）</summary>
+                <InterpolationPanel key={`${projectId}-${clip.id}`} projectId={projectId} clip={clip} assets={state?.assets || []} jobs={state?.interpolations || []} sessions={state?.sessions || []} connected={connection.connected} model={agentModel} busy={agentBusy || !!blocker || context?.mode === "draft"} refresh={() => refreshRef.current()} onSession={id => {chooseSession(id);setRightTab("assistant");}} onPreview={id => previewClip(id)}/>
+              </details>}
+            </div>
+            <div className="checks-view" hidden={rightTab !== "checks"}>
+              <QualityStatus capabilities={state?.qualityCapabilities}/>
+              <ReviewSequences key={projectId} projectId={projectId} clips={(state?.assets || []).filter((a): a is ClipAsset => a.type === "clip")} definitions={state?.reviewSequences || []} onRefresh={() => refreshRef.current()} onPlay={id => void playSnapshot(id)}/>
+              {clip && <details open><summary>单动画检查与旧修改历史</summary><AnimationPanel key={`${projectId}-${clip.id}`} projectId={projectId} clip={clip} disabled={!!blocker} assets={state?.assets || []} reviews={state?.reviews || []} focusReviewId={focusedReviewId} focusChangeId={focusedChangeId} changes={state?.frameChanges || []} onRefresh={() => refreshRef.current()} onReference={addClipReference} onFrame={(id, frame) => previewClip(id,frame,false)} onAdjust={() => setRightTab("properties")} onCompare={compareChange} onPreview={id => previewClip(id)}/></details>}
+            </div>
             <div className="chat-header">
               <div className="chat-heading">
                 <span className="assistant-icon">
@@ -1532,6 +1392,8 @@ export function App() {
               </select>
             )}
             <div className="messages">
+              <TaskCenter key={projectId} projectId={projectId} tasks={state?.tasks || []} sessions={state?.sessions || []} assets={state?.assets || []} referenceIds={references} selectedTaskId={taskId} onSelect={chooseTask} onRefresh={() => refreshRef.current()} onHandoff={task => setHandoffs(old => ({...old,[task.id]:task.barrierVersion}))} stabilize={stableContext} onPlay={id => void playSnapshot(id)} onBrowse={setSelectedId}/>
+
               {!session?.messages.length && (
                 <div className="chat-empty">
                   <div className="chat-orbit">
@@ -1599,7 +1461,7 @@ export function App() {
                           onClick={() => {
                             setComparison(null);
                             setSelectedId(ref.clipId);
-                            setTool("review");
+                            setTool("review"); setRightTab("checks");
                           }}
                         >
                           <Film size={13} />
@@ -1622,7 +1484,7 @@ export function App() {
                               setComparison(null);
                               setSelectedId(review.clipId);
                               setFocusedReviewId(id);
-                              setTool("review");
+                              setTool("review"); setRightTab("checks");
                             }}
                           >
                             <ScanEye size={13} />
@@ -1813,7 +1675,7 @@ export function App() {
                 </form>
               )}
               <ToolApprovals
-                sessions={state?.sessions || []}
+                sessions={(state?.sessions || []).filter(s => !(state?.tasks || []).some(t => t.sessionId === s.id && t.phase === "direction" && !(t.direction?.accept && t.direction.intentVersion === t.intentVersion) && s.toolApproval?.tool === "save_image"))}
                 onRefresh={() => refreshRef.current()}
               />
               <FrameSaveApprovals
@@ -1841,6 +1703,9 @@ export function App() {
             />
             <div className="composer-area">
               <div className="composer">
+                {context && <div className="context-chip"><label><input type="checkbox" checked={useContext} onChange={e => setUseContext(e.target.checked)}/>正在讨论：{state?.assets.find(a => a.id === (context.clipId || context.assetId))?.name || "工作对象"}{context.frameId ? ` · 第 ${frameIndex + 1} 帧实例` : ""} · {context.mode === "draft" ? "我的草稿" : context.snapshotId ? "固定快照" : "保存版本"}</label><small>{context.frameId || context.snapshotId || context.clipId || context.assetId} · {context.documentRevision || context.revision}</small>{context.mode === "draft" && useContext && <label><input type="checkbox" checked={shareDraft} onChange={e => setShareDraft(e.target.checked)}/>明确将未保存草稿作为助手输入（不授权覆盖我的草稿）</label>}</div>}
+                {taskId && <small className="context-chip">关联任务：{state?.tasks?.find(t => t.id === taskId)?.title}；任务目标保持不变</small>}
+
                 {!!clipReferences.length && (
                   <div className="reference-chips">
                     {clipReferences.map((ref) => (
@@ -1948,7 +1813,7 @@ export function App() {
                       className="send-button"
                       aria-label="发送消息"
                       disabled={
-                        !draft.trim() || agentBusy || !connection.connected
+                        !draft.trim() || agentBusy || sending || !connection.connected
                       }
                       onClick={() => void sendMessage()}
                     >
@@ -1990,7 +1855,7 @@ export function App() {
           ) : (
             <>
               <Check size={11} />
-              更改已保存在本机
+              {context?.mode === "draft" ? "草稿编辑中 · 保存动画后提交" : "本地工作台"}
             </>
           )}
         </span>

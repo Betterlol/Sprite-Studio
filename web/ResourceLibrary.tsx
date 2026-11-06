@@ -54,6 +54,7 @@ export function ResourceLibrary({
   onImport,
   onNewClip,
   disabled,
+  blockedAssetIds = [],
 }: {
   projectId: string;
   state: LibraryState | null;
@@ -65,6 +66,7 @@ export function ResourceLibrary({
   onImport: () => void;
   onNewClip: () => void;
   disabled: boolean;
+  blockedAssetIds?: string[];
 }) {
   const [search, setSearch] = useState("");
   const [checked, setChecked] = useState<string[]>([]),
@@ -174,6 +176,10 @@ export function ResourceLibrary({
       .filter((k) => k.startsWith("f:"))
       .map((k) => k.slice(2)),
   };
+  function selectionBlocked(selection: LibrarySelection) {
+    return assets.some(asset => blockedAssetIds.includes(asset.id) && (selection.assetIds.includes(asset.id) || selection.folders.some(folder => inside(asset.folder || "",folder))));
+  }
+  const blocked = selectionBlocked(selection);
   const categories = new Set([
     ...selection.assetIds.map((id) =>
       resourceCategory(assets.find((a) => a.id === id)!),
@@ -248,6 +254,7 @@ export function ResourceLibrary({
   async function submit() {
     if (!state) return;
     const selection = request.current.selection;
+    if (dialog !== "folder" && selectionBlocked(selection)) { setError("所选对象正由制作任务持有，请先成功接手；其他素材仍可浏览和编辑。"); return; }
     if (dialog === "folder") {
       const result = await mutate("folders", {
         parent: request.current.folder,
@@ -428,7 +435,7 @@ export function ResourceLibrary({
           <button
             aria-label="重命名所选项目"
             title="重命名"
-            disabled={disabled || selectedKeys.length !== 1}
+            disabled={disabled || blocked || selectedKeys.length !== 1}
             onClick={() => open("rename")}
           >
             <Pencil size={14} />
@@ -438,7 +445,7 @@ export function ResourceLibrary({
             title={
               categories.size > 1 ? "请选择同一分类内的资源进行移动" : "移动到…"
             }
-            disabled={disabled || !selectedKeys.length || !destinations.length}
+            disabled={disabled || blocked || !selectedKeys.length || !destinations.length}
             onClick={() => open("move")}
           >
             <FolderInput size={15} />
@@ -446,13 +453,14 @@ export function ResourceLibrary({
           <button
             aria-label="删除所选项目"
             title="移到回收站"
-            disabled={disabled || !selectedKeys.length}
+            disabled={disabled || blocked || !selectedKeys.length}
             onClick={() => open("delete")}
           >
             <Trash2 size={14} />
           </button>
         </div>
       </div>
+      {blocked && <small className="adjust-note">所选对象由制作任务持有；请先在助手任务卡接手，浏览其他资源不受影响。</small>}
       <div className="asset-list">
         {children.map((path) => (
           <div className="library-entry folder-entry" key={path}>

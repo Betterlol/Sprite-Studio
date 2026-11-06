@@ -59,7 +59,7 @@ def review_images(params, folder):
     if start>0: pairs.append((start-1,start,False))
     pairs.extend((index,index+1,False) for index in range(start,end))
     if end<len(frames)-1:pairs.append((end,end+1,False))
-    if params['loop'] and len(frames)>1:pairs.append((len(frames)-1,0,True))
+    if params['loop']:pairs.append((len(frames)-1,0,True))
     onion=Image.new('RGB',(min(max(len(pairs),1),4)*180,math.ceil(max(len(pairs),1)/4)*206),'#141c21')
     for i,(left,right,loop) in enumerate(pairs):
         previous,_=image_at(frames[left]['path']); current,_=image_at(frames[right]['path'])

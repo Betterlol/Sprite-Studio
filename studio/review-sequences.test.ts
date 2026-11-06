@@ -107,6 +107,73 @@ test("pixel and definition changes mark snapshots stale, while old immutable pix
   } finally { store.worker.close(); }
 });
 
+test("singleton loop inspection generates real worker self-pair and persisted onion evidence", async () => {
+  const { store, pid, make, sequences, segment } = await fixture();
+  try {
+    const single = make("single", [123457]);
+    const definition = sequences.create(pid, { requestId: randomUUID(), name: "single loop", loop: true, segments: [segment(single)] });
+    const captured = sequences.capture(pid, definition.id);
+    const result = await sequences.inspect(pid, definition.id, { snapshotId: captured.id });
+    assert.deepEqual(result.pairs, [{ from: 0, to: 0, loopBoundary: true }]);
+    assert.deepEqual(result.sequence.coverage.pairs, result.pairs);
+    assert.deepEqual(result.sequence.coverage.boundaries, [{ from: 0, to: 0, kind: "loop", covered: true }]);
+    assert.equal(result.sequence.coverage.complete, true);
+    assert.deepEqual(store.animation.review(pid, result.id).pairs, result.pairs);
+    for (const kind of ["contact", "onion"] as const)
+      assert.ok(readFileSync(store.animation.evidence(pid, result.id, kind)).length > 100);
+    const direct = await store.animation.inspect(pid, { clipId: single.id });
+    assert.deepEqual(direct.pairs, [{ from: 0, to: 0, loopBoundary: true }]);
+    const nonLoop = sequences.create(pid, { requestId: randomUUID(), name: "single hold", loop: false, segments: [segment(single)] });
+    const hold = await sequences.inspect(pid, nonLoop.id);
+    assert.deepEqual(hold.pairs, []);
+    assert.equal(hold.sequence.coverage.complete, true);
+  } finally { store.worker.close(); }
+});
+
+test("different same-canvas pixels and per-instance transforms retain exact source mapping and frozen playback", async () => {
+  const { store, pid, image, a, sequences, segment } = await fixture();
+  try {
+    const different = await store.transform(pid, image.id, image.revision, { scale: 0.5 });
+    assert.deepEqual([different.width, different.height], [image.width, image.height]);
+    assert.notEqual(different.contentHash, image.contentHash);
+    const b = store.createClip(pid, "different pixels and transforms", [
+      { id: randomUUID(), imageId: different.id, durationUs: 180001, transform: { scale: 1, offsetX: 2, offsetY: 1, clip: false } },
+      { id: randomUUID(), imageId: image.id, durationUs: 100003, transform: { scale: 0.5, offsetX: -3, offsetY: 0, clip: false } },
+    ]);
+    const first = segment(a, { endFrameId: a.frames[1]!.id });
+    const second = segment(b, { repeat: 2 });
+    const definition = sequences.create(pid, { requestId: randomUUID(), name: "varied montage", loop: true, segments: [first, second] });
+    const captured = sequences.capture(pid, definition.id);
+    const frozen = store.animation.snapshot(pid, captured.snapshotId);
+    assert.equal(Object.keys(frozen.images).length, 2);
+    assert.deepEqual(captured.frameSources.map(f => [f.clipId, f.sourceFrameId]), [
+      [a.id, a.frames[0]!.id], [a.id, a.frames[1]!.id],
+      ...Array.from({ length: 2 }, () => b.frames.map(f => [b.id, f.id])).flat(),
+    ]);
+    const rendered: Buffer[] = [];
+    for (const [index, mapping] of captured.frameSources.entries()) {
+      const dependency = captured.dependencies.find(d => d.clipId === mapping.clipId)!;
+      const source = store.animation.snapshot(pid, dependency.snapshotId).clip.frames.find(f => f.id === mapping.sourceFrameId)!;
+      assert.equal(frozen.clip.frames[index]!.imageId, source.imageId);
+      assert.deepEqual(frozen.clip.frames[index]!.transform, source.transform);
+      const actual = readFileSync((await store.animation.renderFrame(pid, frozen.id, mapping.frameId)).path);
+      const expected = readFileSync((await store.animation.renderFrame(pid, dependency.snapshotId, source.id)).path);
+      assert.deepEqual(actual, expected);
+      rendered.push(actual);
+    }
+    assert.notDeepEqual(rendered[0], rendered[2]);
+    assert.notDeepEqual(rendered[2], readFileSync(store.imagePath(pid, different.id)));
+    const inspected = await sequences.inspect(pid, definition.id, { snapshotId: captured.id });
+    assert.equal(inspected.sequence.coverage.complete, true);
+    assert.ok(inspected.sequence.coverage.boundaries.every(b => b.covered));
+    store.updateClip(pid, b.id, { revision: b.revision, frames: [...b.frames].reverse(), loop: false });
+    writeFileSync(store.imagePath(pid, different.id), Buffer.from("changed live pixels"));
+    assert.equal(sequences.listSnapshots(pid, definition.id)[0]!.stale, true);
+    for (const [index, frame] of frozen.clip.frames.entries())
+      assert.deepEqual(readFileSync((await store.animation.renderFrame(pid, frozen.id, frame.id)).path), rendered[index]);
+  } finally { store.worker.close(); }
+});
+
 test("inspection of more than 16 frames covers every join, repeat and full-loop boundary using old evidence APIs", async () => {
   const { store, pid, a, b, sequences, segment } = await fixture();
   try {

@@ -12,6 +12,7 @@ export type TaskAction = { expectedRevision: number; action: "pause" | "resume" 
 export type DirectionInput = { expectedRevision: number; accept: boolean; feedback?: string; generatedId?: string; assetId?: string; snapshotId?: string; contentHash?: string };
 export type AttemptInput = { expectedRevision: number; id: string; status: GenerationAttempt["status"]; generatedId?: string; assetId?: string; contentHash?: string; reason?: string };
 export type CheckInput = { expectedRevision: number; check: QualityCheck };
+type StoredTask = ProductionTask & { checkIntentVersions?: Record<string, number> };
 const now = () => new Date().toISOString();
 const fail = (message: string): never => { throw new StudioError(message, 409); };
 
@@ -31,14 +32,14 @@ export class ProductionTasks {
     }
   }
   private path(pid: string, id: string) { uuid.parse(id); return this.store.safePath(pid, `.studio/tasks/${id}.json`); }
-  private raw(pid: string, id: string): ProductionTask {
+  private raw(pid: string, id: string): StoredTask {
     const file = this.path(pid, id);
     if (!existsSync(file)) throw new StudioError("制作任务不存在", 404);
-    const task = JSON.parse(readFileSync(file, "utf8")) as ProductionTask;
+    const task = JSON.parse(readFileSync(file, "utf8")) as StoredTask;
     if (task.id !== id || task.projectId !== pid) throw new StudioError("制作任务不存在", 404);
     return task;
   }
-  private rawList(pid: string): ProductionTask[] {
+  private rawList(pid: string): StoredTask[] {
     const folder = this.store.safePath(pid, ".studio/tasks");
     if (!existsSync(folder)) return [];
     return readdirSync(folder).filter(f => /^[0-9a-f-]{36}\.json$/i.test(f)).map(f => this.raw(pid, f.slice(0, -5)));
@@ -51,14 +52,13 @@ export class ProductionTasks {
     if (!target) return;
     const asset = target.assetId ? this.store.asset(pid, target.assetId) : undefined;
     const clip = target.clipId ? this.store.animation.clip(pid, target.clipId) : undefined;
-    if (asset && clip && asset.id !== clip.id) fail("目标资源与动画不一致");
-    if (target.revision && (clip || asset)?.revision !== target.revision) fail("目标版本已变化");
-    if (target.snapshotId) {
-      const snap = this.store.animation.snapshot(pid, target.snapshotId);
-      if ((clip && snap.clip.id !== clip.id) || (asset && snap.clip.id !== asset.id)) fail("目标快照不属于目标动画");
-    }
-    if (target.draftId) { const d = this.store.frameDrafts.get(pid, target.draftId); if (clip && d.clipId !== clip.id) fail("草稿不属于目标动画"); }
-    const frames = clip?.frames || (target.snapshotId ? this.store.animation.snapshot(pid, target.snapshotId).clip.frames : undefined);
+    const snap = target.snapshotId ? this.store.animation.snapshot(pid, target.snapshotId) : undefined;
+    const draft = target.draftId ? this.store.frameDrafts.get(pid, target.draftId) : undefined;
+    const clipIds = [clip?.id, snap?.clip.id, draft?.clipId, asset?.type === "clip" ? asset.id : undefined].filter((value): value is string => !!value);
+    if (new Set(clipIds).size > 1 || (asset?.type === "image" && clipIds.length)) fail("目标资源、动画、快照或草稿不一致");
+    const revisions = [asset?.revision, clip?.revision, snap?.clip.revision].filter((value): value is string => value !== undefined);
+    if (target.revision && (!revisions.length || revisions.some(value => value !== target.revision))) fail("目标版本已变化");
+    const frames = clip?.frames || snap?.clip.frames || (draft ? this.store.animation.snapshot(pid, draft.baseSnapshotId).clip.frames : undefined);
     if (target.frameId || target.startFrameId || target.endFrameId) {
       if (!frames) fail("帧目标需要动画");
       const start = target.startFrameId ? frames!.findIndex(f => f.id === target.startFrameId) : 0;
@@ -110,7 +110,7 @@ export class ProductionTasks {
     if (old) { if (old.requestHash !== hash) fail("同一请求不能更换任务意图"); return this.view(old); }
     this.validateTarget(pid, spec.target);
     for (const id of [...spec.referenceIds, ...spec.contract.roleReferenceIds]) this.store.imagePath(pid, id);
-    if (spec.contract.scope) { this.scope(pid, spec.contract.scope); if ((spec.target?.clipId && spec.target.clipId !== spec.contract.scope.clipId) || (spec.target?.assetId && spec.target.assetId !== spec.contract.scope.clipId) || (spec.target?.snapshotId && this.store.animation.snapshot(pid, spec.target.snapshotId).clip.id !== spec.contract.scope.clipId)) fail("任务目标与范围不一致"); }
+    if (spec.contract.scope) { this.scope(pid, spec.contract.scope); if ((spec.target?.clipId && spec.target.clipId !== spec.contract.scope.clipId) || (spec.target?.assetId && spec.target.assetId !== spec.contract.scope.clipId) || (spec.target?.snapshotId && this.store.animation.snapshot(pid, spec.target.snapshotId).clip.id !== spec.contract.scope.clipId) || (spec.target?.draftId && this.store.frameDrafts.get(pid, spec.target.draftId).clipId !== spec.contract.scope.clipId)) fail("任务目标与范围不一致"); }
     if (spec.sessionId && this.store.session(spec.sessionId).projectId !== pid) fail("会话不属于该工程");
     const timestamp = now();
     return this.persist({ id: randomUUID(), projectId: pid, requestId: spec.requestId, requestHash: hash, revision: 1, intentVersion: 1, barrierVersion: 1, title: spec.title, description: spec.description, target: spec.target, referenceIds: spec.referenceIds, contract: spec.contract, sessionId: spec.sessionId, phase: "direction", status: "waiting", waitReason: "direction", attempts: [], checks: [], findings: [], directionHistory: [], acceptanceHistory: [], createdAt: timestamp, updatedAt: timestamp });
@@ -119,24 +119,26 @@ export class ProductionTasks {
     const task = this.raw(pid, id); if (!Number.isInteger(revision) || task.revision !== revision) fail("VERSION_CONFLICT：任务已变化"); return task;
   }
   private save(task: ProductionTask) { task.revision++; return this.persist(task); }
+  private interruptAttempts(task: ProductionTask) {
+    for (const attempt of task.attempts) if (attempt.status === "reserved" || attempt.status === "running") {
+      attempt.status = "unknown"; attempt.reason = "版本屏障后生成结果未知，不能自动重发"; attempt.updatedAt = now();
+    }
+  }
   action(pid: string, id: string, input: TaskAction): ProductionTask {
     const spec = z.object({ expectedRevision: z.number().int().positive(), action: z.enum(["pause","resume","stop","handoff","feedback","ready","accept"]), text: z.string().trim().min(1).optional(), snapshotId: uuid.optional() }).strict().parse(input);
     const t = this.edit(pid, id, spec.expectedRevision);
     if (t.status === "stopped") fail("任务已停止");
-    if (["pause", "handoff", "stop", "feedback"].includes(spec.action)) {
-      for (const attempt of t.attempts) if (attempt.status === "reserved" || attempt.status === "running") {
-        attempt.status = "unknown"; attempt.reason = "版本屏障后生成结果未知，不能自动重发"; attempt.updatedAt = now();
-      }
-    }
+    if (["pause", "handoff", "stop", "feedback"].includes(spec.action)) this.interruptAttempts(t);
     switch (spec.action) {
       case "pause": case "handoff": t.barrierVersion++; t.status = "paused"; t.waitReason = undefined; t.error = spec.action === "handoff" ? "人工接手" : "已暂停"; break;
       case "stop": t.barrierVersion++; t.status = "stopped"; t.waitReason = undefined; break;
       case "feedback": if (!spec.text) fail("反馈不能为空"); t.description += `\n${spec.text}`; t.intentVersion++; t.barrierVersion++; t.direction = undefined; t.readySnapshotId = undefined; t.phase = "direction"; t.status = "waiting"; t.waitReason = "direction"; break;
-      case "resume": if (!["paused", "blocked", "waiting"].includes(t.status)) fail("当前状态不能继续"); if (!this.directionCurrent(pid, t)) { t.phase = "direction"; t.status = "waiting"; t.waitReason = "direction"; } else { t.phase = "production"; t.status = "running"; t.waitReason = undefined; } t.error = undefined; break;
+      case "resume": if (!["paused", "blocked", "waiting"].includes(this.view(t).status)) fail("当前状态不能继续"); if (!this.directionCurrent(pid, t)) { t.phase = "direction"; t.status = "waiting"; t.waitReason = "direction"; } else { t.phase = "production"; t.status = "running"; t.waitReason = undefined; } t.readySnapshotId = undefined; t.error = undefined; break;
       case "ready": {
+        if (t.status !== "running" || t.phase !== "production") fail("请先显式恢复制作，再进入验收");
         if (!spec.snapshotId) fail("需要确切快照"); this.currentSnapshot(pid, t, spec.snapshotId!);
         if (!this.directionCurrent(pid, t)) fail("方向未通过或已过期");
-        const checks = t.checks.filter(c => c.snapshotId === spec.snapshotId && JSON.stringify(c.scope) === JSON.stringify(t.contract.scope));
+        const checks = t.checks.filter(c => t.checkIntentVersions?.[c.id] === t.intentVersion && c.snapshotId === spec.snapshotId && JSON.stringify(c.scope) === JSON.stringify(t.contract.scope));
         if (t.contract.requiredChecks.some(k => !checks.some(c => c.kind === k))) fail("检查范围不完整");
         if (t.checks.filter(c => c.snapshotId === spec.snapshotId).some(c => c.status === "failed" || c.findings.some(f => f.status === "failed" && f.resolution !== "resolved"))) fail("已知检查失败不能标为可验收");
         t.readySnapshotId = spec.snapshotId; t.phase = "delivery"; t.status = "ready"; t.waitReason = undefined; t.error = undefined; break;
@@ -147,7 +149,7 @@ export class ProductionTasks {
   }
   decideDirection(pid: string, id: string, input: DirectionInput): ProductionTask {
     const v = z.object({ expectedRevision: z.number().int().positive(), accept: z.boolean(), feedback: z.string().trim().min(1).optional(), generatedId: uuid.optional(), assetId: uuid.optional(), snapshotId: uuid.optional(), contentHash: z.string().optional() }).strict().parse(input);
-    const t = this.edit(pid,id,v.expectedRevision); if (t.status === "stopped") fail("任务已停止");
+    const t = this.edit(pid,id,v.expectedRevision); if (t.status !== "waiting" || t.phase !== "direction" || t.waitReason !== "direction") fail("请先显式恢复并进入方向等待状态");
     if (!v.accept && !v.feedback) fail("驳回方向需要意见");
     if (![v.generatedId, v.assetId, v.snapshotId].some(Boolean) || (v.snapshotId && (v.generatedId || v.assetId))) fail("方向需要确切产物或快照");
     let hash: string | undefined;
@@ -158,7 +160,7 @@ export class ProductionTasks {
     const decision: DirectionDecision = { accept: v.accept, feedback: v.feedback, generatedId: v.generatedId, assetId: v.assetId, snapshotId: v.snapshotId, contentHash: hash!, intentVersion: t.intentVersion, createdAt: now() };
     t.directionHistory.push(decision); t.direction = decision; t.readySnapshotId = undefined;
     if (v.accept) { t.phase = "production"; t.status = "running"; t.waitReason = undefined; }
-    else { t.intentVersion++; t.barrierVersion++; t.phase = "direction"; t.status = "waiting"; t.waitReason = "direction"; }
+    else { this.interruptAttempts(t); t.intentVersion++; t.barrierVersion++; t.phase = "direction"; t.status = "waiting"; t.waitReason = "direction"; }
     return this.save(t);
   }
   recordAttempt(pid: string, id: string, input: AttemptInput): ProductionTask {
@@ -188,6 +190,7 @@ export class ProductionTasks {
     const existing = t.checks.find(c => c.id === v.check.id);
     if (existing) { if (JSON.stringify(existing) !== JSON.stringify(v.check)) fail("相同检查ID不能更换内容"); return t; }
     t.checks.push(v.check); t.findings.push(...v.check.findings);
+    (t.checkIntentVersions ??= {})[v.check.id] = t.intentVersion;
     if (t.status === "ready" || t.status === "accepted") { t.status = "blocked"; t.waitReason = "scope"; }
     return this.save(t);
   }

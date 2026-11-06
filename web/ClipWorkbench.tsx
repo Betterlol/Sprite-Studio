@@ -2,17 +2,19 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Play, Pause, Maximize2, ZoomIn, ZoomOut, Save, Undo2, Redo2 } from "lucide-react";
 import { AnimationEditor } from "./AnimationEditor.tsx";
+import { LegacyFrameDrafts } from "./LegacyFrameDrafts.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
 import { api } from "./api.ts";
-import { assetUrl, snapshotFrameUrl, type Asset, type ClipAsset, type FrameTransform } from "../studio/model.ts";
+import { assetUrl, snapshotFrameUrl, type Asset, type ClipAsset, type FrameTransform, type FrameDraft } from "../studio/model.ts";
 import { clipEditSchema, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type EditingContext } from "../studio/workflow-model.ts";
-import { clipEdit, contextFor, dependencyKey, dependencyConflicts, sameClipText, samePreview, DraftQueue, editorReducer, editorState, offsetByDrag, shortcutAllowed, type EditorAction } from "./workflow-state.ts";
+import { clipEdit, contextFor, dependencyKey, dependencyConflicts, sameClipText, samePreview, DraftQueue, editorReducer, editorState, legacyDerivation, finishFrameDrag, offsetByDrag, shortcutAllowed, type EditorAction } from "./workflow-state.ts";
 
 export type ClipEditorBridge = { clipId: string; stabilize: () => Promise<EditingContext> };
 const defaults: FrameTransform = { scale: 1, offsetX: 0, offsetY: 0, clip: false };
 
-export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, playing, onPlaying: setPlaying, propertiesHost, locked, onContext, onBridge, onSaved, onTool }: {
+export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, playing, onPlaying: setPlaying, propertiesHost, locked, onContext, onBridge, onSaved, onTool, legacyDrafts, onLegacyPreview }: {
   projectId: string; clip: ClipAsset; assets: Asset[]; frameIndex: number; onFrame: (index: number) => void;
+  legacyDrafts: FrameDraft[]; onLegacyPreview: (snapshotId: string) => void;
   playing: boolean; onPlaying: (value: boolean) => void;
   propertiesHost: HTMLElement | null; locked?: string; onContext: (context: EditingContext) => void;
   onBridge: (bridge: ClipEditorBridge | null) => void; onSaved: () => Promise<void>; onTool: (tool: "interpolate" | "review") => void;
@@ -57,12 +59,12 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
     if (!frame) return;
     act({ type: "edit", edit: { ...current.current.present, frames: current.current.present.frames.map(f => f.id === frame.id ? { ...f, ...change } : f) } });
   }
-  async function open(fresh = false) {
+  async function open(fresh = false, fromDraft?: FrameDraft) {
     const token = ++generation.current;
     setBusy("载入草稿"); setError(""); setConflict(false); setPreview(null);
     try {
       const recovery = fresh ? null : JSON.parse(localStorage.getItem(storageKey) || "null") as { id: string; revision: string; baseRevision: string; text: string; dependencies?: string; assetVersions?: Record<string,string> } | null;
-      const doc = recovery ? await api<ClipDraftDocument>(`${path}/${recovery.id}`) : await api<ClipDraftDocument>(path, { method: "POST", body: JSON.stringify({ clipId: clip.id, revision: latest.current.clip.revision, source: "human" }) });
+      const doc = recovery ? await api<ClipDraftDocument>(`${path}/${recovery.id}`) : await api<ClipDraftDocument>(path, { method: "POST", body: JSON.stringify(fromDraft ? legacyDerivation(latest.current.clip, fromDraft) : { clipId: clip.id, revision: latest.current.clip.revision, source: "human" }) });
       if (!mounted.current || token !== generation.current) return;
       const recoveredText = recovery?.text || doc.text;
       const edit = clipEditSchema.parse(JSON.parse(recoveredText));
@@ -194,6 +196,19 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
     } catch (error) { if (mounted.current && token === generation.current) setError((error as Error).message); }
     finally { if (mounted.current) setBusy(""); }
   }
+  const hasUnifiedChanges = !sameClipText(text, JSON.stringify(clipEdit(clip)));
+  const deriveDisabledReason = locked ? "请先成功接手此对象，旧草稿仍可只读查看。" : busy ? "请等待当前草稿操作完成。" : hasUnifiedChanges ? "当前统一草稿有未保存修改，请先保存或明确放弃，再派生旧草稿。" : undefined;
+  async function deriveLegacy(draft: FrameDraft) {
+    if (deriveDisabledReason) throw new Error(deriveDisabledReason);
+    const token = generation.current;
+    setBusy("派生旧草稿"); setError("");
+    try {
+      if (queue.current?.document.draft.status === "editing" && queue.current.document.draft.source === "human") await queue.current.flush();
+      if (!mounted.current || token !== generation.current || latest.current.locked) return;
+      await open(true, draft);
+    } catch (error) { if (mounted.current && token === generation.current) setError((error as Error).message); }
+    finally { if (mounted.current && token === generation.current) setBusy(""); }
+  }
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (!shortcutAllowed(event.target) || globalThis.document.querySelector('.modal-backdrop,[role="dialog"],dialog[open]')) return;
@@ -201,12 +216,13 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
       if (modifier && event.key.toLowerCase() === "s") { event.preventDefault(); void save(); }
       else if (modifier && (event.key.toLowerCase() === "z" || event.key.toLowerCase() === "y")) { event.preventDefault(); act({ type: event.shiftKey || event.key.toLowerCase() === "y" ? "redo" : "undo" }); }
       else if (event.code === "Space") { event.preventDefault(); setPlaying(!playing); }
-      else if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); setPlaying(false); onFrame(Math.max(0, Math.min(editor.present.frames.length - 1, frameIndex + (event.key === "ArrowRight" ? 1 : -1)))); }
+      else if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); drag.current = null; setDragOffset(null); setPlaying(false); onFrame(Math.max(0, Math.min(editor.present.frames.length - 1, frameIndex + (event.key === "ArrowRight" ? 1 : -1)))); }
       else if (event.key === "Delete" && frame) { event.preventDefault(); act({ type: "edit", edit: { ...editor.present, frames: editor.present.frames.filter(f => f.id !== frame.id) } }); }
     }; window.addEventListener("keydown", keydown); return () => window.removeEventListener("keydown", keydown);
   });
-  const drag = useRef<{ x: number; y: number; transform: FrameTransform; scale: number; dx: number; dy: number } | null>(null);
+  const drag = useRef<{ frameId: string; x: number; y: number; transform: FrameTransform; scale: number; dx: number; dy: number } | null>(null);
   const [dragOffset, setDragOffset] = useState<{ offsetX: number; offsetY: number } | null>(null);
+  useEffect(() => { drag.current = null; setDragOffset(null); }, [frame?.id]);
   const shownTransform = { ...transform, ...dragOffset };
   return <>
     <div className="draft-toolbar" role="status">
@@ -221,10 +237,10 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
         onPointerDown={event => {
           if (readonly || busy || !frame || playing || event.button !== 0) return;
           event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);
-          drag.current = { x: event.clientX, y: event.clientY, transform, scale, dx: 0, dy: 0 };
+          drag.current = { frameId: frame.id, x: event.clientX, y: event.clientY, transform, scale, dx: 0, dy: 0 };
         }}
-        onPointerMove={event => { const d = drag.current; if (!d) return; d.dx = event.clientX - d.x; d.dy = event.clientY - d.y; setDragOffset(offsetByDrag(d.transform.offsetX, d.transform.offsetY, d.dx, d.dy, d.scale)); }}
-        onPointerUp={event => { const d = drag.current; drag.current = null; setDragOffset(null); if (d && !readonly) patchFrame({ transform: { ...d.transform, ...offsetByDrag(d.transform.offsetX, d.transform.offsetY, d.dx, d.dy, d.scale) } }); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+        onPointerMove={event => { const d = drag.current; if (!d) return; if (d.frameId !== current.current.present.frames[latest.current.frameIndex]?.id) { drag.current = null; setDragOffset(null); return; } d.dx = event.clientX - d.x; d.dy = event.clientY - d.y; setDragOffset(offsetByDrag(d.transform.offsetX, d.transform.offsetY, d.dx, d.dy, d.scale)); }}
+        onPointerUp={event => { const d = drag.current; drag.current = null; setDragOffset(null); if (d && !readonly) { const edit = finishFrameDrag(current.current.present, current.current.present.frames[latest.current.frameIndex]?.id, d.frameId, { ...d.transform, ...offsetByDrag(d.transform.offsetX, d.transform.offsetY, d.dx, d.dy, d.scale) }); if (edit) act({type:"edit",edit}); } if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
         onPointerCancel={() => { drag.current = null; setDragOffset(null); }}>
         {frame && image?.type === "image" ? <img draggable={false} alt={`${clip.name} 第 ${frameIndex + 1} 帧实例`} src={validPreview && !dragOffset ? snapshotFrameUrl(projectId, validPreview.preview.id, frame.id) : assetUrl(projectId, image.id, image.revision)}
           style={validPreview && !dragOffset ? undefined : { transform: `translate(${shownTransform.offsetX * scale}px, ${shownTransform.offsetY * scale}px) scale(${shownTransform.scale})` }}/>
@@ -250,6 +266,7 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
       {validPreview?.warnings.map((warning,i) => <p key={i} className="interpolation-warning">第 {warning.frameNumber ?? "?"} 帧内容超出画布{warning.blocking ? "，保存受阻" : "，已允许裁切"}。</p>)}
       {error && <p role="alert" className="interpolation-warning">{error}</p>}
       {(conflict || error || document?.draft.source === "agent") && <><details><summary>保留的草稿正文（可复制）</summary><textarea aria-label="保留的草稿正文" readOnly value={text}/></details><button className="secondary" disabled={!!locked || !!busy} onClick={() => { if (window.confirm("从当前保存版本重建草稿？本机未保存内容请先复制。旧服务草稿仍保留。")) { localStorage.removeItem(storageKey); void open(true); } }}>从当前版本重新建立草稿</button></>}
+      <LegacyFrameDrafts projectId={projectId} clipId={clip.id} drafts={legacyDrafts} deriveDisabledReason={deriveDisabledReason} onPreview={onLegacyPreview} onDerive={deriveLegacy}/>
       <p className="adjust-note">自动暂存不等于保存动画。拖动画布移动所选帧；左右箭头切帧，Space 播放，Ctrl+S 保存，Ctrl+Z / Ctrl+Shift+Z 撤销重做。</p>
     </div>, propertiesHost)}
   </>;

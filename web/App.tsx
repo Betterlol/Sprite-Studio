@@ -3,7 +3,7 @@ import { ClipWorkbench, type ClipEditorBridge } from "./ClipWorkbench.tsx";
 import { TaskCenter, QualityStatus } from "./TaskCenter.tsx";
 import { ReviewSequences } from "./ReviewSequences.tsx";
 import { SnapshotPlayer } from "./SnapshotPlayer.tsx";
-import { editingBlock } from "./workflow-state.ts";
+import { editingBlock, ordinaryConversation, taskConversation, assertConversation, conversationDestination, type ConversationSelection } from "./workflow-state.ts";
 import type { EditingContext, ProductionTask, QualityCapabilities, ReviewSequenceDefinition } from "../studio/workflow-model.ts";
 import { PermissionSettings } from "./PermissionSettings.tsx";
 import { ToolApprovals } from "./ToolApprovals.tsx";
@@ -147,7 +147,10 @@ export function App() {
   const projectRef = useRef("");
   const loadVersion = useRef(0), initialLoad = useRef("");
   const [selectedId, setSelectedId] = useState("");
-  const [sessionId, setSessionId] = useState("");
+  const [conversation, setConversation] = useState<ConversationSelection>({ taskId: "", sessionId: "" });
+  const { taskId, sessionId } = conversation;
+  const conversationEpoch = useRef(0), latestTasks = useRef<ProductionTask[]>([]);
+  latestTasks.current = state?.tasks || [];
   const [connection, setConnection] = useState<Connection>({
     connected: false,
   });
@@ -228,7 +231,6 @@ export function App() {
   const [propertiesHost, setPropertiesHost] = useState<HTMLDivElement | null>(null);
   const [context, setContext] = useState<EditingContext | null>(null);
   const [useContext, setUseContext] = useState(true), [shareDraft, setShareDraft] = useState(false);
-  const [taskId, setTaskId] = useState("");
   const [handoffs, setHandoffs] = useState<Record<string, number>>({});
   const [fixedSnapshot, setFixedSnapshot] = useState<ClipSnapshot | null>(null);
   const [sending, setSending] = useState(false);
@@ -331,7 +333,7 @@ export function App() {
       )
         ? storedSession!
         : next.sessions[0]?.id || "";
-      setSessionId(nextSession);
+      setConversation(ordinaryConversation(next.tasks || [], nextSession));
       setDraft(localStorage.getItem(`studio.draft.${id}.${nextSession}`) || "");
       setReferences([]);
       setClipReferences([]);
@@ -486,7 +488,7 @@ export function App() {
     }
   }
   function chooseProject(id: string) {
-    setTaskId(""); setHandoffs({}); setContext(null); setShareDraft(false); setFixedSnapshot(null);
+    conversationEpoch.current++; setConversation({taskId:"",sessionId:""}); setHandoffs({}); setContext(null); setShareDraft(false); setFixedSnapshot(null);
     setComparison(null);
     setClipReferences([]);
     projectRef.current = id;
@@ -495,17 +497,25 @@ export function App() {
     setFolder("");
     void loadProject(id, true).catch((error) => notify(error.message, true));
   }
+  function selectConversation(next: ConversationSelection) {
+    conversationEpoch.current++;
+    setConversation(next);
+    setDraft(localStorage.getItem(`studio.draft.${projectId}.${next.sessionId}`) || "");
+    setReferences([]); setClipReferences([]); setPromptAnswers({});
+  }
   function chooseSession(id: string) {
-    setSessionId(id);
-    setDraft(localStorage.getItem(`studio.draft.${projectId}.${id}`) || "");
-    setReferences([]);
-    setClipReferences([]);
-    setPromptAnswers({});
+    selectConversation(ordinaryConversation(state?.tasks || [], id));
   }
   function chooseTask(id: string) {
-    setTaskId(id);
+    if (!id) { chooseSession(""); return; }
     const task = state?.tasks?.find(task => task.id === id);
-    chooseSession(task?.sessionId || "");
+    if (!task) { notify("任务正在同步，请刷新后重试；当前对话未改变",true); return; }
+    selectConversation(taskConversation(task));
+  }
+  function createdTask(task: ProductionTask) {
+    if (task.projectId !== projectRef.current) return;
+    setState(old => old ? {...old,tasks:[...(old.tasks || []).filter(item=>item.id!==task.id),task]} : old);
+    selectConversation(taskConversation(task));
   }
   async function deleteSession() {
     if (!session || active(session)) return;
@@ -522,16 +532,16 @@ export function App() {
       notify(error.message, true);
     }
   }
-  async function makeSession() {
+  async function makeSession(epoch: number) {
     const originalProject = projectId;
     const created = await api<Session>(`/api/projects/${projectId}/sessions`, {
       method: "POST",
     });
-    if (projectRef.current !== originalProject) throw new Error("工程已切换，对话未作为当前对话打开");
+    if (projectRef.current !== originalProject || epoch !== conversationEpoch.current) throw new Error("工程或对话已切换，消息未发送");
     setState((old) =>
       old ? { ...old, sessions: mergeSessions(old.sessions, [created]) } : old,
     );
-    setSessionId(created.id);
+    setConversation(old => ({...old,sessionId:created.id}));
     return created;
   }
   function addReference(id?: string) {
@@ -632,11 +642,14 @@ export function App() {
       attached = [...references],
       attachedClips = [...clipReferences],
       originalProject = projectId;
+    const submittedSelection = conversation, submittedEpoch = conversationEpoch.current;
     try {
+      const destination = conversationDestination(latestTasks.current, submittedSelection);
       const frozenContext = await stableContext();
-      if (projectRef.current !== originalProject) throw new Error("工程已切换，消息未发送");
-      const target = session || (await makeSession());
-      if (projectRef.current !== originalProject) throw new Error("工程已切换，消息未发送");
+      if (projectRef.current !== originalProject || submittedEpoch !== conversationEpoch.current) throw new Error("工程或对话已切换，消息未发送");
+      const target = destination.needsSession ? await makeSession(submittedEpoch) : {id:destination.sessionId};
+      if (projectRef.current !== originalProject || submittedEpoch !== conversationEpoch.current) throw new Error("工程或对话已切换，消息未发送");
+      assertConversation(latestTasks.current,{taskId:submittedSelection.taskId,sessionId:target.id});
       setDraft(old => old.trim() === text ? "" : old);
       setReferences(old => old.filter(id => !attached.includes(id)));
       setClipReferences(old => old.filter(ref => !attachedClips.some(item => item.clipId === ref.clipId)));
@@ -647,7 +660,7 @@ export function App() {
           body: JSON.stringify({
             text,
             context: frozenContext,
-            taskId: taskId || undefined,
+            taskId: submittedSelection.taskId || undefined,
             model: agentModel,
             assetIds: attached,
             outputFolder: folder,
@@ -663,7 +676,7 @@ export function App() {
             : old,
         );
     } catch (error) {
-      if (projectRef.current === originalProject) {
+      if (projectRef.current === originalProject && submittedEpoch === conversationEpoch.current) {
         setDraft((old) => old || text);
         setReferences(old => [...new Set([...old,...attached])]);
         setClipReferences(old => [...old,...attachedClips.filter(ref => !old.some(item => item.clipId === ref.clipId))]);
@@ -926,6 +939,7 @@ export function App() {
             frameIndex={frameIndex} onFrame={setFrameIndex} playing={playing} onPlaying={setPlaying} propertiesHost={propertiesHost}
             locked={blocker ? `任务“${blocker.title}”持有此对象` : undefined}
             onContext={updateContext} onBridge={setBridge} onSaved={() => refreshRef.current()}
+            legacyDrafts={state?.frameDrafts || []} onLegacyPreview={id => void playSnapshot(id)}
             onTool={value => { setTool(value); setRightTab(value === "review" ? "checks" : "properties"); }}
           /> : <>
           <div className={`stage ${background}`} ref={stage}>
@@ -1392,7 +1406,7 @@ export function App() {
               </select>
             )}
             <div className="messages">
-              <TaskCenter key={projectId} projectId={projectId} tasks={state?.tasks || []} sessions={state?.sessions || []} assets={state?.assets || []} referenceIds={references} selectedTaskId={taskId} onSelect={chooseTask} onRefresh={() => refreshRef.current()} onHandoff={task => setHandoffs(old => ({...old,[task.id]:task.barrierVersion}))} stabilize={stableContext} onPlay={id => void playSnapshot(id)} onBrowse={setSelectedId}/>
+              <TaskCenter key={projectId} projectId={projectId} tasks={state?.tasks || []} sessions={state?.sessions || []} assets={state?.assets || []} referenceIds={references} selectedTaskId={taskId} onSelect={chooseTask} onCreated={createdTask} onRefresh={() => refreshRef.current()} onHandoff={task => setHandoffs(old => ({...old,[task.id]:task.barrierVersion}))} stabilize={stableContext} onPlay={id => void playSnapshot(id)} onBrowse={setSelectedId}/>
 
               {!session?.messages.length && (
                 <div className="chat-empty">

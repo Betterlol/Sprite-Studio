@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api.ts";
+import { directionMaterial, directionPayload, taskFeedbackPayload, taskSaveApproval } from "./workflow-state.ts";
 import { assetUrl, type Asset, type Session } from "../studio/model.ts";
 import type { EditingContext, ProductionTask, QualityCapabilities } from "../studio/workflow-model.ts";
 const phases = {direction:"方向确认",production:"制作中",delivery:"交付"};
@@ -8,12 +9,13 @@ const reasons = {direction:"等待方向决定",tool_approval:"等待工具审�
 export function QualityStatus({capabilities}:{capabilities?:QualityCapabilities}) {
   return <div className="quality-capabilities"><strong>检查能力边界</strong><p>静态检查：{capabilities?.static.verified ? capabilities.static.categories.join("、") || "可用" : "尚未验证"}。具体通过范围以快照证据为准。</p><p>动态时序：{capabilities?.temporal.verified ? `受控类别 ${capabilities.temporal.categories.join("、")}；仍需人工播放验收` : "未验证 · 待人工实际播放验收"}。</p><p>无人值守重生成不可用。{capabilities?.reason || "尚无已验证的生成调用前预算硬限制。"}</p></div>;
 }
-export function TaskCenter({projectId,tasks,sessions,assets,referenceIds,selectedTaskId,onSelect,onRefresh,onHandoff,stabilize,onPlay,onBrowse}: {
+export function TaskCenter({projectId,tasks,sessions,assets,referenceIds,selectedTaskId,onSelect,onCreated,onRefresh,onHandoff,stabilize,onPlay,onBrowse}: {
   projectId:string; tasks:ProductionTask[]; sessions:Session[]; assets:Asset[]; referenceIds:string[]; selectedTaskId:string;
-  onSelect:(id:string)=>void; onRefresh:()=>Promise<void>; onHandoff:(task:ProductionTask)=>void;
+  onSelect:(id:string)=>void; onCreated:(task:ProductionTask)=>void; onRefresh:()=>Promise<void>; onHandoff:(task:ProductionTask)=>void;
   stabilize:()=>Promise<EditingContext | undefined>; onPlay:(snapshotId:string)=>void; onBrowse:(id:string)=>void;
 }) {
   const [description,setDescription]=useState(""),[feedback,setFeedback]=useState<Record<string,string>>({}),[busy,setBusy]=useState(""),[errors,setErrors]=useState<Record<string,string>>({});
+  const [feedbackKinds,setFeedbackKinds]=useState<Record<string,"local"|"direction">>({}),[locations,setLocations]=useState<Record<string,string>>({});
   const request=useRef({key:"",id:crypto.randomUUID()}), mounted=useRef(true);
   useEffect(() => { mounted.current=true; return () => { mounted.current=false; }; },[]);
   const target=tasks.find(t=>t.id===selectedTaskId);
@@ -27,24 +29,26 @@ export function TaskCenter({projectId,tasks,sessions,assets,referenceIds,selecte
       if(request.current.key!==key)request.current={key,id:crypto.randomUUID()};
       const task=await api<ProductionTask>(`/api/projects/${projectId}/tasks`,{method:"POST",body:JSON.stringify({requestId:request.current.id,title:description.trim().slice(0,80),description:description.trim(),target:context,referenceIds})});
       if (!mounted.current) return;
-      onSelect(task.id);setDescription("");await onRefresh();
+      onCreated(task);setDescription("");await onRefresh();
     });
   }
-  async function action(task:ProductionTask,action:string,textOverride?:string) {
+  async function action(task:ProductionTask,action:string) {
     await run(task.id,async()=>{
-      const next=await api<ProductionTask>(`/api/projects/${projectId}/tasks/${task.id}/actions`,{method:"POST",body:JSON.stringify({expectedRevision:task.revision,action,...(action==="feedback"?{text:textOverride || feedback[task.id] || ""}:{}),...(action==="accept"?{snapshotId:task.readySnapshotId}:{})})});
+      const session=sessions.find(session=>session.id===task.sessionId);
+      const kind=feedbackKinds[task.id] || (task.direction?.accept&&task.direction.intentVersion===task.intentVersion?"local":"direction");
+      const body=action==="feedback" || action==="save-location" ? taskFeedbackPayload(task,action,action==="save-location"?locations[task.id] || "":feedback[task.id] || "",session,kind) : {expectedRevision:task.revision,action,...(action==="accept"?{snapshotId:task.readySnapshotId}:{})};
+      const next=await api<ProductionTask>(`/api/projects/${projectId}/tasks/${task.id}/actions`,{method:"POST",body:JSON.stringify(body)});
       if (!mounted.current) return;
       if(action==="handoff")onHandoff(next);
       if(action==="feedback")setFeedback(v=>({...v,[task.id]:""}));
+      if(action==="save-location")setLocations(v=>({...v,[task.id]:""}));
       await onRefresh();
     });
   }
   async function direction(task:ProductionTask,accept:boolean) {
     await run(task.id,async()=>{
       const session=sessions.find(s=>s.id===task.sessionId);
-      const approval=session?.toolApproval?.tool==="save_image"?session.toolApproval:undefined;
-      const result=[...task.attempts].reverse().find(a=>a.status==="completed" || a.status==="running");
-      await api<ProductionTask>(`/api/projects/${projectId}/tasks/${task.id}/direction`,{method:"POST",body:JSON.stringify({expectedRevision:task.revision,accept,feedback:feedback[task.id] || "",generatedId:typeof approval?.arguments.generatedId==="string"?approval.arguments.generatedId:result?.generatedId,assetId:result?.assetId || task.target?.assetId,snapshotId:task.readySnapshotId || task.target?.snapshotId,...(approval?{toolApproval:{sessionId:session!.id,approvalId:approval.id}}:{})})});
+      await api<ProductionTask>(`/api/projects/${projectId}/tasks/${task.id}/direction`,{method:"POST",body:JSON.stringify(directionPayload(task,session,accept,feedback[task.id] || ""))});
       if (!mounted.current) return;
       setFeedback(v=>({...v,[task.id]:""}));await onRefresh();
     });
@@ -55,9 +59,9 @@ export function TaskCenter({projectId,tasks,sessions,assets,referenceIds,selecte
     <div className="task-list">{tasks.map(task => <button className="text-button" key={task.id} onClick={() => onSelect(task.id)}>{task.title} · {phases[task.phase]} / {statuses[task.status]}{task.waitReason ? ` · ${reasons[task.waitReason]}` : ""}</button>)}</div>
     {cards.map(task=>{
       const session=sessions.find(s=>s.id===task.sessionId);
-      const approval=session?.toolApproval?.tool==="save_image"?session.toolApproval:undefined;
-      const attempt=[...task.attempts].reverse().find(a=>a.generatedId || a.assetId);
-      const result=assets.find(a=>a.id===(attempt?.assetId || task.target?.assetId));
+      const approval=taskSaveApproval(task,session);
+      const material=directionMaterial(task,session);
+      const result=material?.kind==="asset"?assets.find(a=>a.id===material.assetId):undefined;
       const frozenTarget=assets.find(a=>a.id===(task.target?.clipId || task.target?.assetId));
       const stale=!!task.target?.revision&&!!frozenTarget&&frozenTarget.revision!==task.target.revision;
       const hasDirection=task.direction?.accept&&task.direction.intentVersion===task.intentVersion;
@@ -69,22 +73,24 @@ export function TaskCenter({projectId,tasks,sessions,assets,referenceIds,selecte
         <details><summary>冻结范围、参考与制作约定</summary><pre>{JSON.stringify({target:task.target,referenceIds:task.referenceIds,contract:task.contract},null,2)}</pre></details>
         <p>生成上限 {task.contract.generationLimit} 次；无人值守重生成不可用，动态时序待人工播放验收。</p>
         {stale&&<p className="interpolation-warning">目标当前已修改；旧决定和验收仅指向原快照，需重新检查。</p>}
-        {(approval || attempt?.generatedId)&&<img className="approval-image" src={`/api/projects/${projectId}/generated/${String(approval?.arguments.generatedId || attempt?.generatedId)}/image`} alt="本次方向的真实生成图集"/>}
+        {material?.kind==="generated"&&<img className="approval-image" src={`/api/projects/${projectId}/generated/${material.generatedId}/image`} alt="此次方向决定对应的确切生成图集"/>}
         {result?.type==="image"&&<button onClick={()=>onBrowse(result.id)}><img className="approval-image" src={assetUrl(projectId,result.id,result.revision)} alt="已保存方向产物"/>查看已有图片</button>}
-        {task.target?.snapshotId&&<button className="secondary" onClick={()=>onPlay(task.target!.snapshotId!)}>播放已有粗动画（固定快照）</button>}
+        {material?.kind==="snapshot"&&<button className="secondary" onClick={()=>onPlay(material.snapshotId)}>播放此次方向的固定粗动画</button>}
+        {task.target?.snapshotId && material?.kind!=="snapshot"&&<button className="text-button" onClick={()=>onPlay(task.target!.snapshotId!)}>查看输入参考快照（不是此次方向产物）</button>}
         {approval && <details><summary>冻结的保存请求参数</summary><pre>{JSON.stringify(approval.arguments,null,2)}</pre></details>}
         {task.phase==="direction"&&!hasDirection&&<>
           <p>{approval?`方向通过将同时批准此冻结保存请求：${approval.arguments.type==="reference"?"参考图":"原图素材"}/${String(approval.arguments.folder || "")}/${String(approval.arguments.name || "")}`:"产物已保存或保存无需审批；方向决定独立记录，不表示动态验收通过。"}</p>
-          <p>只修改路径：反馈中写明新位置并选择“只改保存位置”；这不是重新生成，不改变已有方向。</p>
-          <button className="primary" disabled={!!busy || (!approval&&!attempt?.assetId&&!attempt?.generatedId&&!task.target?.assetId&&!task.target?.snapshotId)} onClick={()=>void direction(task,true)}>{approval?"方向通过并保存，继续制作":"方向通过，继续制作"}</button>
-          <button className="secondary" disabled={!!busy} onClick={()=>void direction(task,false)}>方向不对，返回意见</button>
+          <p>仅改保存位置请使用独立的位置意见入口；旧冻结请求会被拒绝，助手使用同一生成图重新提请保存，不重新生成，也不改变方向认可。</p>
+          <button className="primary" disabled={!!busy || !material} onClick={()=>void direction(task,true)}>{approval?"方向通过并保存，继续制作":"方向通过，继续制作"}</button>
+          <button className="secondary" disabled={!!busy || !material} onClick={()=>void direction(task,false)}>方向不对，返回意见</button>
         </>}
         {hasDirection&&<p>方向已通过；工具执行与保存结果另行记录。</p>}
         {task.attempts.map(a=><p key={a.id}>生成尝试：{a.status} {a.reason || ""}{a.status==="unknown"?" · 结果未知，不能自动重发":""}</p>)}
-        <label>局部意见 / 范围说明<textarea aria-label="任务反馈" disabled={!!busy} value={feedback[task.id] || ""} onChange={e=>setFeedback(v=>({...v,[task.id]:e.target.value}))}/></label>
+        <label>反馈类型<select aria-label="任务反馈类型" value={feedbackKinds[task.id] || (hasDirection?"local":"direction")} disabled={!!busy} onChange={e=>setFeedbackKinds(old=>({...old,[task.id]:e.target.value as "local"|"direction"}))}><option value="local" disabled={!hasDirection}>局部调整（保留方向）</option><option value="direction">改变方向（重新确认）</option></select></label>
+        <label>调整意见<textarea aria-label="任务反馈" disabled={!!busy} value={feedback[task.id] || ""} onChange={e=>setFeedback(v=>({...v,[task.id]:e.target.value}))}/></label>
+        {approval&&<fieldset disabled={!!busy}><legend>只修改保存位置（不重新生成）</legend><label>位置意见<textarea aria-label="保存位置意见" value={locations[task.id] || ""} onChange={e=>setLocations(old=>({...old,[task.id]:e.target.value}))}/></label><button disabled={!locations[task.id]?.trim()} onClick={()=>void action(task,"save-location")}>拒绝旧保存并提交位置意见</button><small>不会直接执行新位置；助手必须以新冻结请求重新提请保存。</small></fieldset>}
         <div className="task-actions">
-          <button disabled={!!busy || !feedback[task.id]?.trim()} onClick={()=>void action(task,"feedback")}>发送反馈</button>
-          {approval&&<button disabled={!!busy || !feedback[task.id]?.trim()} onClick={()=>void action(task,"feedback",`只修改保存位置，不重新生成，不推翻既有方向：${feedback[task.id] || ""}`)}>只改保存位置</button>}
+          <button disabled={!!busy || !feedback[task.id]?.trim() || (feedbackKinds[task.id]==="local"&&!hasDirection)} onClick={()=>void action(task,"feedback")}>提交所选类型反馈</button>
           <button disabled={!!busy || task.status==="paused" || ["stopped","accepted"].includes(task.status)} onClick={()=>void action(task,"pause")}>暂停</button>
           <button disabled={!!busy || !["paused","blocked","waiting"].includes(task.status)} onClick={()=>void action(task,"resume")}>继续</button>
           <button disabled={!!busy || ["stopped","accepted"].includes(task.status)} onClick={()=>void action(task,"stop")}>停止</button>

@@ -13,7 +13,7 @@
     "protocol": "node probes/protocol.ts",
     "fixtures": "python probes/fixtures.py",
     "typecheck": "tsc --noEmit",
-    "test": "node --test probes/*.test.ts studio/*.test.ts",
+    "test": "node --test probes/*.test.ts studio/*.test.ts web/*.test.ts",
     "verify": "node probes/verify.ts"
   },
   "devDependencies": {

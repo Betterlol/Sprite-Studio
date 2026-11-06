@@ -116,6 +116,29 @@ test("2 pause and handoff require explicit resume before direction or ready", as
   t = f.tasks.action(f.pid,t.id,{expectedRevision:t.revision,action:"ready",snapshotId:f.snapshot.id}); assert.equal(t.status,"ready");
  } finally { f.store.worker.close(); rmSync(f.root,{recursive:true,force:true}); }
 });
+test("feedback after handoff or pause never resumes execution", async () => {
+ const f = await fixture(); try {
+  for (const action of ["handoff", "pause"] as const) {
+   let t = f.tasks.create(f.pid,{...f.input,requestId:randomUUID()});
+   t = f.tasks.decideDirection(f.pid,t.id,{expectedRevision:t.revision,accept:true,assetId:f.image.id});
+   for (const c of [check(f.snapshot.id,f.clip.id,"static","passed"),check(f.snapshot.id,f.clip.id,"temporal","unverified")])
+    t = f.tasks.recordCheck(f.pid,t.id,{expectedRevision:t.revision,check:c});
+   t = f.tasks.action(f.pid,t.id,{expectedRevision:t.revision,action});
+   const beforeIntent = t.intentVersion, beforeBarrier = t.barrierVersion, pauseReason = t.error;
+   t = f.tasks.action(f.pid,t.id,{expectedRevision:t.revision,action:"feedback",text:"保留新的要求"});
+   assert.equal(t.status,"paused"); assert.equal(t.phase,"direction"); assert.equal(t.error,pauseReason);
+   assert.equal(t.intentVersion,beforeIntent+1); assert.equal(t.barrierVersion,beforeBarrier+1);
+   assert.match(t.description,/保留新的要求/); assert.equal(t.checks.length,2); assert.equal(t.directionHistory.length,1);
+   assert.throws(() => f.tasks.decideDirection(f.pid,t.id,{expectedRevision:t.revision,accept:true,assetId:f.image.id}),/恢复/);
+   assert.throws(() => f.tasks.action(f.pid,t.id,{expectedRevision:t.revision,action:"ready",snapshotId:f.snapshot.id}),/恢复/);
+   assert.equal(f.tasks.get(f.pid,t.id).status,"paused");
+   t = f.tasks.action(f.pid,t.id,{expectedRevision:t.revision,action:"resume"});
+   assert.equal(t.status,"waiting"); assert.equal(t.waitReason,"direction");
+   t = f.tasks.decideDirection(f.pid,t.id,{expectedRevision:t.revision,accept:true,assetId:f.image.id});
+   assert.equal(t.status,"running");
+  }
+ } finally { f.store.worker.close(); rmSync(f.root,{recursive:true,force:true}); }
+});
 test("3 derived blocked state resumes at the visible revision and preserves acceptance on restart", async () => {
  const f = await fixture(); let restored: ProjectStore | undefined; try {
   let t = f.tasks.create(f.pid,f.input);

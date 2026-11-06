@@ -132,7 +132,7 @@ export class ProductionTasks {
     switch (spec.action) {
       case "pause": case "handoff": t.barrierVersion++; t.status = "paused"; t.waitReason = undefined; t.error = spec.action === "handoff" ? "人工接手" : "已暂停"; break;
       case "stop": t.barrierVersion++; t.status = "stopped"; t.waitReason = undefined; break;
-      case "feedback": if (!spec.text) fail("反馈不能为空"); t.description += `\n${spec.text}`; t.intentVersion++; t.barrierVersion++; t.direction = undefined; t.readySnapshotId = undefined; t.phase = "direction"; t.status = "waiting"; t.waitReason = "direction"; break;
+      case "feedback": if (!spec.text) fail("反馈不能为空"); t.description += `\n${spec.text}`; t.intentVersion++; t.barrierVersion++; t.direction = undefined; t.readySnapshotId = undefined; t.phase = "direction"; if (t.status !== "paused") { t.status = "waiting"; t.waitReason = "direction"; } break;
       case "resume": if (!["paused", "blocked", "waiting"].includes(this.view(t).status)) fail("当前状态不能继续"); if (!this.directionCurrent(pid, t)) { t.phase = "direction"; t.status = "waiting"; t.waitReason = "direction"; } else { t.phase = "production"; t.status = "running"; t.waitReason = undefined; } t.readySnapshotId = undefined; t.error = undefined; break;
       case "ready": {
         if (t.status !== "running" || t.phase !== "production") fail("请先显式恢复制作，再进入验收");

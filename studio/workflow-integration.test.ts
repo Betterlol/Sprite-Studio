@@ -310,13 +310,21 @@ test("known renderer overflow is failed and cannot be self-reported passed or re
   try {
     let clip = f.clip(); clip = f.store.updateClip(f.pid, clip.id, { revision: clip.revision, frames: clip.frames.map((frame, i) => i ? frame : { ...frame, transform: { scale: 2, offsetX: 60, offsetY: 0, clip: false } }), loop: clip.loop });
     let task = await f.create({ target: { mode: "saved", clipId: clip.id } }); task = f.approveExisting(task, task.target!.snapshotId);
-    // Avoid asking the model to view a known invalid saved render; the real task
-    // check uses preview rendering specifically to retain failed evidence.
-    const session = f.store.session(task.sessionId!); session.status = "running"; session.workflowIntent = { taskId: task.id, intentVersion: task.intentVersion, barrierVersion: task.barrierVersion };
+    const session = await f.begin(task);
+    const inputs = f.runtimes.at(-1)!.calls.find(call => call.method === "turn/start")!.input.input;
+    const visualNotice = inputs.find((input: any) => input.type === "text" && input.text.includes("诊断preview"));
+    assert.match(visualNotice.text, /"blocking":true/); assert.match(visualNotice.text, /可能被画布截断/);
+    const actualInput = inputs.find((input: any) => input.type === "localImage"); assert.ok(actualInput);
+    assert.ok(session.workflowReferenceHashes!.includes(sha256(readFileSync(actualInput.path))));
     const check = result(await f.hub.tool(session.id, "workflow_task", { action: "check" })); assert.equal(check.checks[0].status, "failed"); assert.ok(check.checks[0].findings.some((finding: any) => /越界/.test(finding.message)));
     await assert.rejects(f.hub.tool(session.id, "workflow_task", { action: "ready", passed: true }), /Unrecognized|未识别|key/);
     const ready = await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: check.task.revision, action: "ready", snapshotId: check.snapshot.id }); assert.equal(ready.statusCode, 409); assert.match(ready.body, /失败/);
     assert.equal((await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "accept", snapshotId: check.snapshot.id })).statusCode, 409);
+    const draft = result(await f.hub.tool(session.id, "create_clip_draft", { clipId: clip.id, revision: clip.revision }));
+    const repaired = JSON.parse(draft.text); repaired.frames[0].transform = { scale: 0.5, offsetX: 0, offsetY: 0, clip: false };
+    const edited = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(repaired) }] }))[0];
+    await f.hub.tool(session.id, "save_clip_draft", { draftId: draft.documentId, documentRevision: edited.documentRevision });
+    assert.equal(result(await f.hub.tool(session.id, "workflow_task", { action: "ready" })).task.status, "ready");
   } finally { await f.cleanup(); }
 });
 
@@ -593,7 +601,7 @@ test("same-goal source renewal requires typed feedback plus exact context and ne
     assert.equal(response.statusCode, 202, response.body); await waitFor(() => session.status === "running" && session.turnId);
     task = f.store.tasks.get(f.pid, task.id); assert.equal(task.phase, "production"); assert.equal(task.target!.documentRevision, updated.documentRevision); assert.ok(task.direction?.accept);
     const derived = result(await f.hub.tool(session.id, "create_clip_draft", { clipId: clip.id, revision: clip.revision, fromDraftId: human.documentId, expectedFromDocumentRevision: updated.documentRevision })); assert.equal(JSON.parse(derived.text).frames[1].durationUs, 260000);
-    await f.hub.taskAction(f.pid, task.id, { expectedRevision: task.revision, action: "handoff" });
+    await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "handoff" });
     const other = f.clip(), changed = JSON.parse(updated.text); changed.frames[0].imageId = (await f.store.importImage(f.pid, "new-pixels.png", readFileSync(f.sourcePath), "image")).id;
     // Same bytes under another ID remain same source pixels, not a direction change.
     const samePixels = f.store.clipDrafts.write(f.pid, human.documentId, { expectedDocumentRevision: updated.documentRevision, text: JSON.stringify(changed) });
@@ -622,6 +630,166 @@ test("empty clip targets can start production but empty snapshots never count as
     const document = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(body) }] }))[0];
     await f.hub.tool(session.id, "save_clip_draft", { draftId: draft.documentId, documentRevision: document.documentRevision });
     assert.equal(result(await f.hub.tool(session.id, "workflow_task", { action: "ready" })).task.status, "ready");
+  } finally { await f.cleanup(); }
+});
+
+test("review I1: frame targets infer only that frame and explicit scopes must contain the declared selection", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(3), focus = clip.frames[1]!.id;
+    let task = await f.create({ target: { mode: "saved", clipId: clip.id, frameId: focus } });
+    assert.deepEqual(task.contract.scope, { clipId: clip.id, startFrameId: focus, endFrameId: focus });
+    task = f.approveExisting(task, task.target!.snapshotId); const session = await f.begin(task);
+    const draft = result(await f.hub.tool(session.id, "create_clip_draft", { clipId: clip.id, revision: clip.revision }));
+    const outside = JSON.parse(draft.text); outside.frames[0].durationUs = 777000;
+    await assert.rejects(f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(outside) }] }), /区间/);
+    assert.equal(f.store.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 100000);
+    const inside = JSON.parse(draft.text); inside.frames[1].durationUs = 170000;
+    const edited = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(inside) }] }))[0];
+    await f.hub.tool(session.id, "save_clip_draft", { draftId: draft.documentId, documentRevision: edited.documentRevision });
+    assert.deepEqual(f.store.animation.clip(f.pid, clip.id).frames.map(frame => frame.durationUs), [100000, 170000, 100000]);
+    task = await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "feedback", feedbackKind: "local", text: "只继续选中帧" });
+    assert.deepEqual(task.contract.scope, { clipId: clip.id, startFrameId: focus, endFrameId: focus });
+    const range = await f.create({ target: { mode: "saved", clipId: clip.id, startFrameId: focus, endFrameId: clip.frames[2]!.id } });
+    assert.deepEqual(range.contract.scope, { clipId: clip.id, startFrameId: focus, endFrameId: clip.frames[2]!.id });
+    const bad = await f.api(`/api/projects/${f.pid}/tasks`, { requestId: randomUUID(), title: "bad explicit scope", description: "x", target: { mode: "saved", clipId: clip.id, frameId: focus }, contract: { scope: { clipId: clip.id, startFrameId: clip.frames[0]!.id, endFrameId: clip.frames[0]!.id } } });
+    assert.equal(bad.statusCode, 409); assert.match(bad.body, /不包含/);
+    const explicit = await f.create({ target: { mode: "saved", clipId: clip.id, frameId: focus }, contract: { scope: { clipId: clip.id } } });
+    assert.deepEqual(explicit.contract.scope, { clipId: clip.id }, "a broader scope must be an explicit consistent contract, never inferred from frame focus");
+  } finally { await f.cleanup(); }
+});
+
+test("review I2: a clean legacy draft cannot hide any dirty current-intent object draft; explicit disposal or a new intent releases it", async () => {
+  for (const disposition of ["discard", "new-intent"] as const) {
+    const f = await fixture();
+    try {
+      const clip = f.clip(); let task = await f.create({ target: { mode: "saved", clipId: clip.id } }); task = f.approveExisting(task, task.target!.snapshotId); const session = await f.begin(task);
+      const draft = result(await f.hub.tool(session.id, "create_clip_draft", { clipId: clip.id, revision: clip.revision }));
+      const body = JSON.parse(draft.text); body.frames[0].transform = { scale: 2, offsetX: 120, offsetY: 0, clip: false };
+      const dirty = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(body) }] }))[0];
+      await f.hub.tool(session.id, "inspect_clip", { draftId: draft.documentId, documentRevision: dirty.documentRevision });
+      await assert.rejects(f.hub.tool(session.id, "workflow_task", { action: "ready" }), /未保存/);
+      const clean = result(await f.hub.tool(session.id, "create_frame_draft", { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }));
+      assert.equal(session.agentDraftId, clean.documentId); assert.notEqual(clean.documentId, dirty.documentId);
+      assert.ok(f.store.tasks.get(f.pid, task.id).drafts!.some(entry => entry.draftId === dirty.documentId));
+      await assert.rejects(f.hub.tool(session.id, "workflow_task", { action: "ready" }), /未保存/);
+      assert.equal(f.store.clipDrafts.read(f.pid, dirty.documentId).draft.status, "editing");
+      if (disposition === "discard") {
+        await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "handoff" });
+        assert.equal((await f.api(`/api/projects/${f.pid}/clip-drafts/${dirty.documentId}/discard`, { documentRevision: dirty.documentRevision })).statusCode, 200);
+        task = await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "resume" });
+      } else {
+        task = await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "feedback", feedbackKind: "local", text: "新的明确局部意图，不采用上一轮未保存成果" });
+        assert.equal(f.store.clipDrafts.read(f.pid, dirty.documentId).draft.readOnly, true);
+        assert.equal(f.store.clipDrafts.read(f.pid, dirty.documentId).text, dirty.text);
+      }
+      await f.begin(task);
+      await f.hub.tool(session.id, "create_frame_draft", { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id });
+      assert.equal(result(await f.hub.tool(session.id, "workflow_task", { action: "ready" })).task.status, "ready");
+    } finally { await f.cleanup(); }
+  }
+});
+
+test("review I4: stopped-task Agent drafts release leases without deleting their text or captured pixels", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(), extra = await f.store.importImage(f.pid, "extra.png", readFileSync(f.sourcePath), "image");
+    let task = await f.create({ target: { mode: "saved", clipId: clip.id }, referenceIds: [extra.id] }); task = f.approveExisting(task, task.target!.snapshotId); const session = await f.begin(task);
+    let draft = result(await f.hub.tool(session.id, "create_clip_draft", { clipId: clip.id, revision: clip.revision }));
+    let body = JSON.parse(draft.text); body.frames[0].imageId = extra.id;
+    draft = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(body) }] }))[0];
+    body = JSON.parse(draft.text); body.frames[0].imageId = f.image.id; body.frames[0].durationUs = 160000;
+    draft = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(body) }] }))[0];
+    const review = result(await f.hub.tool(session.id, "inspect_clip", { draftId: draft.documentId, documentRevision: draft.documentRevision }));
+    const beforePixels = readFileSync((await f.store.animation.renderFrame(f.pid, review.snapshotId, clip.frames[0]!.id)).path);
+    assert.equal((await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "stop" })).statusCode, 200);
+    const historical = f.store.clipDrafts.read(f.pid, draft.documentId); assert.equal(historical.draft.status, "editing"); assert.equal(historical.draft.readOnly, true); assert.equal(historical.text, draft.text);
+    assert.equal(f.store.assets(f.pid).length, 3, "stop itself never deletes user assets");
+    const selection = { assetIds: [clip.id, f.image.id, extra.id], folders: [] };
+    assert.deepEqual(f.store.library.planDelete(f.pid, selection).blockers, []);
+    f.store.library.delete(f.pid, selection, f.store.library.revision(f.pid));
+    assert.equal(f.store.clipDrafts.read(f.pid, draft.documentId).text, draft.text); assert.equal(f.store.tasks.get(f.pid, task.id).status, "stopped");
+    const attemptedWrite = await f.api(`/api/projects/${f.pid}/clip-drafts/${draft.documentId}`, { expectedDocumentRevision: draft.documentRevision, text: draft.text }, "PUT"); assert.equal(attemptedWrite.statusCode, 409); assert.match(attemptedWrite.body, /只读历史/);
+    assert.deepEqual(readFileSync((await f.store.animation.renderFrame(f.pid, review.snapshotId, clip.frames[0]!.id)).path), beforePixels);
+    assert.ok(f.store.animation.evidence(f.pid, review.id, "contact"));
+  } finally { await f.cleanup(); }
+});
+
+test("review I4: reversible Review archive releases the last definition lease, enforces CAS/permissions and preserves history", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip();
+    let definition = f.store.reviewSequences.create(f.pid, { requestId: randomUUID(), name: "last definition", loop: true, segments: [{ id: randomUUID(), clipId: clip.id }] });
+    const captured = f.store.reviewSequences.capture(f.pid, definition.id), inspected = await f.store.reviewSequences.inspect(f.pid, definition.id, { snapshotId: captured.id });
+    const task = await f.create({ target: { mode: "saved", clipId: clip.id }, contract: { reviewSequenceId: definition.id } });
+    const archivePath = `/api/projects/${f.pid}/review-sequences/${definition.id}/archive`;
+    assert.equal((await f.api(archivePath, { expectedRevision: definition.revision, archived: true })).statusCode, 409);
+    await f.hub.taskAction(f.pid, task.id, { expectedRevision: task.revision, action: "stop" });
+    const response = await f.api(archivePath, { expectedRevision: definition.revision, archived: true }); assert.equal(response.statusCode, 200, response.body);
+    const oldRevision = definition.revision; definition = response.json(); assert.equal(definition.archived, true);
+    assert.equal(f.store.reviewSequences.listSnapshots(f.pid, definition.id)[0]!.stale, false, "archive is not a visual-content change");
+    assert.equal((await f.api(`/api/projects/${f.pid}/review-sequences/${definition.id}/capture`, {})).statusCode, 409);
+    assert.equal((await f.api(`/api/projects/${f.pid}/review-sequences/${definition.id}/inspect`, { snapshotId: captured.id })).statusCode, 200);
+    assert.equal((await f.api(archivePath, { expectedRevision: oldRevision, archived: false })).statusCode, 409);
+    const other = f.store.createProject("archive cross-project").id;
+    assert.equal((await f.api(`/api/projects/${other}/review-sequences/${definition.id}/archive`, { expectedRevision: definition.revision, archived: false })).statusCode, 404);
+    const session = f.store.createSession(f.pid);
+    f.hub.send(session.id, "明确恢复Review定义", [], randomUUID()); await waitFor(() => session.status === "running" && session.turnId);
+    f.store.permissions.write({ write_documents: "deny", review_sequence: "allow" });
+    assert.equal((await f.hub.tool(session.id, "review_sequence", { action: "archive", sequenceId: definition.id, expectedRevision: definition.revision, archived: false })).isError, true);
+    f.store.permissions.write({ write_documents: "ask" });
+    const restoring = f.hub.tool(session.id, "review_sequence", { action: "archive", sequenceId: definition.id, expectedRevision: definition.revision, archived: false });
+    await waitFor(() => session.toolApproval); f.hub.resolveToolApproval(session.id, session.toolApproval!.id, true); definition = result(await restoring); assert.equal(definition.archived, false);
+    assert.ok(f.store.library.planDelete(f.pid, { assetIds: [clip.id], folders: [] }).blockers.some(blocker => /Review/.test(blocker.reason)));
+    await f.hub.stop(session.id);
+    definition = (await f.api(archivePath, { expectedRevision: definition.revision, archived: true })).json();
+    const renamed = f.store.reviewSequences.update(f.pid, definition.id, { expectedRevision: definition.revision, name: "archived rename", loop: definition.loop, segments: definition.segments }); assert.equal(renamed.archived, true); definition = renamed;
+    assert.equal(f.store.reviewSequences.listSnapshots(f.pid, definition.id)[0]!.stale, false);
+    const entry = f.store.library.delete(f.pid, { assetIds: [clip.id], folders: [] }, f.store.library.revision(f.pid));
+    assert.ok((await f.store.animation.renderFrame(f.pid, captured.snapshotId, f.store.animation.snapshot(f.pid, captured.snapshotId).clip.frames[0]!.id)).path);
+    assert.ok(f.store.animation.evidence(f.pid, inspected.id, "contact"));
+    assert.equal((await f.api(`/api/projects/${f.pid}/review-sequences`)).json()[0].archived, true);
+    const unresolvedRestore = await f.api(archivePath, { expectedRevision: definition.revision, archived: false }); assert.equal(unresolvedRestore.statusCode, 200); assert.ok(unresolvedRestore.json().unresolved.length);
+    f.store.library.restore(f.pid, entry.id, f.store.library.revision(f.pid));
+    assert.equal(f.store.reviewSequences.get(f.pid, definition.id).unresolved.length, 0); assert.equal(f.store.reviewSequences.listSnapshots(f.pid, definition.id)[0]!.stale, false);
+  } finally { await f.cleanup(); }
+});
+
+test("review I5: an image-only context in an ordinary conversation sends frozen actual localImage bytes and audits their hash", async () => {
+  const f = await fixture();
+  try {
+    const session = f.store.createSession(f.pid);
+    const response = await f.api(`/api/sessions/${session.id}/messages`, { requestId: randomUUID(), text: "查看此图", assetIds: [], context: { mode: "saved", assetId: f.image.id, revision: f.image.revision } });
+    assert.equal(response.statusCode, 202, response.body); await waitFor(() => session.status === "running" && session.turnId);
+    const inputs = f.runtimes.at(-1)!.calls.find(call => call.method === "turn/start")!.input.input, images = inputs.filter((input: any) => input.type === "localImage");
+    assert.equal(images.length, 1); assert.equal(sha256(readFileSync(images[0].path)), f.image.contentHash);
+    assert.deepEqual(session.workflowReferenceHashes, [f.image.contentHash]); assert.deepEqual(session.messages.at(-1)!.assetIds, [f.image.id]);
+    assert.equal(f.store.tasks.list(f.pid).length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test("review I6: human drafts protect every frozen image dependency, including images removed from the current body", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(), extra = await f.store.importImage(f.pid, "temporarily-used.png", readFileSync(f.sourcePath), "image");
+    let draft = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "human");
+    let body = JSON.parse(draft.text); body.frames.push({ id: randomUUID(), imageId: extra.id, durationUs: 100000 });
+    draft = f.store.clipDrafts.write(f.pid, draft.documentId, { expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(body) });
+    body = JSON.parse(draft.text); body.frames.pop();
+    draft = f.store.clipDrafts.write(f.pid, draft.documentId, { expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(body) });
+    assert.ok(f.store.clipDrafts.dependencyImageIds(f.pid, draft.documentId).includes(extra.id)); assert.ok(!JSON.parse(draft.text).frames.some((frame: any) => frame.imageId === extra.id));
+    const task = await f.create({ target: { mode: "saved", clipId: clip.id } }); await f.hub.taskAction(f.pid, task.id, { expectedRevision: task.revision, action: "stop" });
+    assert.notEqual(f.store.clipDrafts.read(f.pid, draft.documentId).draft.readOnly, true, "a human draft is not retired with a task");
+    const selection = { assetIds: [extra.id], folders: [] };
+    assert.ok(f.store.library.planDelete(f.pid, selection).blockers.some(blocker => /冻结图片/.test(blocker.reason)));
+    assert.throws(() => f.store.library.delete(f.pid, selection, f.store.library.revision(f.pid)), /冻结图片/);
+    assert.ok((await f.store.clipDrafts.preview(f.pid, draft.documentId, draft.documentRevision)).preview.id);
+    draft = f.store.clipDrafts.write(f.pid, draft.documentId, { expectedDocumentRevision: draft.documentRevision, text: draft.text });
+    const saved = await f.store.clipDrafts.save(f.pid, draft.documentId, draft.documentRevision);
+    assert.deepEqual(f.store.library.planDelete(f.pid, selection).blockers, []); f.store.library.delete(f.pid, selection, f.store.library.revision(f.pid));
+    assert.throws(() => f.store.asset(f.pid, extra.id));
+    assert.equal((await f.store.clipDrafts.save(f.pid, draft.documentId, draft.documentRevision)).afterSnapshotId, saved.afterSnapshotId);
+    assert.ok((await f.store.animation.renderFrame(f.pid, saved.afterSnapshotId, clip.frames[0]!.id)).path);
   } finally { await f.cleanup(); }
 });
 

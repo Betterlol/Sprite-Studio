@@ -157,15 +157,27 @@ export class ReviewSequences {
     const spec = updateSchema.parse(input), old = this.record(pid, id);
     if (old.definition.revision !== spec.expectedRevision) throw new StudioError("Review 定义已修改，请刷新后重试", 409);
     const { expectedRevision: _, ...body } = spec;
-    const definition: ReviewSequenceDefinition = { ...body, id, projectId: pid, revision: randomUUID() };
+    const definition: ReviewSequenceDefinition = { ...body, archived: old.definition.archived, id, projectId: pid, revision: randomUUID() };
     this.validate(pid, definition);
     const record = { ...old, definition };
     this.save(pid, "definitions", id, record);
     this.definitions.set(id, record);
     return this.get(pid, id);
   }
+  archive(pid: string, id: string, input: unknown): ReviewSequenceView {
+    const spec = z.object({ expectedRevision: z.string(), archived: z.boolean() }).strict().parse(input), old = this.record(pid, id);
+    if (old.definition.revision !== spec.expectedRevision) throw new StudioError("Review 定义已修改，请刷新后重试", 409);
+    if (spec.archived && this.store.tasks.listActive(pid).some(task => task.contract.reviewSequenceId === id)) throw new StudioError("活动制作任务仍依赖该Review，请先停止任务再归档", 409);
+    if (!!old.definition.archived === spec.archived) return this.get(pid, id);
+    const definition = { ...old.definition, archived: spec.archived, revision: randomUUID() }, record = { ...old, definition };
+    // Archiving changes an active reference lease, never the semantic snapshot
+    // hash or any captured pixels. Restoring may honestly report unresolved refs.
+    this.save(pid, "definitions", id, record); this.definitions.set(id, record);
+    return this.get(pid, id);
+  }
   capture(pid: string, id: string): SequenceSnapshot {
     const definition = this.record(pid, id).definition;
+    if (definition.archived) throw new StudioError("Review已归档，请先显式恢复再捕获新快照", 409);
     this.validate(pid, definition);
     const dependencies: SequenceSnapshot["dependencies"] = [];
     const segments: SequenceSnapshot["segments"] = [];

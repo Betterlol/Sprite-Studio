@@ -505,15 +505,17 @@ export class ResourceLibrary {
         });
     }
     for (const sequence of this.store.reviewSequences.list(pid)) {
-      if (sequence.segments.some(s => ids.has(s.clipId))) blockers.push({ name: sequence.name, reason: "Review定义仍引用所选动画" });
+      if (!sequence.archived && sequence.segments.some(s => ids.has(s.clipId))) blockers.push({ name: sequence.name, reason: "Review定义仍引用所选动画" });
     }
-    for (const task of this.store.tasks.list(pid)) {
-      const protectedIds = new Set([...task.referenceIds, ...task.contract.roleReferenceIds, task.target?.assetId, task.target?.clipId, task.contract.scope?.clipId, task.direction?.assetId, ...task.attempts.map(a => a.assetId), ...task.attempts.flatMap(a => a.generatedId ? this.store.generated.record(pid, a.generatedId).assetIds : [])]);
+    for (const task of this.store.tasks.listActive(pid)) {
+      const reviewClipIds = task.contract.reviewSequenceId ? this.store.reviewSequences.get(pid, task.contract.reviewSequenceId).segments.map(segment => segment.clipId) : [];
+      const protectedIds = new Set([...task.referenceIds, ...task.contract.roleReferenceIds, task.target?.assetId, task.target?.clipId, task.contract.scope?.clipId, task.direction?.assetId, ...reviewClipIds, ...task.attempts.map(a => a.assetId), ...task.attempts.flatMap(a => a.generatedId ? this.store.generated.record(pid, a.generatedId).assetIds : [])]);
       if ([...ids].some(id => protectedIds.has(id))) blockers.push({ name: task.title, reason: "制作任务仍持有所选资源引用" });
     }
     for (const draft of this.store.clipDrafts.list(pid)) {
-      const value = JSON.parse(this.store.clipDrafts.read(pid, draft.id).text);
-      if (ids.has(draft.clipId) || value.frames.some((f: { imageId: string }) => ids.has(f.imageId))) blockers.push({ name: "动画草稿", reason: "未结束的对象草稿仍引用所选资源" });
+      if (draft.readOnly) continue;
+      const dependencies = this.store.clipDrafts.dependencyImageIds(pid, draft.id);
+      if (ids.has(draft.clipId) || dependencies.some(id => ids.has(id))) blockers.push({ name: "动画草稿", reason: "未结束的对象草稿仍依赖所选动画/冻结图片" });
     }
     return { selection, assetIds: [...ids], folders: chosen.folders, blockers };
   }

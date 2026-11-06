@@ -59,6 +59,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, store: ProjectStore
   app.get("/api/projects/:projectId/review-sequences", async request => store.reviewSequences.list(pid(request)));
   app.post("/api/projects/:projectId/review-sequences", async request => store.reviewSequences.create(pid(request), request.body));
   app.put("/api/projects/:projectId/review-sequences/:sequenceId", async request => store.reviewSequences.update(pid(request), id(request, "sequenceId"), request.body));
+  app.post("/api/projects/:projectId/review-sequences/:sequenceId/archive", async request => store.reviewSequences.archive(pid(request), id(request, "sequenceId"), request.body));
   app.post("/api/projects/:projectId/review-sequences/:sequenceId/capture", async request => { z.object({}).strict().parse(request.body || {}); return store.reviewSequences.capture(pid(request), id(request, "sequenceId")); });
   app.get("/api/projects/:projectId/review-sequences/:sequenceId/snapshots", async request => store.reviewSequences.listSnapshots(pid(request), id(request, "sequenceId")));
   app.post("/api/projects/:projectId/review-sequences/:sequenceId/inspect", async request => store.reviewSequences.inspect(pid(request), id(request, "sequenceId"), z.object({ snapshotId: uuid.optional() }).strict().parse(request.body || {})));

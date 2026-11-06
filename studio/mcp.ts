@@ -273,8 +273,8 @@ const tools = [
   },
   {
     name: "review_sequence",
-    description: "List/create/update/capture/inspect a multi-action Review. create definition={requestId,name,loop,segments:[{id,clipId,startFrameId?,endFrameId?,repeat?,speed?}]}; update adds expectedRevision instead of requestId. inspect returns actual images for ALL batches, full coverage, source mappings and dependency stale; these are static evidence, not temporal passed. capture/inspect require sequenceId, optional inspect snapshotId is a sequence snapshot ID. Inherits existing configuration or inspection permissions.",
-    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "create", "update", "capture", "inspect"] }, sequenceId: idProperty, snapshotId: idProperty, definition: { type: "object" } }, required: ["action"], additionalProperties: false },
+    description: "List/create/update/capture/inspect/archive a multi-action Review. archive requires sequenceId, expectedRevision and archived boolean; false restores the definition, while captured snapshots/history remain. create definition={requestId,name,loop,segments:[{id,clipId,startFrameId?,endFrameId?,repeat?,speed?}]}; update adds expectedRevision instead of requestId. inspect returns actual images for ALL batches, full coverage, source mappings and dependency stale; these are static evidence, not temporal passed. capture/inspect require sequenceId, optional inspect snapshotId is a sequence snapshot ID. Inherits existing configuration or inspection permissions.",
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "create", "update", "capture", "inspect", "archive"] }, sequenceId: idProperty, snapshotId: idProperty, definition: { type: "object" }, expectedRevision: { type: "string" }, archived: { type: "boolean" } }, required: ["action"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
   {

@@ -33,13 +33,23 @@ export class WorkflowQuality {
     assertDraftSourceCurrent(this.store, pid, task.target);
     if (!task.contract.scope) throw new StudioError("需要先绑定制作目标和检查范围", 409);
     const snapshot = this.store.animation.capture(pid, task.contract.scope.clipId);
-    const activeDraftId = task.sessionId ? this.store.sessions.get(task.sessionId)?.agentDraftId : undefined;
-    if (activeDraftId) {
-      const document = this.store.documents.read(pid, activeDraftId);
-      if (["editing", "pending"].includes(document.draft.status) && document.draft.clipId === snapshot.clip.id) {
-        const previewContext = freezeEditingContext(this.store, pid, { mode: "draft", draftId: activeDraftId, documentRevision: document.documentRevision });
+    const draftIds = new Set((task.drafts || []).filter(draft => draft.intentVersion === task.intentVersion).map(draft => draft.draftId));
+    for (const check of this.store.tasks.checksForIntent(pid, taskId)) if (check.draftId) draftIds.add(check.draftId);
+    // Compatibility for pre-registry first-intent tasks. Never adopt an old
+    // pointer into a later intent merely because the session still remembers it.
+    const legacyPointer = task.sessionId ? this.store.sessions.get(task.sessionId)?.agentDraftId : undefined;
+    if (!task.drafts && task.intentVersion === 1 && legacyPointer) {
+      const document = this.store.documents.read(pid, legacyPointer);
+      if (document.draft.createdAt >= task.createdAt) draftIds.add(legacyPointer);
+    }
+    for (const draftId of draftIds) {
+      const document = this.store.documents.read(pid, draftId);
+      if (document.draft.source !== "agent" || document.draft.sessionId !== task.sessionId || document.draft.clipId !== snapshot.clip.id) throw new StudioError("任务草稿关联的会话/目标不一致", 409);
+      if (["editing", "pending"].includes(document.draft.status)) {
+        if (document.draft.status === "pending") throw new StudioError(`任务仍有未保存的Agent草稿${draftId}等待决定`, 409);
+        const previewContext = freezeEditingContext(this.store, pid, { mode: "draft", draftId, documentRevision: document.documentRevision });
         const preview = this.store.animation.snapshot(pid, previewContext.snapshotId!);
-        if (JSON.stringify(preview.clip.frames) !== JSON.stringify(snapshot.clip.frames) || preview.clip.loop !== snapshot.clip.loop || (preview.clip.initialFps ?? 12) !== (snapshot.clip.initialFps ?? 12)) throw new StudioError("任务仍有未保存的Agent对象草稿；请先检查、保存或显式放弃，不能把旧saved版本当交付", 409);
+        if (JSON.stringify(preview.clip.frames) !== JSON.stringify(snapshot.clip.frames) || preview.clip.loop !== snapshot.clip.loop || (preview.clip.initialFps ?? 12) !== (snapshot.clip.initialFps ?? 12)) throw new StudioError(`任务仍有未保存的Agent对象草稿${draftId}；请先检查、保存或显式放弃，不能把旧saved版本当交付`, 409);
       }
     }
     const checks = await this.inspect(pid, snapshot.id, task.contract.scope);

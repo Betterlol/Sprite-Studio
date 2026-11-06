@@ -97,7 +97,26 @@ export class ProductionTasks {
   list(pid: string): ProductionTask[] { return this.rawList(pid).map(t => this.view(t)).sort((a,b) => b.createdAt.localeCompare(a.createdAt)); }
   get(pid: string, id: string): ProductionTask { return this.view(this.raw(pid, id)); }
   wasAccepted(pid: string, id: string) { return this.raw(pid, id).status === "accepted"; }
-  protectsSession(pid: string, sessionId: string) { return this.rawList(pid).some(task => task.sessionId === sessionId && !["accepted", "stopped"].includes(task.status)); }
+  protectsSession(pid: string, sessionId: string) { return this.rawList(pid).some(task => task.sessionId === sessionId && !["accepted", "stopped", "failed"].includes(task.status)); }
+  listActive(pid: string): ProductionTask[] { return this.rawList(pid).filter(task => !["accepted", "stopped", "failed"].includes(task.status)).map(task => this.view(task)); }
+  draftHoldsLease(pid: string, draft: { id: string; sessionId?: string; clipId: string; createdAt: string; taskId?: string; intentVersion?: number }) {
+    const tasks = this.rawList(pid);
+    if (draft.taskId) {
+      const owner = tasks.find(task => task.id === draft.taskId);
+      return !!owner && owner.sessionId === draft.sessionId && owner.contract.scope?.clipId === draft.clipId && owner.intentVersion === draft.intentVersion && !["accepted", "stopped", "failed"].includes(owner.status);
+    }
+    const owners: boolean[] = [];
+    for (const task of tasks) {
+      if (!draft.sessionId || task.sessionId !== draft.sessionId || task.contract.scope?.clipId !== draft.clipId) continue;
+      const registered = (task.drafts || []).filter(entry => entry.draftId === draft.id);
+      const checked = task.checks.filter(check => check.draftId === draft.id);
+      const legacy = !task.drafts && draft.createdAt >= task.createdAt;
+      if (!registered.length && !checked.length && !legacy) continue;
+      const current = registered.some(entry => entry.intentVersion === task.intentVersion) || checked.some(check => task.checkIntentVersions?.[check.id] === task.intentVersion) || (legacy && task.intentVersion === 1);
+      owners.push(current && !["accepted", "stopped", "failed"].includes(task.status));
+    }
+    return !owners.length || owners.some(Boolean);
+  }
   create(pid: string, input: CreateTaskInput): ProductionTask {
     this.store.project(pid); const spec = createSchema.parse(input), hash = sha256(JSON.stringify(spec));
     const old = this.rawList(pid).find(t => t.requestId === spec.requestId);
@@ -108,9 +127,25 @@ export class ProductionTasks {
     }
     const target = this.validateTarget(pid, spec.target);
     for (const id of [...spec.referenceIds, ...spec.contract.roleReferenceIds]) this.store.imagePath(pid, id);
-    if (spec.contract.reviewSequenceId) this.store.reviewSequences.get(pid, spec.contract.reviewSequenceId);
-    if (spec.contract.scope) { this.scope(pid, spec.contract.scope); if ((target?.clipId && target.clipId !== spec.contract.scope.clipId) || (target?.assetId && target.assetId !== spec.contract.scope.clipId)) fail("任务目标与范围不一致"); }
-    else if (target?.clipId) spec.contract.scope = { clipId: target.clipId, ...(target.startFrameId ? { startFrameId: target.startFrameId } : {}), ...(target.endFrameId ? { endFrameId: target.endFrameId } : {}) };
+    if (spec.contract.reviewSequenceId && this.store.reviewSequences.get(pid, spec.contract.reviewSequenceId).archived) fail("不能为新任务绑定已归档Review，请先显式恢复定义");
+    if (spec.contract.scope) {
+      this.scope(pid, spec.contract.scope, target?.snapshotId);
+      if ((target?.clipId && target.clipId !== spec.contract.scope.clipId) || (target?.assetId && target.assetId !== spec.contract.scope.clipId)) fail("任务目标与范围不一致");
+      if (target?.snapshotId) {
+        const snapshot = this.store.animation.snapshot(pid, target.snapshotId);
+        if (snapshot.clip.frames.length) {
+          const allowed = this.store.animation.range(snapshot, spec.contract.scope.startFrameId, spec.contract.scope.endFrameId);
+          const selected = target.startFrameId || target.endFrameId ? this.store.animation.range(snapshot, target.startFrameId, target.endFrameId) : undefined;
+          const focus = target.frameId ? snapshot.clip.frames.findIndex(frame => frame.id === target.frameId) : undefined;
+          if ((selected && (selected.start < allowed.start || selected.end > allowed.end)) || (focus !== undefined && (focus < allowed.start || focus > allowed.end))) fail("显式检查范围不包含任务目标帧/区间");
+        }
+      }
+    } else if (target?.clipId) {
+      const range = target.startFrameId || target.endFrameId
+        ? { ...(target.startFrameId ? { startFrameId: target.startFrameId } : {}), ...(target.endFrameId ? { endFrameId: target.endFrameId } : {}) }
+        : target.frameId ? { startFrameId: target.frameId, endFrameId: target.frameId } : {};
+      spec.contract.scope = { clipId: target.clipId, ...range };
+    }
     if (spec.sessionId && this.store.session(spec.sessionId).projectId !== pid) fail("会话不属于该工程");
     const timestamp = now();
     return this.persist({ id: randomUUID(), projectId: pid, requestId: spec.requestId, requestHash: hash, revision: 1, intentVersion: 1, barrierVersion: 1, title: spec.title, description: spec.description, target, referenceIds: spec.referenceIds, contract: spec.contract, sessionId: spec.sessionId, phase: "direction", status: "waiting", waitReason: "direction", attempts: [], checks: [], findings: [], directionHistory: [], acceptanceHistory: [], createdAt: timestamp, updatedAt: timestamp });
@@ -241,6 +276,16 @@ export class ProductionTasks {
     if (!current) a.status = "unknown";
     a.reason = "运行时事件留存；没有调用前硬预算证明，不允许自动重发"; a.updatedAt = now();
     return this.save(t);
+  }
+  registerDraft(pid: string, id: string, input: { sessionId: string; intentVersion: number; barrierVersion: number; draftId: string; kind: "clip" | "frame" }) {
+    const task = this.raw(pid, id);
+    if (task.sessionId !== input.sessionId || task.intentVersion !== input.intentVersion || task.barrierVersion !== input.barrierVersion || !["running", "waiting"].includes(task.status)) fail("草稿注册的任务意图已失效");
+    const document = input.kind === "clip" ? this.store.clipDrafts.read(pid, input.draftId) : this.store.frameDrafts.read(pid, input.draftId);
+    if (input.kind === "clip" && this.store.clipDrafts.read(pid, input.draftId).draft.readOnly) fail("历史Agent草稿不能改写，请显式派生新草稿");
+    if (document.draft.source !== "agent" || document.draft.sessionId !== input.sessionId || document.draft.clipId !== task.contract.scope?.clipId) fail("草稿不属于当前任务会话或目标");
+    if ((task.drafts || []).some(draft => draft.draftId === input.draftId && draft.intentVersion === input.intentVersion)) return this.view(task);
+    (task.drafts ??= []).push({ draftId: input.draftId, kind: input.kind, intentVersion: input.intentVersion });
+    return this.save(task);
   }
   recordSavedImage(pid: string, id: string, input: { sessionId: string; intentVersion: number; barrierVersion: number; generatedId: string; assetId: string }) {
     const task = this.raw(pid, id), generated = this.store.generated.record(pid, input.generatedId), asset = this.store.image(pid, input.assetId);

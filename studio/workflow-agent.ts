@@ -21,7 +21,7 @@ export function assertTaskIntent(store: ProjectStore, session: Session, intent?:
   assertDraftSourceCurrent(store, session.projectId, session.editingContext);
 }
 export function productionWrite(name: string, input: any) {
-  return ["create_clip", "write_documents", "slice_sheet", "adjust_image", "save_frame_draft", "save_clip_draft"].includes(name) || (name === "review_sequence" && ["create", "update"].includes(input.action));
+  return ["create_clip", "write_documents", "slice_sheet", "adjust_image", "save_frame_draft", "save_clip_draft"].includes(name) || (name === "review_sequence" && ["create", "update", "archive"].includes(input.action));
 }
 export function precheckTaskTool(store: ProjectStore, session: Session, intent: TaskIntent | undefined, name: string, input: any) {
   assertTaskIntent(store, session, intent);
@@ -104,7 +104,7 @@ export function precheckTaskTool(store: ProjectStore, session: Session, intent: 
 export function toolPolicyParents(name: PermissionTool, input: any): PermissionTool[] {
   if (name === "create_clip_draft") return ["create_frame_draft"];
   if (name === "save_clip_draft") return ["save_frame_draft"];
-  if (name === "review_sequence") return [input.action === "list" ? "list_assets" : ["create", "update"].includes(input.action) ? "write_documents" : "inspect_clip"];
+  if (name === "review_sequence") return [input.action === "list" ? "list_assets" : ["create", "update", "archive"].includes(input.action) ? "write_documents" : "inspect_clip"];
   if (name === "workflow_task") return [input.action === "status" ? "list_assets" : "inspect_clip"];
   return [];
 }

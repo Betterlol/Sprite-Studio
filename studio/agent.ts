@@ -376,7 +376,7 @@ export class AgentHub {
     }
     session.editingContext = frozenContext;
     this.cancelTools(session, "新回合已开始，旧排队操作未执行");
-    const referenceIds = [...new Set([...assetIds, ...(task?.referenceIds || []), ...(task?.contract.roleReferenceIds || []), ...(task?.target?.assetId && this.store.asset(session.projectId, task.target.assetId).type === "image" ? [task.target.assetId] : [])])];
+    const referenceIds = [...new Set([...assetIds, ...(frozenContext?.assetId && this.store.asset(session.projectId, frozenContext.assetId).type === "image" ? [frozenContext.assetId] : []), ...(task?.referenceIds || []), ...(task?.contract.roleReferenceIds || []), ...(task?.target?.assetId && this.store.asset(session.projectId, task.target.assetId).type === "image" ? [task.target.assetId] : [])])];
     const references = referenceIds.map((id) =>
       this.store.image(session.projectId, id),
     );
@@ -446,10 +446,13 @@ export class AgentHub {
         const snapshot = this.store.animation.snapshot(session.projectId, context.snapshotId), range = snapshot.clip.frames.length ? this.store.animation.range(snapshot, context.startFrameId, context.endFrameId) : { start: 0, end: -1 };
         inputs.push({ type: "text", text: `真实快照编排：${JSON.stringify(snapshot.clip)}`, text_elements: [] });
         const frames = context.frameId ? snapshot.clip.frames.filter(f => f.id === context.frameId) : snapshot.clip.frames.slice(range.start, Math.min(range.end + 1, range.start + 16));
+        const visualSnapshot = snapshot.renderMode === "preview" ? snapshot : this.store.animation.captureClip(session.projectId, snapshot.clip, snapshot.images, true);
         for (const frame of frames) {
-          const rendered = await this.store.animation.renderFrame(session.projectId, snapshot.id, frame.id), hash = sha256(readFileSync(rendered.path));
+          const rendered = await this.store.animation.renderFrame(session.projectId, visualSnapshot.id, frame.id), hash = sha256(readFileSync(rendered.path));
+          const warnings = rendered.bounds && rendered.overflow && Object.values(rendered.overflow).some(value => value > 0)
+            ? [{ frameId: frame.id, bounds: rendered.bounds, overflow: rendered.overflow, blocking: !!rendered.blocking }] : [];
           actualReferenceHashes.push(hash);
-          inputs.push({ type: "text", text: `渲染帧引用：snapshotId=${snapshot.id};frameId=${frame.id};sha256=${hash};源图hash不是实际生成参考hash`, text_elements: [] }, { type: "localImage", path: rendered.path });
+          inputs.push({ type: "text", text: `渲染帧引用（诊断preview，不代表保存/无越界/验收；blocking时图像可能被画布截断，必须按warnings修复）：${JSON.stringify({ sourceSnapshotId: snapshot.id, previewSnapshotId: visualSnapshot.id, frameId: frame.id, sha256: hash, warnings })}；源图hash不是实际生成参考hash`, text_elements: [] }, { type: "localImage", path: rendered.path });
         }
       }
     }
@@ -1404,7 +1407,8 @@ export class AgentHub {
       const source = session.editingContext?.mode === "draft" ? session.editingContext : intent ? this.store.tasks.get(pid, intent.taskId).target : undefined;
       if (source?.mode === "draft" && source.clipId === spec.clipId && (source.draftId !== spec.fromDraftId || source.documentRevision !== expectedFromDocumentRevision)) throw new StudioError("需要从上下文确切正文显式派生完整草稿", 409);
       guard();
-      const document = this.store.clipDrafts.create(pid, spec, "agent", session.id);
+      const document = this.store.clipDrafts.create(pid, spec, "agent", session.id, intent ? { taskId: intent.taskId, intentVersion: intent.intentVersion } : undefined);
+      if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: document.documentId, kind: "clip" });
       session.agentDraftId = document.documentId; this.flush(session);
       return { content: [textContent(JSON.stringify(document))] };
     }
@@ -1412,6 +1416,7 @@ export class AgentHub {
       const spec = z.object({ draftId: z.string().uuid(), documentRevision: z.string() }).strict().parse(input);
       const draft = this.store.clipDrafts.read(pid, spec.draftId).draft;
       if (draft.sessionId !== session.id || draft.source !== "agent") throw new StudioError("草稿不属于当前Agent会话", 409);
+      if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: spec.draftId, kind: "clip" });
       try {
         const saved = await this.store.clipDrafts.save(pid, spec.draftId, spec.documentRevision, guard);
         return { content: [textContent(JSON.stringify({ saved: true, ...saved }))] };
@@ -1495,10 +1500,12 @@ export class AgentHub {
         if (this.store.clipDrafts.has(pid, doc.documentId)) {
           const draft = this.store.clipDrafts.read(pid, doc.documentId).draft;
           if (draft.source !== "agent" || draft.sessionId !== sessionId) throw new StudioError("请显式派生当前会话的对象草稿，不能修改人工正文", 409);
+          if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: doc.documentId, kind: "clip" });
         } else if (this.store.frameDrafts.has(doc.documentId)) {
           const draft = this.store.frameDrafts.get(pid, doc.documentId);
           if (draft.sessionId !== sessionId)
             throw new StudioError("请使用当前对话创建的单帧草稿");
+          if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: doc.documentId, kind: "frame" });
         } else {
           const asset = this.store.asset(pid, doc.documentId);
           if (asset.type === "clip") {
@@ -1638,11 +1645,12 @@ export class AgentHub {
       })),
     ];
     if (name === "review_sequence") {
-      const spec = z.object({ action: z.enum(["list", "create", "update", "capture", "inspect"]), sequenceId: z.string().uuid().optional(), snapshotId: z.string().uuid().optional(), definition: z.record(z.string(), z.unknown()).optional() }).strict().parse(input);
+      const spec = z.object({ action: z.enum(["list", "create", "update", "capture", "inspect", "archive"]), sequenceId: z.string().uuid().optional(), snapshotId: z.string().uuid().optional(), definition: z.record(z.string(), z.unknown()).optional(), expectedRevision: z.string().optional(), archived: z.boolean().optional() }).strict().parse(input);
       if (spec.action === "list") return { content: [textContent(JSON.stringify(this.store.reviewSequences.list(pid)))] };
       if (spec.action === "create") return { content: [textContent(JSON.stringify(this.store.reviewSequences.create(pid, spec.definition)))] };
       if (!spec.sequenceId) throw new StudioError("需要sequenceId");
       if (spec.action === "update") return { content: [textContent(JSON.stringify(this.store.reviewSequences.update(pid, spec.sequenceId, spec.definition)))] };
+      if (spec.action === "archive") return { content: [textContent(JSON.stringify(this.store.reviewSequences.archive(pid, spec.sequenceId, { expectedRevision: spec.expectedRevision, archived: spec.archived })))] };
       if (spec.action === "capture") return { content: [textContent(JSON.stringify(this.store.reviewSequences.capture(pid, spec.sequenceId)))] };
       const inspected = await this.store.reviewSequences.inspect(pid, spec.sequenceId, { snapshotId: spec.snapshotId });
       guard();
@@ -1672,13 +1680,17 @@ export class AgentHub {
       let taskQuality;
       if (intent && spec.draftId && this.store.tasks.get(pid, intent.taskId).phase === "production") {
         const document = this.store.documents.read(pid, spec.draftId);
-        if (document.draft.source === "agent" && document.draft.sessionId === session.id) taskQuality = await this.store.quality.checkDraft(pid, intent.taskId, spec.draftId, spec.documentRevision!, guard);
+        if (document.draft.source === "agent" && document.draft.sessionId === session.id && !document.draft.readOnly) {
+          this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: spec.draftId, kind: this.store.clipDrafts.has(pid, spec.draftId) ? "clip" : "frame" });
+          taskQuality = await this.store.quality.checkDraft(pid, intent.taskId, spec.draftId, spec.documentRevision!, guard);
+        }
       }
       attach("reviewIds", review.id);
       return { content: evidence({ ...review, ...(taskQuality ? { taskQuality } : {}) }) };
     }
     if (name === "create_frame_draft") {
       const document = this.store.frameDrafts.create(pid, input, "agent", sessionId);
+      if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: document.documentId, kind: "frame" });
       session.agentDraftId = document.documentId; this.flush(session);
       return { content: [textContent(JSON.stringify(document))] };
     }
@@ -1687,6 +1699,7 @@ export class AgentHub {
         .object({ draftId: z.string().uuid(), documentRevision: z.string() })
         .strict()
         .parse(input);
+      if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: spec.draftId, kind: "frame" });
       const result = await this.requestFrameSave(
         session,
         spec.draftId,

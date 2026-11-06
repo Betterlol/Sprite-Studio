@@ -43,8 +43,15 @@ export function checkStaticQuality(input: StaticCheckInput): QualityCheck {
       else add("suspect", warning.frameId, "允许的越界需要结合意图检查", JSON.stringify(warning.overflow));
     }
   }
-  for (const obs of input.observations ?? []) add("suspect", obs.location, `需要人工判断：${obs.category}`, obs.evidence);
-  return { id: input.id, kind: "static", snapshotId: snapshot.id, scope: { ...scope }, status: findings.some(f => f.status === "failed") ? "failed" : findings.length ? "suspect" : "passed", findings, createdAt: input.createdAt, ...(input.dependencies ? { dependencies: [...input.dependencies] } : {}) };
+  const allFrameIds = new Set(frames.map(f => f.id));
+  for (const obs of input.observations ?? []) {
+    // Non-frame locations (e.g. a named transition) cannot be range-resolved here.
+    if (allFrameIds.has(obs.location) && !ids.has(obs.location)) continue;
+    add("suspect", obs.location, `需要人工判断：${obs.category}`, obs.evidence);
+  }
+  if (input.warnings === undefined) add("unverified", scope.clipId, "未提供渲染越界检查证据");
+  const status = findings.some(f => f.status === "failed") ? "failed" : findings.some(f => f.status === "unverified") ? "unverified" : findings.length ? "suspect" : "passed";
+  return { id: input.id, kind: "static", snapshotId: snapshot.id, scope: { ...scope }, status, findings, createdAt: input.createdAt, ...(input.dependencies ? { dependencies: [...input.dependencies] } : {}) };
 }
 
 /** No synthetic test upgrades temporal model capabilities. */

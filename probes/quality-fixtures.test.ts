@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { qualityFixtures, writeQualityFixtures } from "./quality-fixtures.ts";
@@ -24,5 +26,24 @@ test("fixture splits are disjoint, diverse and reproducible without model calls"
     for (const f of manifest.fixtures) for (const frame of f.frames) assert.ok(existsSync(join(a, frame.file)));
     assert.throws(() => writeQualityFixtures(a));
     assert.throws(() => writeQualityFixtures("relative-output"));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("CLI refuses another project's .local and temp output does not depend on cwd .local", () => {
+  const dir = mkdtempSync(join(tmpdir(), "quality-foreign-cwd-"));
+  try {
+    const project = join(dir, "project"), foreignLocal = join(project, ".local"), emptyCwd = join(dir, "empty");
+    mkdirSync(foreignLocal, { recursive: true });
+    mkdirSync(emptyCwd);
+    const script = fileURLToPath(new URL("./quality-fixtures.ts", import.meta.url));
+    const forbidden = join(foreignLocal, "output");
+    const denied = spawnSync(process.execPath, [script, forbidden], { cwd: project, encoding: "utf8" });
+    assert.notEqual(denied.status, 0);
+    assert.match(denied.stderr, /worktree/);
+    assert.equal(existsSync(forbidden), false);
+    const allowed = join(dir, "safe-output");
+    const result = spawnSync(process.execPath, [script, allowed], { cwd: emptyCwd, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(join(allowed, "manifest.json")), true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

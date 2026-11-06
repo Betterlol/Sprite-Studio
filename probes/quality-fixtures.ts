@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,8 +41,16 @@ function inside(path: string, root: string): boolean {
 export function writeQualityFixtures(output: string): void {
   if (!isAbsolute(output)) throw new Error("输出目录必须是绝对路径");
   const target = resolve(output), parent = realpathSync(dirname(target));
-  const local = realpathSync(resolve(".local")), temp = realpathSync(tmpdir());
-  if (!(parent === local || inside(parent, local) || parent === temp || inside(parent, temp))) throw new Error("输出目录必须位于 .local 或系统临时目录");
+  const worktree = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), ".."));
+  const localPath = join(worktree, ".local"), temp = realpathSync(tmpdir());
+  // Do not follow a worktree .local junction outside the trusted worktree.
+  const local = existsSync(localPath) ? realpathSync(localPath) : undefined;
+  const inLocal = !!local && inside(local, worktree) && (parent === local || inside(parent, local));
+  // A foreign project's .local is not made safe merely by residing under the temp root.
+  const tempRelative = relative(temp, parent);
+  const foreignLocal = tempRelative.split(sep).some(part => part.toLowerCase() === ".local");
+  const inTemp = (parent === temp || inside(parent, temp)) && !foreignLocal;
+  if (!inLocal && !inTemp) throw new Error("输出目录必须位于脚本所属 worktree 的 .local 或系统临时目录");
   mkdirSync(target); // exclusive: never reuse or overwrite an existing directory
   const manifest = qualityFixtures.map(f => ({ ...f, frames: f.frames.map((item, index) => ({ ...item, file: `${f.id}-${index + 1}.svg` })) }));
   for (const fixture of manifest) for (const item of fixture.frames) {

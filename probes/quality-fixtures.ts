@@ -46,8 +46,18 @@ export function writeQualityFixtures(output: string): void {
   // Do not follow a worktree .local junction outside the trusted worktree.
   const local = existsSync(localPath) ? realpathSync(localPath) : undefined;
   const inLocal = !!local && inside(local, worktree) && (parent === local || inside(parent, local));
-  // Temp output must be a new direct child, never inside an existing project tree.
-  const tempIsProject = ["project.json", "pipeline.json"].some(marker => existsSync(join(temp, marker)));
+  // TEMP may itself be a subdirectory of a project; inspect every real ancestor.
+  let directory = temp;
+  let tempIsProject = false;
+  while (true) {
+    if (["project.json", "pipeline.json"].some(marker => existsSync(join(directory, marker)))) {
+      tempIsProject = true;
+      break;
+    }
+    const ancestor = dirname(directory);
+    if (ancestor === directory) break;
+    directory = ancestor;
+  }
   const inTemp = parent === temp && !tempIsProject;
   if (!inLocal && !inTemp) throw new Error("输出目录必须位于脚本所属 worktree 的 .local 或系统临时目录的直接子目录");
   mkdirSync(target); // exclusive: never reuse or overwrite an existing directory

@@ -59,6 +59,13 @@ test("CLI refuses another project's .local and temp output does not depend on cw
       });
       assert.notEqual(deniedRoot.status, 0);
       assert.equal(existsSync(join(markedTemp, "new")), false);
+      const cache = join(markedTemp, "cache");
+      mkdirSync(cache);
+      const deniedAncestor = spawnSync(process.execPath, [script, join(cache, "new")], {
+        cwd: emptyCwd, encoding: "utf8", env: { ...process.env, TEMP: cache, TMP: cache, TMPDIR: cache },
+      });
+      assert.notEqual(deniedAncestor.status, 0);
+      assert.equal(existsSync(join(cache, "new")), false);
     }
   } finally { rmSync(allowed, { recursive: true, force: true }); rmSync(dir, { recursive: true, force: true }); }
 });

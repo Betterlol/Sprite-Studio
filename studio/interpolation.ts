@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { StudioError, atomicJson, type ProjectStore } from "./store.ts";
+import { StudioError, atomicJson, sha256, type ProjectStore } from "./store.ts";
+import { interpolateFrames, type TimingPolicy, type InteriorPolicy } from "./interpolation-timing.ts";
 import {
   interpolationSchema,
   interpolationLayoutSchema,
@@ -11,9 +12,16 @@ import {
   type ClipAsset,
 } from "./model.ts";
 
+export type TimedInterpolation = Interpolation & {
+  timingPolicy?: TimingPolicy;
+  interiorPolicy?: InteriorPolicy;
+  requestHash?: string;
+  baseSnapshotId?: string;
+};
+
 export class InterpolationStore {
   store: ProjectStore;
-  jobs = new Map<string, Interpolation>();
+  jobs = new Map<string, TimedInterpolation>();
   inserting = new Map<string, { key: string; promise: Promise<ClipAsset> }>();
   constructor(store: ProjectStore) {
     this.store = store;
@@ -25,7 +33,7 @@ export class InterpolationStore {
       )) {
         const job = JSON.parse(
           readFileSync(join(dir, file), "utf8"),
-        ) as Interpolation;
+        ) as TimedInterpolation;
         if (job.projectId !== projectId || file !== `${job.id}.json`) continue;
         const clip = store.indexes.get(projectId)?.get(job.clipId) as
           | ClipAsset
@@ -53,7 +61,7 @@ export class InterpolationStore {
       throw new StudioError("补帧任务不存在", 404);
     return job;
   }
-  save(job: Interpolation) {
+  save(job: TimedInterpolation) {
     job.updatedAt = new Date().toISOString();
     const dir = join(
       this.store.dir(job.projectId),
@@ -66,18 +74,33 @@ export class InterpolationStore {
     this.store.changed(job.projectId);
     return job;
   }
-  private clip(job: Interpolation) {
+  private clip(job: TimedInterpolation) {
     const clip = this.store.asset(job.projectId, job.clipId);
     if (clip.type !== "clip" || clip.revision !== job.clipRevision)
       throw new StudioError("原动画已修改，请根据当前动画重新发起补帧", 409);
-    for (const ref of [job.start, job.end])
+    for (const ref of [job.start, job.end]) {
       this.store.imagePath(job.projectId, ref.imageId, ref.revision);
+      if (this.store.image(job.projectId, ref.imageId).contentHash !== ref.contentHash)
+        throw new StudioError("原图摘要已改变，请重新发起补帧", 409);
+    }
+    if (job.baseSnapshotId) {
+      const before = this.store.animation.snapshot(job.projectId, job.baseSnapshotId);
+      const current = this.store.animation.capture(job.projectId, clip.id, clip.revision);
+      if (JSON.stringify(before.images) !== JSON.stringify(current.images))
+        throw new StudioError("原动画图片已改变，请重新发起补帧", 409);
+    }
     return clip;
   }
   create(projectId: string, input: unknown) {
     const spec = interpolationSchema.parse(input);
+    const requestHash = sha256(JSON.stringify(spec));
     const existing = this.jobs.get(spec.requestId);
-    if (existing) return this.get(projectId, spec.requestId);
+    if (existing) {
+      const job = this.get(projectId, spec.requestId);
+      if (job.requestHash && job.requestHash !== requestHash)
+        throw new StudioError("相同 requestId 的补帧参数不能改变", 409);
+      return job;
+    }
     const clip = this.store.asset(projectId, spec.clipId);
     if (clip.type !== "clip" || clip.revision !== spec.revision)
       throw new StudioError("动画已改变，请刷新后再发起补帧", 409);
@@ -87,8 +110,8 @@ export class InterpolationStore {
       endIndex = clip.frames.findIndex((frame) => frame.id === spec.endFrameId);
     if (startIndex < 0 || endIndex <= startIndex)
       throw new StudioError("尾帧必须位于首帧之后");
-    if (clip.frames.length - (endIndex - startIndex - 1) + spec.count > 128)
-      throw new StudioError("补帧后的动画不能超过 128 帧");
+    interpolateFrames(clip.frames, spec.startFrameId, spec.endFrameId,
+      Array.from({ length: spec.count }, () => ({ id: randomUUID(), imageId: clip.frames[startIndex]!.imageId, durationUs: 1000 })), spec);
     const ref = (index: number): FrameReference => {
       const frame = clip.frames[index]!;
       const image = this.store.image(projectId, frame.imageId);
@@ -116,6 +139,10 @@ export class InterpolationStore {
       sessionId: session.id,
       clipId: clip.id,
       clipRevision: clip.revision,
+      baseSnapshotId: this.store.animation.capture(projectId, clip.id, clip.revision).id,
+      requestHash,
+      timingPolicy: spec.timingPolicy,
+      interiorPolicy: spec.interiorPolicy,
       start,
       end,
       count: spec.count,
@@ -137,6 +164,8 @@ export class InterpolationStore {
   ) {
     const job = this.get(projectId, id);
     if (job.sheetId) return job;
+    const sheet = this.store.image(projectId, sheetId);
+    this.store.imagePath(projectId, sheet.id, sheet.revision);
     job.sheetId = sheetId;
     job.generationItemId = item.id;
     job.referenceHashes = item.inputImages?.map((image) => image.sha256) || [];
@@ -165,7 +194,13 @@ export class InterpolationStore {
       job.count + (spec.includesEndpoints ? 2 : 0)
     )
       throw new StudioError("网格数量必须与补帧数及首尾设置一致");
-    this.clip(job);
+    const clip = this.clip(job);
+    interpolateFrames(clip.frames, job.start.frameId, job.end.frameId,
+      Array.from({ length: job.count }, () => ({ id: randomUUID(), imageId: job.start.imageId, durationUs: 1000 })), {
+        timingPolicy: spec.timingPolicy ?? job.timingPolicy,
+        interiorPolicy: spec.interiorPolicy ?? job.interiorPolicy,
+        fps: spec.fps ?? job.fps,
+      });
     const running = this.inserting.get(id);
     if (running) {
       if (running.key !== key)
@@ -179,7 +214,7 @@ export class InterpolationStore {
     return promise;
   }
   private async insertFrames(
-    job: Interpolation,
+    job: TimedInterpolation,
     spec: ReturnType<typeof interpolationLayoutSchema.parse>,
   ) {
     const pid = job.projectId,
@@ -194,6 +229,8 @@ export class InterpolationStore {
     });
     this.clip(job);
     this.store.imagePath(pid, sheet.id, sheet.revision);
+    if ((result.files as string[]).length !== job.count)
+      throw new StudioError("切割结果帧数与补帧任务不一致");
     const frames = [];
     for (const [index, file] of (result.files as string[]).entries()) {
       const image = await this.store.importImage(
@@ -217,27 +254,27 @@ export class InterpolationStore {
       frames.push({
         id: randomUUID(),
         imageId: image.id,
-        durationUs:
-          Math.round(((index + 1) * 1_000_000) / spec.fps) -
-          Math.round((index * 1_000_000) / spec.fps),
+        durationUs: 1000,
       });
     }
-    const clip = this.clip(job),
-      start = clip.frames.findIndex((frame) => frame.id === job.start.frameId),
-      end = clip.frames.findIndex((frame) => frame.id === job.end.frameId);
+    const clip = this.clip(job);
+    const resultFrames = interpolateFrames(clip.frames, job.start.frameId, job.end.frameId, frames, {
+      timingPolicy: spec.timingPolicy ?? job.timingPolicy,
+      interiorPolicy: spec.interiorPolicy ?? job.interiorPolicy,
+      fps: spec.fps ?? job.fps,
+    });
     for (const frame of frames) this.store.imagePath(pid, frame.imageId);
     job.beforeSnapshotId = before.id;
+    job.timingPolicy = spec.timingPolicy ?? job.timingPolicy ?? "preserve-duration";
+    job.interiorPolicy = spec.interiorPolicy ?? job.interiorPolicy ?? "preserve";
+    if (job.timingPolicy === "fps") job.fps = spec.fps ?? job.fps;
     this.save(job);
     const updated = this.store.updateClip(
       pid,
       clip.id,
       {
         revision: job.clipRevision,
-        frames: [
-          ...clip.frames.slice(0, start + 1),
-          ...frames,
-          ...clip.frames.slice(end),
-        ],
+        frames: resultFrames,
         loop: clip.loop,
       },
       job.id,

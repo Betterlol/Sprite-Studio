@@ -291,6 +291,8 @@ export const interpolationSchema = z.object({
   startFrameId: z.string().uuid(),
   endFrameId: z.string().uuid(),
   count: z.number().int().min(1).max(8),
+  timingPolicy: z.enum(["preserve-duration", "fps"]).default("preserve-duration"),
+  interiorPolicy: z.enum(["preserve", "replace"]).default("preserve"),
   fps: z.number().min(1).max(60).default(12),
   description: z.string().trim().min(1).max(2000),
 });
@@ -298,7 +300,9 @@ export const interpolationLayoutSchema = z.object({
   columns: z.number().int().min(1).max(10),
   rows: z.number().int().min(1).max(10),
   includesEndpoints: z.boolean().default(true),
-  fps: z.number().min(1).max(60),
+  timingPolicy: z.enum(["preserve-duration", "fps"]).optional(),
+  interiorPolicy: z.enum(["preserve", "replace"]).optional(),
+  fps: z.number().min(1).max(60).optional(),
 });
 export type InterpolationLayout = z.infer<typeof interpolationLayoutSchema>;
 export function interpolationGrid(count: number) {

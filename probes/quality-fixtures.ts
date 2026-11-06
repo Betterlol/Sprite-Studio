@@ -46,11 +46,10 @@ export function writeQualityFixtures(output: string): void {
   // Do not follow a worktree .local junction outside the trusted worktree.
   const local = existsSync(localPath) ? realpathSync(localPath) : undefined;
   const inLocal = !!local && inside(local, worktree) && (parent === local || inside(parent, local));
-  // A foreign project's .local is not made safe merely by residing under the temp root.
-  const tempRelative = relative(temp, parent);
-  const foreignLocal = tempRelative.split(sep).some(part => part.toLowerCase() === ".local");
-  const inTemp = (parent === temp || inside(parent, temp)) && !foreignLocal;
-  if (!inLocal && !inTemp) throw new Error("输出目录必须位于脚本所属 worktree 的 .local 或系统临时目录");
+  // Temp output must be a new direct child, never inside an existing project tree.
+  const tempIsProject = ["project.json", "pipeline.json"].some(marker => existsSync(join(temp, marker)));
+  const inTemp = parent === temp && !tempIsProject;
+  if (!inLocal && !inTemp) throw new Error("输出目录必须位于脚本所属 worktree 的 .local 或系统临时目录的直接子目录");
   mkdirSync(target); // exclusive: never reuse or overwrite an existing directory
   const manifest = qualityFixtures.map(f => ({ ...f, frames: f.frames.map((item, index) => ({ ...item, file: `${f.id}-${index + 1}.svg` })) }));
   for (const fixture of manifest) for (const item of fixture.frames) {
@@ -64,7 +63,7 @@ export function writeQualityFixtures(output: string): void {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const output = process.argv[2];
-  if (!output || process.argv.length !== 3) throw new Error("用法: node probes/quality-fixtures.ts <新的绝对输出目录，位于 .local 或系统临时目录>");
+  if (!output || process.argv.length !== 3) throw new Error("用法: node probes/quality-fixtures.ts <新绝对目录：所属 worktree 的 .local 下或系统临时目录直接子目录>");
   writeQualityFixtures(output);
   console.log(`已创建 ${qualityFixtures.length} 个合成夹具：${output}；未运行模型评估。`);
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -13,6 +13,11 @@ type RecordData = { draft: ClipDraft; text: string; documentRevision: string; im
 type CreateInput = { clipId: string; revision: string; frameId?: string; fromDraftId?: string };
 const createSchema = z.object({ clipId: z.string().uuid(), revision: z.string(), frameId: z.string().uuid().optional(), fromDraftId: z.string().uuid().optional() }).strict();
 const body = (clip: ClipAsset): ClipEdit => ({ schemaVersion: 1, type: "clip-edit", frames: structuredClone(clip.frames), loop: clip.loop, initialFps: clip.initialFps });
+type Ownership = { clipId: string; ids: string[]; recordId?: string };
+type FolderIndex = { stamp: number; entries: Ownership[] };
+// Shared by service instances on the same store. Folder additions trigger rescans;
+// in-process draft writes update the cached project index incrementally.
+const ownershipIndexes = new WeakMap<ProjectStore, Map<string, { history?: FolderIndex; drafts?: FolderIndex }>>();
 
 export class ClipDrafts {
   private saving = new Map<string, Promise<ClipDraftSave>>();
@@ -31,6 +36,12 @@ export class ClipDrafts {
     const file = this.store.safePath(record.draft.projectId, this.path(record.draft.id));
     mkdirSync(dirname(file), { recursive: true });
     atomicJson(file, record);
+    const index = ownershipIndexes.get(this.store)?.get(record.draft.projectId)?.drafts;
+    if (index) {
+      index.entries = index.entries.filter(entry => entry.recordId !== record.draft.id);
+      index.entries.push({ recordId: record.draft.id, clipId: record.draft.clipId, ids: record.ownedFrameIds ?? this.parse(record.text).frames.map(f => f.id) });
+      index.stamp = statSync(dirname(file)).mtimeMs;
+    }
     this.store.changed(record.draft.projectId);
   }
   private document(record: RecordData): ClipDraftDocument {
@@ -56,6 +67,28 @@ export class ClipDrafts {
       throw new StudioError("动画文件已被外部修改或与当前资源不一致", 409);
     }
   }
+  private ownership(pid: string, kind: "history" | "drafts"): Ownership[] {
+    let projects = ownershipIndexes.get(this.store);
+    if (!projects) ownershipIndexes.set(this.store, projects = new Map());
+    let project = projects.get(pid);
+    if (!project) projects.set(pid, project = {});
+    const folder = this.store.safePath(pid, kind === "history" ? ".studio/history" : ".studio/clip-drafts");
+    const stamp = existsSync(folder) ? statSync(folder).mtimeMs : -1;
+    const cached = project[kind];
+    if (cached && cached.stamp === stamp) return cached.entries;
+    const entries: Ownership[] = [];
+    if (stamp !== -1) for (const name of readdirSync(folder).filter(f => kind === "history" ? f.endsWith(".json") : /^[0-9a-f-]{36}\.json$/i.test(f))) {
+      if (kind === "history") {
+        const asset = JSON.parse(readFileSync(join(folder, name), "utf8"));
+        if (asset.type === "clip" && typeof asset.id === "string" && Array.isArray(asset.frames)) entries.push({ clipId: asset.id, ids: asset.frames.map((frame: { id: string }) => frame.id) });
+      } else {
+        const record = this.get(pid, name.slice(0, -5));
+        entries.push({ recordId: record.draft.id, clipId: record.draft.clipId, ids: record.ownedFrameIds ?? this.parse(record.text).frames.map(f => f.id) });
+      }
+    }
+    project[kind] = { stamp, entries };
+    return entries;
+  }
   private validate(pid: string, clipId: string, value: ClipEdit) {
     const ids = value.frames.map(f => f.id);
     if (new Set(ids).size !== ids.length) throw new StudioError("草稿中的帧实例不能重复");
@@ -65,17 +98,7 @@ export class ClipDrafts {
     };
     for (const projectId of this.store.projects.keys()) {
       for (const asset of this.store.assets(projectId)) if (asset.type === "clip") add(projectId, asset.id, asset.frames);
-      const history = this.store.safePath(projectId, ".studio/history");
-      if (existsSync(history)) for (const name of readdirSync(history).filter(f => f.endsWith(".json"))) {
-        const asset = JSON.parse(readFileSync(join(history, name), "utf8"));
-        if (asset.type === "clip" && typeof asset.id === "string" && Array.isArray(asset.frames)) add(projectId, asset.id, asset.frames);
-      }
-      const folder = this.store.safePath(projectId, ".studio/clip-drafts");
-      if (existsSync(folder)) for (const name of readdirSync(folder).filter(f => /^[0-9a-f-]{36}\.json$/i.test(f))) {
-        const record = this.get(projectId, name.slice(0, -5));
-        const retained = record.ownedFrameIds ?? this.parse(record.text).frames.map(f => f.id);
-        add(projectId, record.draft.clipId, retained.map(id => ({ id })));
-      }
+      for (const kind of ["history", "drafts"] as const) for (const entry of this.ownership(projectId, kind)) add(projectId, entry.clipId, entry.ids.map(id => ({ id })));
     }
     for (const snapshot of this.store.animation.snapshots.values()) add(snapshot.projectId, snapshot.clip.id, snapshot.clip.frames);
     if (ids.some(id => otherIds.has(id))) throw new StudioError("草稿引用了其他动画的帧实例");
@@ -203,6 +226,8 @@ export class ClipDrafts {
         { path: `.studio/history/${current.id}-${current.revision}.json`, bytes: bytes(current) },
         { path: this.path(id), bytes: bytes(saved) },
       ], { kind: "save-clip-draft", draftId: id });
+      const projectIndex = ownershipIndexes.get(this.store)?.get(pid);
+      if (projectIndex) { projectIndex.drafts = undefined; projectIndex.history = undefined; }
       return receipt;
     }).finally(() => this.saving.delete(key));
     this.saving.set(key, promise);

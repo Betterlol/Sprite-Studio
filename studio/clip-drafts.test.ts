@@ -166,6 +166,20 @@ test("discard from another service during render prevents the final save", async
   } finally { store.worker.close(); }
 });
 
+test("identity index updates across service instances after in-place draft writes", async () => {
+  const { store, pid, clip, image, drafts } = await fixture();
+  try {
+    const other = store.createClip(pid, "other", []), peer = new ClipDrafts(store);
+    const a = drafts.create(pid, { clipId: clip.id, revision: clip.revision }, "human");
+    let b = peer.create(pid, { clipId: other.id, revision: other.revision }, "human");
+    const reserved = crypto.randomUUID();
+    b = update(peer, pid, b, v => { v.frames.push({ id: reserved, imageId: image.id, durationUs: 100000 }); });
+    assert.throws(() => update(drafts, pid, a, v => { v.frames.push({ id: reserved, imageId: image.id, durationUs: 100000 }); }), /其他动画/);
+    b = update(peer, pid, b, v => { v.frames = []; });
+    assert.throws(() => update(drafts, pid, a, v => { v.frames.push({ id: reserved, imageId: image.id, durationUs: 100000 }); }), /其他动画/);
+  } finally { store.worker.close(); }
+});
+
 test("new image dependencies freeze at write and reject subsequent pixel changes", async () => {
   const { store, pid, clip, drafts, image } = await fixture();
   try {

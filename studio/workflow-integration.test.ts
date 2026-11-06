@@ -793,6 +793,103 @@ test("review I6: human drafts protect every frozen image dependency, including i
   } finally { await f.cleanup(); }
 });
 
+test("round2 N1: stopped legacy Agent drafts stay read-only through old document/save services and restart; independent editors stay mutable", async () => {
+  const f = await fixture(); let restored: ProjectStore | undefined;
+  try {
+    const clip = f.clip(); let task = await f.create({ target: { mode: "saved", clipId: clip.id } }); task = f.approveExisting(task, task.target!.snapshotId); const session = await f.begin(task);
+    const draft = result(await f.hub.tool(session.id, "create_frame_draft", { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }));
+    const body = JSON.parse(draft.text); body.frames[0].durationUs = 190000;
+    const edited = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(body) }] }))[0];
+    const inspected = result(await f.hub.tool(session.id, "inspect_clip", { draftId: draft.documentId, documentRevision: edited.documentRevision }));
+    assert.equal(edited.draft.taskId, task.id); assert.equal(edited.draft.intentVersion, 1);
+    await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "stop" });
+    const assertHistorical = async (store: ProjectStore) => {
+      assert.equal(store.frameDrafts.get(f.pid, draft.documentId).readOnly, true);
+      assert.equal(store.frameDrafts.read(f.pid, draft.documentId).draft.readOnly, true);
+      assert.equal(store.documents.read(f.pid, draft.documentId).text, edited.text);
+      const replacement = JSON.parse(edited.text); replacement.frames[0].durationUs = 290000;
+      const input = { documentId: draft.documentId, expectedDocumentRevision: edited.documentRevision, text: JSON.stringify(replacement) };
+      assert.throws(() => store.frameDrafts.prepare(f.pid, input), /只读历史/);
+      assert.throws(() => store.documents.write(f.pid, [input]), /只读历史/);
+      await assert.rejects(store.frameDrafts.save(f.pid, draft.documentId, edited.documentRevision), /只读历史/);
+      assert.equal(store.frameDrafts.read(f.pid, draft.documentId).text, edited.text);
+      assert.equal(store.animation.snapshot(f.pid, inspected.snapshotId).clip.frames[0]!.durationUs, 190000);
+    };
+    await assertHistorical(f.store); assert.equal(f.store.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 100000);
+    const human = f.store.frameDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, frameId: clip.frames[1]!.id }, "human");
+    const humanBody = JSON.parse(human.text); humanBody.frames[1].durationUs = 220000;
+    const humanEdited = f.store.documents.write(f.pid, [{ documentId: human.documentId, expectedDocumentRevision: human.documentRevision, text: JSON.stringify(humanBody) }])[0]!;
+    assert.notEqual(humanEdited.draft.readOnly, true); await f.store.frameDrafts.save(f.pid, human.documentId, humanEdited.documentRevision);
+    const ordinary = f.store.createSession(f.pid), current = f.store.animation.clip(f.pid, clip.id);
+    f.hub.send(ordinary.id, "普通对话编辑帧，无制作任务", [], randomUUID()); await waitFor(() => ordinary.status === "running" && ordinary.turnId);
+    const standalone = result(await f.hub.tool(ordinary.id, "create_frame_draft", { clipId: clip.id, revision: current.revision, frameId: clip.frames[0]!.id }));
+    assert.equal(standalone.draft.taskId, undefined); assert.notEqual(standalone.draft.readOnly, true);
+    const standaloneBody = JSON.parse(standalone.text); standaloneBody.frames[0].durationUs = 250000;
+    const standaloneEdited = result(await f.hub.tool(ordinary.id, "write_documents", { documents: [{ documentId: standalone.documentId, expectedDocumentRevision: standalone.documentRevision, text: JSON.stringify(standaloneBody) }] }))[0];
+    assert.equal(result(await f.hub.tool(ordinary.id, "create_frame_draft", { clipId: clip.id, revision: current.revision, frameId: clip.frames[1]!.id })).documentId, standalone.documentId);
+    assert.equal(result(await f.hub.tool(ordinary.id, "save_frame_draft", { draftId: standalone.documentId, documentRevision: standaloneEdited.documentRevision })).saved, true);
+    await f.hub.close(); await f.store.worker.close(); restored = new ProjectStore(f.store.root);
+    await assertHistorical(restored); assert.equal(restored.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 250000);
+    assert.notEqual(restored.frameDrafts.get(f.pid, human.documentId).readOnly, true);
+  } finally { await restored?.worker.close(); await f.cleanup(); }
+});
+
+test("round2 N1: new intents create a fresh clean legacy ID, retain old bodies across startup and require explicit historical derivation", async () => {
+  const f = await fixture(); let restored: ProjectStore | undefined;
+  try {
+    const clip = f.clip(); let task = await f.create({ target: { mode: "saved", clipId: clip.id } }); task = f.approveExisting(task, task.target!.snapshotId); const session = await f.begin(task);
+    const old = result(await f.hub.tool(session.id, "create_frame_draft", { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }));
+    const body = JSON.parse(old.text); body.frames[0].durationUs = 190000;
+    const oldEdited = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: old.documentId, expectedDocumentRevision: old.documentRevision, text: JSON.stringify(body) }] }))[0];
+    task = await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "feedback", feedbackKind: "local", text: "新intent，不采用上一轮未保存稿" });
+    await f.begin(task);
+    const fresh = result(await f.hub.tool(session.id, "create_frame_draft", { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }));
+    assert.notEqual(fresh.documentId, old.documentId); assert.equal(JSON.parse(fresh.text).frames[0].durationUs, 100000); assert.equal(fresh.draft.intentVersion, 2);
+    assert.equal(f.store.frameDrafts.get(f.pid, old.documentId).readOnly, true); assert.equal(f.store.frameDrafts.read(f.pid, old.documentId).text, oldEdited.text);
+    const currentTask = f.store.tasks.get(f.pid, task.id);
+    assert.throws(() => f.store.tasks.registerDraft(f.pid, task.id, { sessionId: session.id, intentVersion: currentTask.intentVersion, barrierVersion: currentTask.barrierVersion, draftId: old.documentId, kind: "frame" }), /历史Agent草稿/);
+    assert.ok(!f.store.tasks.get(f.pid, task.id).drafts!.some(entry => entry.draftId === old.documentId && entry.intentVersion === 2));
+    assert.equal(result(await f.hub.tool(session.id, "workflow_task", { action: "ready" })).task.status, "ready");
+    task = await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "feedback", feedbackKind: "local", text: "另一个明确intent的当前帧稿" });
+    await f.begin(task);
+    const active = result(await f.hub.tool(session.id, "create_frame_draft", { clipId: clip.id, revision: clip.revision, frameId: clip.frames[1]!.id }));
+    const activeBody = JSON.parse(active.text); activeBody.frames[1].durationUs = 230000;
+    const activeEdited = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: active.documentId, expectedDocumentRevision: active.documentRevision, text: JSON.stringify(activeBody) }] }))[0];
+    await f.hub.close(); await f.store.worker.close(); restored = new ProjectStore(f.store.root);
+    const historical = restored.frameDrafts.get(f.pid, old.documentId), stillActive = restored.frameDrafts.get(f.pid, active.documentId);
+    assert.equal(historical.readOnly, true); assert.equal(historical.text, oldEdited.text); assert.equal(historical.mergedInto, undefined);
+    assert.notEqual(stillActive.readOnly, true); assert.equal(stillActive.text, activeEdited.text); assert.equal(stillActive.mergedInto, undefined);
+    assert.deepEqual(JSON.parse(stillActive.text).frames.map((frame: any) => frame.durationUs), [100000, 230000]);
+    const adopted = restored.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, fromDraftId: old.documentId }, "human");
+    assert.notEqual(adopted.documentId, old.documentId); assert.equal(JSON.parse(adopted.text).frames[0].durationUs, 190000);
+    await restored.clipDrafts.save(f.pid, adopted.documentId, adopted.documentRevision);
+    assert.equal(restored.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 190000); assert.equal(restored.frameDrafts.read(f.pid, old.documentId).text, oldEdited.text);
+    const changedClip = restored.animation.clip(f.pid, clip.id);
+    assert.throws(() => restored!.clipDrafts.create(f.pid, { clipId: clip.id, revision: changedClip.revision, fromDraftId: old.documentId }, "human"), /基线不匹配/);
+  } finally { await restored?.worker.close(); await f.cleanup(); }
+});
+
+test("round2 N1: a legacy save rechecks historical ownership after the final real render before publication", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(); let task = await f.create({ target: { mode: "saved", clipId: clip.id } }); task = f.approveExisting(task, task.target!.snapshotId); const session = await f.begin(task);
+    const draft = result(await f.hub.tool(session.id, "create_frame_draft", { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }));
+    const body = JSON.parse(draft.text); body.frames[0].durationUs = 190000; body.frames[0].transform.scale = 0.5;
+    const edited = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(body) }] }))[0];
+    await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "handoff" });
+    let release!: () => void, rendering = false, renders = 0, guardCalls = 0;
+    const gate = new Promise<void>(resolve => release = resolve), originalRender = f.store.animation.renderFrame.bind(f.store.animation), originalAdjust = f.store.animation.adjustFrames.bind(f.store.animation);
+    f.store.animation.renderFrame = async (pid, snapshotId, frameId) => { const value = await originalRender(pid, snapshotId, frameId); if (++renders === 2) { rendering = true; await gate; } return value; };
+    f.store.animation.adjustFrames = (pid, input, source, beforeCommit) => originalAdjust(pid, input, source, () => { guardCalls++; assert.ok(beforeCommit); beforeCommit!(); });
+    const saving = f.store.frameDrafts.save(f.pid, draft.documentId, edited.documentRevision), rejected = assert.rejects(saving, /只读历史/);
+    await waitFor(() => rendering);
+    await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "stop" });
+    release(); await rejected;
+    assert.equal(guardCalls, 1); assert.deepEqual(f.store.animation.clip(f.pid, clip.id).frames, clip.frames); assert.equal(f.store.animation.changes.has(draft.documentId), false);
+    const historical = f.store.frameDrafts.get(f.pid, draft.documentId); assert.equal(historical.readOnly, true); assert.equal(historical.text, edited.text); assert.equal(historical.status, "editing");
+  } finally { await f.cleanup(); }
+});
+
 test("restart pauses task, retains unknown generation and never replays a runtime request", async () => {
   const f = await fixture(); let restored: ProjectStore | undefined;
   try {

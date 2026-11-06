@@ -41,6 +41,15 @@ export class FrameDrafts {
           continue;
         const draft = structuredClone(original);
         this.records.set(draft.id, pid);
+        if (this.historical(draft)) {
+          const clip = store.indexes.get(pid)?.get(draft.clipId);
+          if (clip?.type === "clip" && clip.appliedFrameChangeIds?.includes(draft.id) && draft.status !== "saved") this.persist({ ...draft, status: "saved", changeId: draft.id });
+          else if (draft.status === "pending") this.persist({ ...draft, status: "editing" });
+          // No live approval survives restart, but historical readonly still
+          // applies. Preserve text (including v1) and never merge it into a
+          // new owner/intent merely because its immutable base is the same.
+          continue;
+        }
         const raw = JSON.parse(draft.text);
         if (raw.schemaVersion === 1) {
           const old = legacyFrameEditSchema.parse(raw),
@@ -72,8 +81,9 @@ export class FrameDrafts {
         this.persist(draft);
         if (draft.status === "editing") active.push(draft);
       }
-      // Old per-frame drafts with the same immutable base can be combined safely.
-      // Retain every old file and its source configuration rather than rebasing over newer saves.
+      // Only current same-owner/intent per-frame drafts may be combined. Old
+      // task-associated files without explicit tags stay separate rather than
+      // guessing an owner; ordinary unbound/human recovery keeps its old merge.
       const groups = new Map<string, FrameDraft[]>();
       for (const draft of active) {
         const key = JSON.stringify([
@@ -81,6 +91,9 @@ export class FrameDrafts {
           draft.baseSnapshotId,
           draft.source,
           draft.sessionId,
+          draft.taskId,
+          draft.intentVersion,
+          draft.source === "agent" && !draft.taskId && store.tasks.legacyDraftHasTaskOwner(pid, draft) ? draft.id : undefined,
         ]);
         groups.set(key, [...(groups.get(key) || []), draft]);
       }
@@ -110,6 +123,18 @@ export class FrameDrafts {
       }
     }
   }
+  private historical(draft: FrameDraft) {
+    // draftHoldsLease reads raw task records only: never Task.view, which may
+    // resolve a target draft and recurse back into get during startup/read.
+    return draft.source === "agent" && !!this.store.tasks && !this.store.tasks.draftHoldsLease(draft.projectId, draft);
+  }
+  private view(draft: FrameDraft): FrameDraft {
+    const { readOnly: _readOnly, ...record } = draft;
+    return { ...record, ...(this.historical(record) ? { readOnly: true } : {}) };
+  }
+  private assertEditable(draft: FrameDraft) {
+    if (this.historical(draft)) throw new StudioError("所属任务/意图已结束，该Agent帧草稿为只读历史；请显式派生新草稿", 409);
+  }
   path(id: string) {
     return `.studio/animation/drafts/${id}.json`;
   }
@@ -119,9 +144,9 @@ export class FrameDrafts {
   get(pid: string, id: string): FrameDraft {
     if (this.records.get(id) !== pid)
       throw new StudioError("动画调整草稿不存在", 404);
-    return JSON.parse(
-      readFileSync(this.store.safePath(pid, this.path(id)), "utf8"),
-    );
+    const draft = JSON.parse(readFileSync(this.store.safePath(pid, this.path(id)), "utf8")) as FrameDraft;
+    if (draft.id !== id || draft.projectId !== pid) throw new StudioError("动画调整草稿不存在", 404);
+    return this.view(draft);
   }
   list(pid: string) {
     return [...this.records]
@@ -133,16 +158,18 @@ export class FrameDrafts {
   persist(draft: FrameDraft) {
     const file = this.store.safePath(draft.projectId, this.path(draft.id));
     mkdirSync(join(file, ".."), { recursive: true });
-    atomicJson(file, draft);
+    const { readOnly: _readOnly, ...record } = draft;
+    atomicJson(file, record);
     this.records.set(draft.id, draft.projectId);
     this.store.changed(draft.projectId);
-    return draft;
+    return this.view(record);
   }
   create(
     pid: string,
     input: { clipId: string; revision: string; frameId: string },
     source: "agent" | "human",
     sessionId?: string,
+    owner?: { taskId: string; intentVersion: number },
   ) {
     const spec = z
       .object({
@@ -160,6 +187,9 @@ export class FrameDrafts {
         d.clipId === spec.clipId &&
         d.source === source &&
         d.sessionId === sessionId &&
+        !d.readOnly &&
+        d.taskId === (source === "agent" ? owner?.taskId : undefined) &&
+        d.intentVersion === (source === "agent" ? owner?.intentVersion : undefined) &&
         d.baseSnapshotId === base.id,
     );
     if (existing) return this.read(pid, existing.id);
@@ -176,6 +206,7 @@ export class FrameDrafts {
       baseSnapshotId: base.id,
       source,
       sessionId,
+      ...(source === "agent" ? owner : {}),
       status: "editing",
       createdAt: new Date().toISOString(),
       text,
@@ -206,8 +237,14 @@ export class FrameDrafts {
       throw new StudioError("无效动画调整配置：" + String(error));
     }
   }
+  configuration(pid: string, draft: FrameDraft) {
+    const raw = JSON.parse(draft.text);
+    if (raw.schemaVersion !== 1) return this.parse(draft.text);
+    const old = legacyFrameEditSchema.parse(raw), base = this.store.animation.snapshot(pid, draft.baseSnapshotId);
+    return frameEditSchema.parse({ schemaVersion: 2, type: "frame-edit", frames: entries(base).map(frame => frame.frameId === draft.frameId ? { ...frame, transform: old.transform, durationUs: old.durationUs } : frame) });
+  }
   edits(pid: string, draft: FrameDraft) {
-    const config = this.parse(draft.text),
+    const config = this.configuration(pid, draft),
       base = this.store.animation.snapshot(pid, draft.baseSnapshotId),
       original = entries(base);
     if (
@@ -229,6 +266,7 @@ export class FrameDrafts {
     },
   ) {
     const draft = this.get(pid, input.documentId);
+    this.assertEditable(draft);
     this.store.assertClipMutation(pid, draft.clipId);
     if (draft.status !== "editing")
       throw new StudioError(
@@ -323,6 +361,7 @@ export class FrameDrafts {
       throw new StudioError("草稿已改变，请重新提交保存", 409);
     if (old.status === "saved")
       return this.store.animation.change(pid, old.changeId!);
+    this.assertEditable(old);
     this.store.assertClipMutation(pid, old.clipId);
     if (old.status === "discarded") throw new StudioError("草稿已放弃", 409);
     const running = this.saving.get(id);
@@ -351,6 +390,11 @@ export class FrameDrafts {
               frames: edits,
             },
             draft.source,
+            () => {
+              this.assertEditable(this.get(pid, id));
+              this.store.assertClipMutation(pid, draft.clipId);
+              this.check(pid, id, revision);
+            },
           );
           this.persist({ ...draft, status: "saved", changeId: change.id });
           return change;

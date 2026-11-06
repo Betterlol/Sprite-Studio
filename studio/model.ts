@@ -89,6 +89,9 @@ export type FrameDraft = {
   baseSnapshotId: string;
   source: "agent" | "human";
   sessionId?: string;
+  taskId?: string;
+  intentVersion?: number;
+  readOnly?: boolean;
   status: "editing" | "pending" | "saved" | "discarded";
   createdAt: string;
   documentRevision: string;

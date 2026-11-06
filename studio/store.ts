@@ -151,10 +151,12 @@ export class ProjectStore extends EventEmitter {
     this.sheets = new SheetDocuments(this);
     this.documents = new ProjectDocuments(this);
     this.generated = new GeneratedImages(this);
+    // Legacy draft startup needs raw task/intent ownership before deciding which
+    // records are mutable or eligible for its old per-frame merge recovery.
+    this.tasks = new ProductionTasks(this);
     this.frameDrafts = new FrameDrafts(this);
     this.clipDrafts = new ClipDrafts(this);
     this.reviewSequences = new ReviewSequences(this);
-    this.tasks = new ProductionTasks(this);
     this.quality = new WorkflowQuality(this);
   }
   project(id: string) {

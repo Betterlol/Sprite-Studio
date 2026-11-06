@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { bytes, clipBody } from "./documents.ts";
 import { publishFiles } from "./file-operations.ts";
-import { frameEditSchema, type ClipAsset, type ClipSnapshot, type RenderWarning } from "./model.ts";
+import { type ClipAsset, type ClipSnapshot, type RenderWarning } from "./model.ts";
 import { assetRevision, atomicJson, sha256, StudioError, type ProjectStore } from "./store.ts";
 import { clipEditSchema, type ClipDraft, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type ClipEdit } from "./workflow-model.ts";
 
@@ -155,7 +155,7 @@ export class ClipDrafts {
       } else {
         const old = this.store.frameDrafts.get(pid, spec.fromDraftId);
         if (old.clipId !== spec.clipId || old.baseSnapshotId !== base.id || old.status !== "editing") throw new StudioError("派生草稿与当前动画基线不匹配", 409);
-        const legacy = frameEditSchema.parse(JSON.parse(old.text));
+        const legacy = this.store.frameDrafts.configuration(pid, old);
         const edits = new Map(legacy.frames.map(f => [f.frameId, f]));
         if (edits.size !== legacy.frames.length || legacy.frames.some(f => !base.clip.frames.some(b => b.id === f.frameId))) throw new StudioError("旧草稿包含无效帧实例");
         value.frames = value.frames.map(f => { const edit = edits.get(f.id); return edit ? { ...f, transform: edit.transform, durationUs: edit.durationUs } : f; });

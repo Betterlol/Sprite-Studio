@@ -117,6 +117,10 @@ export class ProductionTasks {
     }
     return !owners.length || owners.some(Boolean);
   }
+  legacyDraftHasTaskOwner(pid: string, draft: { id: string; sessionId?: string; clipId: string; createdAt: string }) {
+    return this.rawList(pid).some(task => task.sessionId === draft.sessionId && !!draft.sessionId && task.contract.scope?.clipId === draft.clipId &&
+      ((task.drafts || []).some(entry => entry.draftId === draft.id) || task.checks.some(check => check.draftId === draft.id) || (!task.drafts && draft.createdAt >= task.createdAt)));
+  }
   create(pid: string, input: CreateTaskInput): ProductionTask {
     this.store.project(pid); const spec = createSchema.parse(input), hash = sha256(JSON.stringify(spec));
     const old = this.rawList(pid).find(t => t.requestId === spec.requestId);
@@ -281,7 +285,7 @@ export class ProductionTasks {
     const task = this.raw(pid, id);
     if (task.sessionId !== input.sessionId || task.intentVersion !== input.intentVersion || task.barrierVersion !== input.barrierVersion || !["running", "waiting"].includes(task.status)) fail("草稿注册的任务意图已失效");
     const document = input.kind === "clip" ? this.store.clipDrafts.read(pid, input.draftId) : this.store.frameDrafts.read(pid, input.draftId);
-    if (input.kind === "clip" && this.store.clipDrafts.read(pid, input.draftId).draft.readOnly) fail("历史Agent草稿不能改写，请显式派生新草稿");
+    if (document.draft.readOnly) fail("历史Agent草稿不能改写或重新登记，请显式派生新草稿");
     if (document.draft.source !== "agent" || document.draft.sessionId !== input.sessionId || document.draft.clipId !== task.contract.scope?.clipId) fail("草稿不属于当前任务会话或目标");
     if ((task.drafts || []).some(draft => draft.draftId === input.draftId && draft.intentVersion === input.intentVersion)) return this.view(task);
     (task.drafts ??= []).push({ draftId: input.draftId, kind: input.kind, intentVersion: input.intentVersion });

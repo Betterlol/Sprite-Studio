@@ -466,6 +466,7 @@ export class AnimationStore {
     pid: string,
     input: unknown,
     source: "agent" | "human" = "human",
+    beforeCommit?: () => void,
   ): Promise<FrameChange> {
     const spec = frameBatchSchema.parse(input),
       running = this.adjusting.get(spec.requestId);
@@ -480,7 +481,7 @@ export class AnimationStore {
     )
       return Promise.resolve(this.change(pid, spec.requestId));
     const promise = this.store
-      .reading(pid, () => this.applyAdjustment(pid, spec, source))
+      .reading(pid, () => this.applyAdjustment(pid, spec, source, beforeCommit))
       .finally(() => this.adjusting.delete(spec.requestId));
     this.adjusting.set(spec.requestId, promise);
     return promise;
@@ -489,6 +490,7 @@ export class AnimationStore {
     pid: string,
     spec: z.infer<typeof frameBatchSchema>,
     source: "agent" | "human",
+    beforeCommit?: () => void,
   ) {
     const before = this.capture(pid, spec.clipId, spec.revision),
       byId = new Map(spec.frames.map((f) => [f.frameId, f]));
@@ -528,6 +530,7 @@ export class AnimationStore {
       JSON.stringify(before.images)
     )
       throw new StudioError("底图在预览期间发生变化，请重新检查", 409);
+    beforeCommit?.();
     const change: FrameChange = {
       id: spec.requestId,
       projectId: pid,

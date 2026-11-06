@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ProjectStore } from "./store.ts";
+import { ProjectStore, sha256 } from "./store.ts";
 import { AgentHub } from "./agent.ts";
 
 async function fixture() {
@@ -484,6 +484,59 @@ test("legacy single-frame drafts on one base merge without losing pending edits 
     store.worker.close();
     restored?.worker.close();
   }
+});
+
+test("task-owned historical v1 text is not migrated or merged across owners at startup, and remains an explicit derivation source", async () => {
+  const f = await fixture(); let restored: ProjectStore | undefined;
+  try {
+    const session = f.store.createSession(f.pid);
+    const firstTask = f.store.tasks.create(f.pid, { requestId: crypto.randomUUID(), title: "old owner", description: "fixture", target: { mode: "saved", clipId: f.clip.id }, sessionId: session.id });
+    const old = f.store.frameDrafts.create(f.pid, { clipId: f.clip.id, revision: f.clip.revision, frameId: f.clip.frames[0]!.id }, "agent", session.id, { taskId: firstTask.id, intentVersion: firstTask.intentVersion });
+    f.store.tasks.registerDraft(f.pid, firstTask.id, { sessionId: session.id, intentVersion: firstTask.intentVersion, barrierVersion: firstTask.barrierVersion, draftId: old.documentId, kind: "frame" });
+    f.store.tasks.action(f.pid, firstTask.id, { expectedRevision: f.store.tasks.get(f.pid, firstTask.id).revision, action: "stop" });
+    // Seed a historical pre-v2 file, not a public mutation: constructor recovery
+    // must preserve these original bytes rather than merging them into new work.
+    const legacyText = JSON.stringify({ schemaVersion: 1, type: "frame-edit", transform: { scale: 1, offsetX: 0, offsetY: 0, clip: false }, durationUs: 190000 });
+    const { taskId: _oldOwner, intentVersion: _oldIntent, ...oldUntagged } = old.draft;
+    const legacyRecord = { ...oldUntagged, text: legacyText, documentRevision: sha256(legacyText) }, legacyPath = f.store.safePath(f.pid, f.store.frameDrafts.path(old.documentId));
+    writeFileSync(legacyPath, JSON.stringify(legacyRecord, null, 2) + "\n"); const originalBytes = readFileSync(legacyPath);
+    const pendingId = crypto.randomUUID(), pendingText = JSON.stringify({ schemaVersion: 1, type: "frame-edit", transform: { scale: 1, offsetX: 0, offsetY: 0, clip: false }, durationUs: 210000 });
+    f.store.frameDrafts.persist({ ...old.draft, id: pendingId, status: "pending", text: pendingText, documentRevision: sha256(pendingText) });
+    const secondTask = f.store.tasks.create(f.pid, { requestId: crypto.randomUUID(), title: "current owner", description: "fixture", target: { mode: "saved", clipId: f.clip.id }, sessionId: session.id });
+    const current = f.store.frameDrafts.create(f.pid, { clipId: f.clip.id, revision: f.clip.revision, frameId: f.clip.frames[1]!.id }, "agent", session.id, { taskId: secondTask.id, intentVersion: secondTask.intentVersion });
+    const value = JSON.parse(current.text); value.frames[1].durationUs = 230000;
+    const currentEdited = f.store.documents.write(f.pid, [{ documentId: current.documentId, expectedDocumentRevision: current.documentRevision, text: JSON.stringify(value) }])[0]!;
+    f.store.tasks.registerDraft(f.pid, secondTask.id, { sessionId: session.id, intentVersion: secondTask.intentVersion, barrierVersion: secondTask.barrierVersion, draftId: current.documentId, kind: "frame" });
+    const { taskId: _currentOwner, intentVersion: _currentIntent, ...currentUntagged } = currentEdited.draft;
+    f.store.frameDrafts.persist(currentUntagged);
+    const thirdTask = f.store.tasks.create(f.pid, { requestId: crypto.randomUUID(), title: "another existing owner", description: "legacy fixture", target: { mode: "saved", clipId: f.clip.id }, sessionId: session.id });
+    const another = f.store.frameDrafts.create(f.pid, { clipId: f.clip.id, revision: f.clip.revision, frameId: f.clip.frames[2]!.id }, "agent", session.id, { taskId: thirdTask.id, intentVersion: thirdTask.intentVersion });
+    const anotherBody = JSON.parse(another.text); anotherBody.frames[2].durationUs = 260000;
+    const anotherEdited = f.store.documents.write(f.pid, [{ documentId: another.documentId, expectedDocumentRevision: another.documentRevision, text: JSON.stringify(anotherBody) }])[0]!;
+    f.store.tasks.registerDraft(f.pid, thirdTask.id, { sessionId: session.id, intentVersion: thirdTask.intentVersion, barrierVersion: thirdTask.barrierVersion, draftId: another.documentId, kind: "frame" });
+    const { taskId: _anotherOwner, intentVersion: _anotherIntent, ...anotherUntagged } = anotherEdited.draft;
+    f.store.frameDrafts.persist(anotherUntagged);
+    await f.store.worker.close(); restored = new ProjectStore(f.store.root);
+    assert.deepEqual(readFileSync(legacyPath), originalBytes); assert.equal(restored.frameDrafts.get(f.pid, old.documentId).readOnly, true);
+    assert.equal(restored.frameDrafts.read(f.pid, old.documentId).text, legacyText); assert.equal(restored.frameDrafts.get(f.pid, old.documentId).mergedInto, undefined);
+    const pendingHistory = restored.frameDrafts.get(f.pid, pendingId); assert.equal(pendingHistory.readOnly, true); assert.equal(pendingHistory.status, "editing"); assert.equal(pendingHistory.text, pendingText);
+    const kept = restored.frameDrafts.get(f.pid, current.documentId); assert.notEqual(kept.readOnly, true); assert.equal(kept.text, currentEdited.text); assert.equal(kept.mergedInto, undefined);
+    assert.deepEqual(JSON.parse(kept.text).frames.map((frame: any) => frame.durationUs), [100000, 230000, 100000]);
+    const separate = restored.frameDrafts.get(f.pid, another.documentId); assert.equal(separate.mergedInto, undefined); assert.equal(separate.text, anotherEdited.text);
+    assert.deepEqual(JSON.parse(separate.text).frames.map((frame: any) => frame.durationUs), [100000, 100000, 260000]);
+    const adopted = restored.clipDrafts.create(f.pid, { clipId: f.clip.id, revision: f.clip.revision, fromDraftId: old.documentId }, "human");
+    assert.notEqual(adopted.documentId, old.documentId); assert.equal(JSON.parse(adopted.text).frames[0].durationUs, 190000); assert.equal(restored.frameDrafts.read(f.pid, old.documentId).text, legacyText);
+    const pendingAdopted = restored.clipDrafts.create(f.pid, { clipId: f.clip.id, revision: f.clip.revision, fromDraftId: pendingId }, "human");
+    assert.equal(JSON.parse(pendingAdopted.text).frames[0].durationUs, 210000); assert.equal(restored.frameDrafts.get(f.pid, pendingId).text, pendingText);
+    // Exercise accepted Task.view -> source draft read as well: readonly must
+    // consult raw lifecycle only, not recurse back through Task.view/get.
+    let sourceTask = restored.tasks.create(f.pid, { requestId: crypto.randomUUID(), title: "historical source", description: "fixture", target: { mode: "draft", draftId: old.documentId, documentRevision: sha256(legacyText) } });
+    sourceTask = restored.tasks.decideDirection(f.pid, sourceTask.id, { expectedRevision: sourceTask.revision, accept: true, snapshotId: sourceTask.target!.snapshotId });
+    const checked = await restored.quality.checkTask(f.pid, sourceTask.id, () => {});
+    sourceTask = restored.tasks.action(f.pid, sourceTask.id, { expectedRevision: checked.task.revision, action: "ready", snapshotId: checked.snapshot.id });
+    sourceTask = restored.tasks.action(f.pid, sourceTask.id, { expectedRevision: sourceTask.revision, action: "accept", snapshotId: checked.snapshot.id });
+    assert.equal(restored.tasks.get(f.pid, sourceTask.id).status, "accepted"); assert.equal(restored.frameDrafts.get(f.pid, old.documentId).readOnly, true);
+  } finally { await restored?.worker.close(); await f.store.worker.close(); }
 });
 
 test("invisible alpha fringes do not block transforms; genuine overflow remains visible in preview and blocked on save", async () => {

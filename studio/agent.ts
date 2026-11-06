@@ -1689,7 +1689,7 @@ export class AgentHub {
       return { content: evidence({ ...review, ...(taskQuality ? { taskQuality } : {}) }) };
     }
     if (name === "create_frame_draft") {
-      const document = this.store.frameDrafts.create(pid, input, "agent", sessionId);
+      const document = this.store.frameDrafts.create(pid, input, "agent", sessionId, intent ? { taskId: intent.taskId, intentVersion: intent.intentVersion } : undefined);
       if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: document.documentId, kind: "frame" });
       session.agentDraftId = document.documentId; this.flush(session);
       return { content: [textContent(JSON.stringify(document))] };

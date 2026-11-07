@@ -150,6 +150,16 @@ app.post("/api/projects", async (request) => {
 app.get("/api/projects/:projectId", async (request) =>
   store.state(pid(request)),
 );
+app.get("/api/projects/:projectId/markdown/:assetId", async (request) => store.markdown.read(pid(request), aid(request)));
+app.post("/api/projects/:projectId/markdown", async (request) => store.markdown.create(pid(request), request.body));
+app.put("/api/projects/:projectId/markdown/:assetId", async (request) => store.markdown.write(pid(request), aid(request), request.body));
+app.post("/api/projects/:projectId/markdown/import", async (request) => {
+  const projectId = pid(request);
+  const { folder } = z.object({ folder: z.string().default("") }).parse(request.query);
+  const part = await request.file();
+  if (!part) throw new StudioError("请选择Markdown文档");
+  return store.markdown.import(projectId, part.filename, await part.toBuffer(), folder);
+});
 app.get("/api/projects/:projectId/schemas/sheet-recipe", async () =>
   store.sheets.schema(),
 );

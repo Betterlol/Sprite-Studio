@@ -6,15 +6,15 @@ import { LegacyFrameDrafts } from "./LegacyFrameDrafts.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
 import { api } from "./api.ts";
 import { assetUrl, snapshotFrameUrl, type Asset, type ClipAsset, type FrameTransform, type FrameDraft } from "../studio/model.ts";
-import { clipEditSchema, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type EditingContext } from "../studio/workflow-model.ts";
+import { clipEditSchema, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type ClipDraft, type EditingContext } from "../studio/workflow-model.ts";
 import { clipEdit, contextFor, dependencyKey, dependencyConflicts, sameClipText, samePreview, DraftQueue, editorReducer, editorState, legacyDerivation, finishFrameDrag, offsetByDrag, shortcutAllowed, type EditorAction } from "./workflow-state.ts";
 
 export type ClipEditorBridge = { clipId: string; stabilize: () => Promise<EditingContext> };
 const defaults: FrameTransform = { scale: 1, offsetX: 0, offsetY: 0, clip: false };
 
-export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, playing, onPlaying: setPlaying, propertiesHost, locked, onContext, onBridge, onSaved, onTool, legacyDrafts, onLegacyPreview }: {
+export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, playing, onPlaying: setPlaying, propertiesHost, locked, onContext, onBridge, onSaved, onTool, legacyDrafts, clipDrafts, onLegacyPreview }: {
   projectId: string; clip: ClipAsset; assets: Asset[]; frameIndex: number; onFrame: (index: number) => void;
-  legacyDrafts: FrameDraft[]; onLegacyPreview: (snapshotId: string) => void;
+  legacyDrafts: FrameDraft[]; clipDrafts: ClipDraft[]; onLegacyPreview: (snapshotId: string) => void;
   playing: boolean; onPlaying: (value: boolean) => void;
   propertiesHost: HTMLElement | null; locked?: string; onContext: (context: EditingContext) => void;
   onBridge: (bridge: ClipEditorBridge | null) => void; onSaved: () => Promise<void>; onTool: (tool: "interpolate" | "review") => void;
@@ -99,7 +99,16 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
     }); observer.observe(element); return () => observer.disconnect();
   }, []);
   useEffect(() => {
-    if (!document || document.draft.status !== "editing") return;
+    if (!document || document.draft.status !== "editing") {
+      // Agent-owned, read-only views must track the actual saved body, not the
+      // editor initialized at mount. A human editing document remains isolated.
+      const next = editorState(clipEdit(clip)); current.current = next; setEditor(next);
+      baseRevision.current = clip.revision;
+      baseDependencies.current = dependencyKey(clipEdit(clip), assets);
+      assetVersions.current = Object.fromEntries(clip.frames.map(frame => [frame.imageId, assets.find(asset => asset.id === frame.imageId)?.revision || "missing"]));
+      setPreview(null);
+      return;
+    }
     if (clip.revision !== baseRevision.current) { setConflict(true); setError("动画保存版本发生变化，本机草稿保留。需要重新载入或先复制草稿内容，不能覆盖新版本。"); }
     if (dependencyKey(clipEdit(clip), assets) !== baseDependencies.current || dependencyConflicts(editor.present,assets,assetVersions.current).length) {
       // Guard newly referenced images too; an old preview never authorizes changed pixels.
@@ -131,7 +140,7 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
     onContext(contextFor(clip, frame?.id, document?.draft.status === "editing" ? document : undefined));
     onBridge({ clipId: clip.id, stabilize: async () => { if (busy) throw new Error("草稿正在载入或保存，请等待完成后发送"); return stabilize(); } });
     return () => onBridge(null);
-  }, [document, frame?.id, readonly, text, busy]);
+  }, [document, clip.revision, frame?.id, readonly, text, busy]);
   useEffect(() => {
     if (readonly || busy) return;
     const token = generation.current;
@@ -196,6 +205,28 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
     } catch (error) { if (mounted.current && token === generation.current) setError((error as Error).message); }
     finally { if (mounted.current) setBusy(""); }
   }
+  async function adoptResult(result: ClipDraft) {
+    const legacy = result.delivery?.target.kind === "frame";
+    if (readonly || busy || !document || !result.delivery || (legacy && hasUnifiedChanges) || !window.confirm(legacy ? "从此旧稿助手结果建立新的统一人工草稿？旧人工稿保留只读，不保存正式动画。" : "采用此助手固定结果替换我的整份动画草稿？不会保存正式动画；仍需另点“保存动画”。")) return;
+    const token = generation.current;
+    setBusy("采用助手结果"); setError("");
+    try {
+      const context = await stabilize();
+      const targetId = legacy ? result.delivery.target.draftId : context.draftId;
+      const expectedDocumentRevision = legacy ? legacyDrafts.find(draft => draft.id === targetId)?.documentRevision : context.documentRevision;
+      const next = await api<ClipDraftDocument>(`${path}/${targetId}/adopt`, { method: "POST", body: JSON.stringify({ expectedDocumentRevision, resultDraftId: result.id, expectedResultDocumentRevision: result.delivery.documentRevision }) });
+      if (!mounted.current || token !== generation.current) return;
+      if ((!legacy && next.documentId !== document.documentId) || next.draft.id !== next.documentId || next.draft.projectId !== projectId || next.draft.clipId !== clip.id || next.draft.source !== "human" || next.draft.status !== "editing" || next.documentRevision !== result.delivery.documentRevision) throw new Error("采用响应身份/版本不一致，原草稿保留，请重新核对");
+      const edit = clipEditSchema.parse(JSON.parse(next.text));
+      const updated = editorReducer(current.current, { type: "edit", edit }); current.current = updated; setEditor(updated);
+      queue.current = new DraftQueue(next, (revision, text) => api<ClipDraftDocument>(`${path}/${next.draft.id}`, { method: "PUT", body: JSON.stringify({ expectedDocumentRevision: revision, text }) }));
+      assetVersions.current = Object.fromEntries(edit.frames.map(frame => [frame.imageId, latest.current.assets.find(asset => asset.id === frame.imageId)?.revision || "missing"]));
+      setDocument(next); setPreview(null); setPlaying(false);
+      await onSaved();
+    } catch (error) { if (mounted.current && token === generation.current) setError((error as Error).message); }
+    finally { if (mounted.current && token === generation.current) setBusy(""); }
+  }
+  const collaborationResults = clipDrafts.filter(draft => draft.clipId === clip.id && draft.delivery && (!document || draft.delivery.target.draftId === document.documentId || draft.delivery.target.kind === "frame"));
   const hasUnifiedChanges = !sameClipText(text, JSON.stringify(clipEdit(clip)));
   const deriveDisabledReason = locked ? "请先成功接手此对象，旧草稿仍可只读查看。" : busy ? "请等待当前草稿操作完成。" : hasUnifiedChanges ? "当前统一草稿有未保存修改，请先保存或明确放弃，再派生旧草稿。" : undefined;
   async function deriveLegacy(draft: FrameDraft) {
@@ -266,6 +297,20 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
       {validPreview?.warnings.map((warning,i) => <p key={i} className="interpolation-warning">第 {warning.frameNumber ?? "?"} 帧内容超出画布{warning.blocking ? "，保存受阻" : "，已允许裁切"}。</p>)}
       {error && <p role="alert" className="interpolation-warning">{error}</p>}
       {(conflict || error || document?.draft.source === "agent") && <><details><summary>保留的草稿正文（可复制）</summary><textarea aria-label="保留的草稿正文" readOnly value={text}/></details><button className="secondary" disabled={!!locked || !!busy} onClick={() => { if (window.confirm("从当前保存版本重建草稿？本机未保存内容请先复制。旧服务草稿仍保留。")) { localStorage.removeItem(storageKey); void open(true); } }}>从当前版本重新建立草稿</button></>}
+      {collaborationResults.map(result => {
+        const legacy = result.delivery!.target.kind === "frame";
+        const sourceRevision = legacy ? legacyDrafts.find(draft => draft.id === result.delivery!.target.draftId)?.documentRevision : document?.documentRevision;
+        const sourceChanged = result.delivery!.target.documentRevision !== sourceRevision;
+        return <section key={result.id} aria-label="助手待采用结果">
+        <strong>助手固定结果 · 不等于正式保存</strong><small>结果稿 {result.id} · 正文 {result.delivery!.documentRevision}</small>
+        <button className="secondary" onClick={() => onLegacyPreview(result.delivery!.snapshotId)}>播放此助手结果</button>
+        {document?.draft.adoptedResult?.draftId === result.id ? <p role="status">已采用到人工草稿；仍需明确保存动画。</p> : <>
+          <p>先接手编辑，再明确采用到来源人工稿。来源或结果改变将拒绝替换，双方正文保留。</p>
+          <button className="secondary" disabled={readonly || !!busy || sourceChanged || (legacy && hasUnifiedChanges)} onClick={() => void adoptResult(result)}>{legacy ? "从旧稿助手结果建立统一人工稿" : "采用助手结果到我的草稿"}</button>
+          {legacy && <small>保留旧v2人工稿只读；结果进入新的统一编辑会话，不覆盖当前脏稿。{hasUnifiedChanges ? "请先保存或明确放弃当前统一草稿修改。" : ""}</small>}
+          {document && sourceChanged && <p role="status">来源草稿已修改，此结果不能覆盖当前稿。</p>}
+        </>}
+      </section>; })}
       <LegacyFrameDrafts projectId={projectId} clipId={clip.id} drafts={legacyDrafts} deriveDisabledReason={deriveDisabledReason} onPreview={onLegacyPreview} onDerive={deriveLegacy}/>
       <p className="adjust-note">自动暂存不等于保存动画。拖动画布移动所选帧；左右箭头切帧，Space 播放，Ctrl+S 保存，Ctrl+Z / Ctrl+Shift+Z 撤销重做。</p>
     </div>, propertiesHost)}

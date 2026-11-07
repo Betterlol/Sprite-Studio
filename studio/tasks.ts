@@ -5,7 +5,7 @@ import { z } from "zod";
 import { atomicJson, sha256, StudioError, type ProjectStore } from "./store.ts";
 import { freezeEditingContext, assertDraftSourceCurrent } from "./workflow-context.ts";
 import { decideDelivery } from "./quality.ts";
-import { editingContextSchema, productionContractSchema, qualityScopeSchema, type ProductionTask, type EditingContext, type GenerationAttempt, type QualityCheck, type DirectionDecision } from "./workflow-model.ts";
+import { editingContextSchema, productionContractSchema, qualityScopeSchema, type ProductionTask, type EditingContext, type GenerationAttempt, type QualityCheck, type TaskReviewEvidence, type DirectionDecision } from "./workflow-model.ts";
 
 const uuid = z.string().uuid();
 const createSchema = z.object({ requestId: uuid, title: z.string().trim().min(1).max(200), description: z.string().max(10000), target: editingContextSchema.optional(), referenceIds: z.array(uuid).default([]), contract: productionContractSchema.default(() => productionContractSchema.parse({})), sessionId: uuid.optional() }).strict();
@@ -70,6 +70,31 @@ export class ProductionTasks {
     if (this.store.animation.capture(pid, snap.clip.id).id !== sid) fail("快照不再是当前动画版本");
     return snap;
   }
+  private requiredReview(pid: string, task: ProductionTask, targetSnapshotId: string, evidenceId?: string) {
+    if (!task.contract.reviewSequenceId) return;
+    const evidence = (task.reviewEvidence || []).findLast(entry => entry.intentVersion === task.intentVersion && entry.definitionId === task.contract.reviewSequenceId && entry.targetSnapshotId === targetSnapshotId && (!evidenceId || entry.id === evidenceId));
+    if (!evidence || !evidence.coverage.complete || this.store.reviewSequences.snapshotStale(pid, evidence.snapshotId) !== false) fail("必查Review缺少当前全批次证据，或定义/来源依赖已过期");
+    const decision = decideDelivery({ snapshotId: evidence!.snapshotId, checks: evidence!.checks, requiredChecks: task.contract.requiredChecks });
+    if (decision.status !== "ready") fail(`必查Review不能交付：${decision.reasons.join("；")}`);
+    return evidence;
+  }
+  /** Trusted renderer path only; never exposed as a client-supplied passed flag. */
+  recordReviewEvidence(pid: string, id: string, revision: number, evidence: TaskReviewEvidence): ProductionTask {
+    const task = this.edit(pid, id, revision);
+    this.currentSnapshot(pid, task, evidence.targetSnapshotId);
+    const sequence = this.store.reviewSequences.listSnapshots(pid, evidence.definitionId).find(sequence => sequence.id === evidence.sequenceId && sequence.snapshotId === evidence.snapshotId);
+    if (evidence.intentVersion !== task.intentVersion || evidence.definitionId !== task.contract.reviewSequenceId || !sequence || sequence.stale || JSON.stringify(evidence.dependencies) !== JSON.stringify(sequence.dependencies)) fail("Review证据与任务意图/实际依赖不一致或已过期");
+    const snapshot = this.store.animation.snapshot(pid, evidence.snapshotId);
+    const frames = evidence.coverage.reviewIds.flatMap(reviewId => {
+      const review = this.store.animation.review(pid, reviewId);
+      if (review.snapshotId !== evidence.snapshotId) fail("Review批次快照不一致");
+      this.store.animation.evidence(pid, reviewId, "contact"); this.store.animation.evidence(pid, reviewId, "onion");
+      return review.frames.map(frame => frame.frameId);
+    });
+    if (evidence.coverage.totalFrames !== snapshot.clip.frames.length || JSON.stringify(frames) !== JSON.stringify(evidence.coverage.frameIds) || new Set(frames).size !== snapshot.clip.frames.length || snapshot.clip.frames.some(frame => !frames.includes(frame.id)) || evidence.checks.some(check => check.snapshotId !== snapshot.id || check.scope.clipId !== snapshot.clip.id || check.scope.startFrameId || check.scope.endFrameId)) fail("Review全批次范围/检查证据不一致");
+    (task.reviewEvidence ??= []).push(structuredClone(evidence));
+    return this.save(task);
+  }
   directionCurrent(pid: string, task: ProductionTask) {
     const d = task.direction;
     if (!d?.accept || d.intentVersion !== task.intentVersion) return false;
@@ -89,7 +114,7 @@ export class ProductionTasks {
   }
   private view(task: ProductionTask) {
     if (["ready", "accepted"].includes(task.status)) {
-      try { this.currentSnapshot(task.projectId, task, task.readySnapshotId!); if (!this.directionCurrent(task.projectId, task)) throw new Error(); }
+      try { this.currentSnapshot(task.projectId, task, task.readySnapshotId!); this.requiredReview(task.projectId, task, task.readySnapshotId!, task.readyReviewEvidenceId); if (!this.directionCurrent(task.projectId, task)) throw new Error(); }
       catch { return { ...task, status: "blocked" as const, waitReason: "version_conflict" as const, error: "当前成果已变化，历史验收保留但结论已过期" }; }
     }
     return task;
@@ -163,7 +188,7 @@ export class ProductionTasks {
       attempt.status = "unknown"; attempt.reason = "版本屏障后生成结果未知，不能自动重发"; attempt.updatedAt = now();
     }
   }
-  action(pid: string, id: string, input: TaskAction, sourceContext?: EditingContext): ProductionTask {
+  action(pid: string, id: string, input: TaskAction, sourceContext?: EditingContext, validateOnly = false): ProductionTask {
     const spec = z.object({ expectedRevision: z.number().int().positive(), action: z.enum(["pause","resume","stop","handoff","feedback","save-location","ready","accept"]), text: z.string().trim().min(1).optional(), snapshotId: uuid.optional(), feedbackKind: z.enum(["local", "direction"]).optional() }).strict().parse(input);
     const t = this.edit(pid, id, spec.expectedRevision);
     if (t.status === "stopped") fail("任务已停止");
@@ -200,14 +225,16 @@ export class ProductionTasks {
         if (!this.directionCurrent(pid, t)) fail("方向未通过或已过期");
         const checks = t.checks.filter(c => t.checkIntentVersions?.[c.id] === t.intentVersion && c.snapshotId === spec.snapshotId && JSON.stringify(c.scope) === JSON.stringify(t.contract.scope));
         if (t.contract.requiredChecks.some(k => !checks.some(c => c.kind === k))) fail("检查范围不完整");
-        if (t.checks.filter(c => c.snapshotId === spec.snapshotId).some(c => c.status === "failed" || c.findings.some(f => f.status === "failed" && f.resolution !== "resolved"))) fail("已知检查失败不能标为可验收");
+        if (checks.some(c => c.status === "failed" || c.findings.some(f => f.status === "failed" && f.resolution !== "resolved"))) fail("已知检查失败不能标为可验收");
         const delivery = decideDelivery({ snapshotId: spec.snapshotId!, checks, requiredChecks: t.contract.requiredChecks });
         if (delivery.status !== "ready") fail(delivery.reasons.join("；"));
+        const reviewEvidence = this.requiredReview(pid, t, spec.snapshotId!);
+        t.readyReviewEvidenceId = reviewEvidence?.id;
         t.readySnapshotId = spec.snapshotId; t.phase = "delivery"; t.status = "ready"; t.waitReason = undefined; t.error = undefined; break;
       }
-      case "accept": if (t.status !== "ready" || !spec.snapshotId || spec.snapshotId !== t.readySnapshotId) fail("只能接受确切的可验收快照"); this.currentSnapshot(pid, t, spec.snapshotId!); if (!this.directionCurrent(pid, t)) fail("方向已过期"); t.acceptedSnapshotId = spec.snapshotId; t.acceptanceHistory.push({ snapshotId: spec.snapshotId!, intentVersion: t.intentVersion, createdAt: now() }); t.status = "accepted"; break;
+      case "accept": if (t.status !== "ready" || !spec.snapshotId || spec.snapshotId !== t.readySnapshotId) fail("只能接受确切的可验收快照"); this.currentSnapshot(pid, t, spec.snapshotId!); this.requiredReview(pid, t, spec.snapshotId!, t.readyReviewEvidenceId); if (!this.directionCurrent(pid, t)) fail("方向已过期"); t.acceptedSnapshotId = spec.snapshotId; t.acceptanceHistory.push({ snapshotId: spec.snapshotId!, intentVersion: t.intentVersion, reviewEvidenceId: t.readyReviewEvidenceId, createdAt: now() }); t.status = "accepted"; break;
     }
-    return this.save(t);
+    return validateOnly ? structuredClone(t) : this.save(t);
   }
   decideDirection(pid: string, id: string, input: DirectionInput, validateOnly = false): ProductionTask {
     const v = z.object({ expectedRevision: z.number().int().positive(), accept: z.boolean(), feedback: z.string().trim().min(1).optional(), generatedId: uuid.optional(), assetId: uuid.optional(), snapshotId: uuid.optional(), contentHash: z.string().optional() }).strict().parse(input);
@@ -239,12 +266,12 @@ export class ProductionTasks {
     task.status = capability ? "blocked" : "paused"; task.waitReason = capability ? "capability" : undefined; task.error = reason;
     return this.save(task);
   }
-  bindSession(pid: string, id: string, sessionId: string): ProductionTask {
+  bindSession(pid: string, id: string, sessionId: string, validateOnly = false): ProductionTask {
     const t = this.raw(pid, id);
     if (this.store.session(sessionId).projectId !== pid || (t.sessionId && t.sessionId !== sessionId)) fail("任务不属于该会话");
     if (t.sessionId === sessionId) return this.view(t);
     if (this.rawList(pid).some(other => other.id !== id && other.sessionId === sessionId && !["stopped", "accepted"].includes(other.status))) fail("会话已绑定另一制作任务");
-    t.sessionId = sessionId; return this.save(t);
+    t.sessionId = sessionId; return validateOnly ? this.view(t) : this.save(t);
   }
   /** Only a receipt produced by this task's create_clip tool can bind a new goal. */
   bindProducedClip(pid: string, id: string, input: { expectedRevision: number; sessionId: string; requestId: string; clipId: string; intentVersion: number; barrierVersion: number }): ProductionTask {
@@ -285,9 +312,9 @@ export class ProductionTasks {
     const task = this.raw(pid, id);
     if (task.sessionId !== input.sessionId || task.intentVersion !== input.intentVersion || task.barrierVersion !== input.barrierVersion || !["running", "waiting"].includes(task.status)) fail("草稿注册的任务意图已失效");
     const document = input.kind === "clip" ? this.store.clipDrafts.read(pid, input.draftId) : this.store.frameDrafts.read(pid, input.draftId);
+    if ((task.drafts || []).some(draft => draft.draftId === input.draftId && draft.intentVersion === input.intentVersion)) return this.view(task);
     if (document.draft.readOnly) fail("历史Agent草稿不能改写或重新登记，请显式派生新草稿");
     if (document.draft.source !== "agent" || document.draft.sessionId !== input.sessionId || document.draft.clipId !== task.contract.scope?.clipId) fail("草稿不属于当前任务会话或目标");
-    if ((task.drafts || []).some(draft => draft.draftId === input.draftId && draft.intentVersion === input.intentVersion)) return this.view(task);
     (task.drafts ??= []).push({ draftId: input.draftId, kind: input.kind, intentVersion: input.intentVersion });
     return this.save(task);
   }

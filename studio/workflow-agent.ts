@@ -1,6 +1,6 @@
-import { StudioError, type ProjectStore } from "./store.ts";
+import { sha256, StudioError, type ProjectStore } from "./store.ts";
 import { existsSync, readFileSync } from "node:fs";
-import { assertDraftSourceCurrent } from "./workflow-context.ts";
+import { assertDraftSourceCurrent, freezeEditingContext } from "./workflow-context.ts";
 import type { Session } from "./model.ts";
 import type { PermissionTool } from "./tool-permissions.ts";
 
@@ -25,8 +25,30 @@ export function productionWrite(name: string, input: any) {
 }
 export function precheckTaskTool(store: ProjectStore, session: Session, intent: TaskIntent | undefined, name: string, input: any) {
   assertTaskIntent(store, session, intent);
+  const pid = session.projectId;
+  const contexts = [session.editingContext, intent ? store.tasks.get(pid, intent.taskId).target : undefined];
+  const humanSources = contexts.flatMap(context => {
+    if (context?.mode !== "draft" || !context.draftId) return [];
+    const document = store.documents.read(pid, context.draftId);
+    return document.draft.source === "human" ? [{ draftId: context.draftId, documentRevision: context.documentRevision }]
+      : "deliveryTarget" in document.draft && document.draft.deliveryTarget ? [document.draft.deliveryTarget] : [];
+  });
+  if (humanSources.length) {
+    // Evidence shared from a human draft is not formal publication permission,
+    // even in an ordinary conversation or via a pre-existing legacy alias.
+    const reject = () => { throw new StudioError("人工草稿协作必须使用完整助手结果草稿并显式采用；不能通过旧帧稿或正式配置绕过采用", 409); };
+    if (["create_frame_draft", "save_frame_draft"].includes(name)) reject();
+    if (name === "save_clip_draft") {
+      const target = store.clipDrafts.read(pid, input.draftId).draft.deliveryTarget;
+      if (!target || !humanSources.every(source => source.draftId === target.draftId && source.documentRevision === target.documentRevision)) reject();
+    }
+    if (name === "write_documents") for (const document of input.documents || []) {
+      if (store.frameDrafts.has(document.documentId)) reject();
+      if (!store.clipDrafts.has(pid, document.documentId) && store.asset(pid, document.documentId).type === "clip") reject();
+    }
+  }
   if (!intent) return;
-  const task = store.tasks.get(session.projectId, intent.taskId), pid = session.projectId;
+  const task = store.tasks.get(pid, intent.taskId);
   if (["ready", "accepted"].includes(task.status) && (productionWrite(name, input) || ["save_image", "create_clip_draft", "create_frame_draft"].includes(name))) throw new StudioError("成果处于验收状态；通过任务消息/局部反馈继续制作", 409);
   if (productionWrite(name, input) && (task.phase !== "production" || task.status !== "running" || !store.tasks.directionCurrent(pid, task))) throw new StudioError("任务方向尚未通过，不能发布制作结果", 409);
   if (name === "save_image") {
@@ -96,7 +118,28 @@ export function precheckTaskTool(store: ProjectStore, session: Session, intent: 
     const currentSnapshotId = goal ? store.animation.capture(pid, goal).id : undefined;
     const hasCurrentFailure = task.checks.some(c => c.snapshotId === currentSnapshotId && c.status === "failed");
     const decision = store.quality.repair(rounds, task.contract.repairLimit, rounds.length > 0 || hasCurrentFailure);
-    if (decision.stop && decision.reason !== "nothing-actionable") throw new StudioError(`修复已停止：${decision.reason}，需要人工接手`, 409);
+    // Publishing an already checked exact body is not an additional repair.
+    // Never exempt a modified document just because the tool is called save.
+    let checkedPublication = false;
+    if (decision.stop && ["save_clip_draft", "save_frame_draft"].includes(name)) {
+      const document = store.documents.read(pid, input.draftId);
+      if (document.documentRevision === input.documentRevision) {
+        let snapshotId: string;
+        if (name === "save_frame_draft" && document.draft.status === "pending") {
+          // Pending legacy approvals are readonly but still the exact checked
+          // body. Do not relax the public context resolver to accept them.
+          const draft = store.frameDrafts.check(pid, input.draftId, input.documentRevision);
+          const base = store.animation.snapshot(pid, draft.baseSnapshotId);
+          const edits = new Map(store.frameDrafts.edits(pid, draft).map(frame => [frame.frameId, frame]));
+          snapshotId = store.animation.captureClip(pid, { ...base.clip, revision: sha256(JSON.stringify([base.id, input.documentRevision])), frames: base.clip.frames.map(frame => { const edit = edits.get(frame.id); return edit ? { ...frame, transform: edit.transform, durationUs: edit.durationUs } : frame; }) }, base.images, true).id;
+        } else snapshotId = freezeEditingContext(store, pid, { mode: "draft", draftId: input.draftId, documentRevision: input.documentRevision }).snapshotId!;
+        const check = store.tasks.checksForIntent(pid, task.id).findLast(c => c.kind === "static" && c.draftId === input.draftId && c.documentRevision === input.documentRevision && JSON.stringify(c.scope) === JSON.stringify(task.contract.scope));
+        const last = rounds.at(-1);
+        const authorizedRound = rounds.length <= task.contract.repairLimit && !store.quality.repair(rounds.slice(0, -1), task.contract.repairLimit, true).stop;
+        checkedPublication = authorizedRound && !!check && ["passed", "suspect"].includes(check.status) && !check.findings.some(f => f.status === "failed" || f.status === "unverified") && !!last?.improved && last.snapshotId === check.snapshotId && snapshotId === check.snapshotId;
+      }
+    }
+    if (decision.stop && decision.reason !== "nothing-actionable" && !checkedPublication) throw new StudioError(`修复已停止：${decision.reason}，需要人工接手`, 409);
   }
 }
 

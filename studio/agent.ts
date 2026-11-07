@@ -367,22 +367,26 @@ export class AgentHub {
     let task = boundId ? this.store.tasks.get(session.projectId, boundId) : undefined;
     if (task && session.taskId && session.taskId !== task.id && !["stopped", "accepted"].includes(this.store.tasks.get(session.projectId, session.taskId).status) && !this.store.tasks.wasAccepted(session.projectId, session.taskId)) throw new StudioError("对话已绑定另一个制作任务", 409);
     const wasAccepted = !!task && this.store.tasks.wasAccepted(session.projectId, task.id);
+    // Resolve every attachment and source before binding, advancing intent,
+    // cancelling queues, or touching session state. A rejected request has no
+    // workflow side effects and its requestId remains safe to reconcile.
+    const referenceIds = [...new Set([...assetIds, ...(frozenContext?.assetId && this.store.asset(session.projectId, frozenContext.assetId).type === "image" ? [frozenContext.assetId] : []), ...(task?.referenceIds || []), ...(task?.contract.roleReferenceIds || []), ...(task?.target?.assetId && this.store.asset(session.projectId, task.target.assetId).type === "image" ? [task.target.assetId] : [])])];
+    const references = referenceIds.map(id => { this.store.imagePath(session.projectId, id); return this.store.image(session.projectId, id); });
+    const clipReferences = clipInputs.map(input => this.store.animation.reference(session.projectId, input));
     if (task) {
       if (["paused", "stopped", "failed", "blocked"].includes(task.status) && !(task.status === "blocked" && wasAccepted)) throw new StudioError("请先在任务上显式恢复，再继续对话", 409);
+      this.store.tasks.bindSession(session.projectId, task.id, session.id, true);
+      const continuation = feedbackKind || wasAccepted || ["ready", "accepted"].includes(task.status);
+      const feedback = { action: "feedback" as const, expectedRevision: task.revision, text, feedbackKind: feedbackKind || "local" as const };
+      const source = feedbackKind && frozenContext?.clipId ? frozenContext : undefined;
+      if (continuation) this.store.tasks.action(session.projectId, task.id, feedback, source, true);
       task = this.store.tasks.bindSession(session.projectId, task.id, session.id);
-      if (feedbackKind || wasAccepted || ["ready", "accepted"].includes(task.status)) task = this.store.tasks.action(session.projectId, task.id, { action: "feedback", expectedRevision: task.revision, text, feedbackKind: feedbackKind || "local" }, feedbackKind && frozenContext?.clipId ? frozenContext : undefined);
+      if (continuation) task = this.store.tasks.action(session.projectId, task.id, { ...feedback, expectedRevision: task.revision }, source);
       session.taskId = task.id;
       session.workflowIntent = { taskId: task.id, intentVersion: task.intentVersion, barrierVersion: task.barrierVersion };
     }
     session.editingContext = frozenContext;
     this.cancelTools(session, "新回合已开始，旧排队操作未执行");
-    const referenceIds = [...new Set([...assetIds, ...(frozenContext?.assetId && this.store.asset(session.projectId, frozenContext.assetId).type === "image" ? [frozenContext.assetId] : []), ...(task?.referenceIds || []), ...(task?.contract.roleReferenceIds || []), ...(task?.target?.assetId && this.store.asset(session.projectId, task.target.assetId).type === "image" ? [task.target.assetId] : [])])];
-    const references = referenceIds.map((id) =>
-      this.store.image(session.projectId, id),
-    );
-    const clipReferences = clipInputs.map((input) =>
-      this.store.animation.reference(session.projectId, input),
-    );
     this.staleTurns ??= new Map();
     const previousTurns = this.staleTurns.get(session.id) || new Set<string>();
     if (session.turnId) previousTurns.add(session.turnId);
@@ -633,7 +637,7 @@ export class AgentHub {
       try {
         outcome = JSON.parse(returnedText);
       } catch {}
-      const rejected = outcome?.executed === false || outcome?.saved === false;
+      const rejected = outcome?.executed === false || (outcome?.saved === false && outcome?.delivered !== true);
       const detail =
         item.error?.message ||
         item.failure?.message ||
@@ -1401,6 +1405,13 @@ export class AgentHub {
   private async executeTool(sessionId: string, name: string, input: any, guard: () => void = () => {}, intent?: TaskIntent) {
     const session = this.store.session(sessionId);
     const pid = session.projectId;
+    const attach = (kind: "reviewIds" | "changeIds" | "clipDraftIds", id: string) => {
+      let msg = session.messages.filter(message => message.role === "assistant").at(-1);
+      if (!msg) { msg = this.assistant(session, `tool-result-${id}`); msg.status = "completed"; }
+      msg[kind] ??= [];
+      if (!msg[kind]!.includes(id)) msg[kind]!.push(id);
+      this.flush(session);
+    };
     if (name === "create_clip_draft") {
       const { expectedFromDocumentRevision, ...spec } = z.object({ clipId: z.string().uuid(), revision: z.string(), frameId: z.string().uuid().optional(), fromDraftId: z.string().uuid().optional(), expectedFromDocumentRevision: z.string().optional() }).strict().parse(input);
       checkFromDraftRevision(this.store, pid, spec.fromDraftId, expectedFromDocumentRevision);
@@ -1418,6 +1429,11 @@ export class AgentHub {
       if (draft.sessionId !== session.id || draft.source !== "agent") throw new StudioError("草稿不属于当前Agent会话", 409);
       if (intent) this.store.tasks.registerDraft(pid, intent.taskId, { sessionId, ...intent, draftId: spec.draftId, kind: "clip" });
       try {
+        if (draft.deliveryTarget) {
+          const delivery = await this.store.clipDrafts.deliver(pid, spec.draftId, spec.documentRevision, guard);
+          attach("clipDraftIds", spec.draftId);
+          return { content: [textContent(JSON.stringify({ saved: false, delivered: true, pendingHumanAdoption: true, delivery }))] };
+        }
         const saved = await this.store.clipDrafts.save(pid, spec.draftId, spec.documentRevision, guard);
         return { content: [textContent(JSON.stringify({ saved: true, ...saved }))] };
       } catch (error) {
@@ -1613,18 +1629,6 @@ export class AgentHub {
       };
     }
     const assetId = () => z.string().uuid().parse(input.assetId);
-    const attach = (kind: "reviewIds" | "changeIds", id: string) => {
-      let msg = session.messages
-        .filter((message) => message.role === "assistant")
-        .at(-1);
-      if (!msg) {
-        msg = this.assistant(session, `tool-result-${id}`);
-        msg.status = "completed";
-      }
-      msg[kind] ??= [];
-      if (!msg[kind]!.includes(id)) msg[kind]!.push(id);
-      this.flush(session);
-    };
     const evidence = (review: any) => [
       {
         type: "text",

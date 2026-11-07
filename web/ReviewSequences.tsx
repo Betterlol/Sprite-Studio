@@ -16,8 +16,8 @@ type Evidence = ClipReview & {
   };
 };
 
-export function ReviewSequences({ projectId, clips, definitions, onDefinition, onRefresh, onPlay }: {
-  projectId: string; clips: ClipAsset[]; definitions: ArchivableReviewDefinition[];
+export function ReviewSequences({ projectId, clips, definitions, dependencyRevision, onDefinition, onRefresh, onPlay }: {
+  projectId: string; clips: ClipAsset[]; definitions: ArchivableReviewDefinition[]; dependencyRevision?: string;
   onDefinition: (definition: ArchivableReviewDefinition) => void;
   onRefresh: () => Promise<void>; onPlay: (id: string) => void;
 }) {
@@ -25,6 +25,8 @@ export function ReviewSequences({ projectId, clips, definitions, onDefinition, o
   const [loop, setLoop] = useState(true), [segments, setSegments] = useState<ReviewSegment[]>([]);
   const [revision, setRevision] = useState(""), [dirty, setDirty] = useState(false);
   const [snapshots, setSnapshots] = useState<ReviewSequenceSnapshot[]>([]);
+  const [checkedDependencies, setCheckedDependencies] = useState("");
+  const dependencyStamp = (definitionId: string) => JSON.stringify([dependencyRevision, definitions.find(definition => definition.id === definitionId)?.revision, clips.map(clip => [clip.id, clip.revision])]);
   const [inspection, setInspection] = useState<ReviewInspection<Evidence>>({ selected: null, epoch: 0, evidence: null });
   const [busy, setBusy] = useState(""), [error, setError] = useState("");
   const mounted = useRef(true), epoch = useRef(0), request = useRef({ key: "", id: crypto.randomUUID() });
@@ -40,10 +42,10 @@ export function ReviewSequences({ projectId, clips, definitions, onDefinition, o
     finally { if (mounted.current) setBusy(""); }
   }
   async function loadSnapshots(definitionId: string) {
-    const token = ++epoch.current;
+    const token = ++epoch.current, stamp = dependencyStamp(definitionId);
     const next = await api<ReviewSequenceSnapshot[]>(`/api/projects/${projectId}/review-sequences/${definitionId}/snapshots`);
     if (!mounted.current || token !== epoch.current) return;
-    setSnapshots(next);
+    setSnapshots(next); setCheckedDependencies(stamp);
     setInspection(old => {
       if (old.selected && next.some(snapshot => sameReviewIdentity(old.selected, snapshot))) return old;
       return reviewInspectionReducer(old, { type: "select", snapshot: old.selected ? null : next[0] || null });
@@ -63,9 +65,13 @@ export function ReviewSequences({ projectId, clips, definitions, onDefinition, o
   const archived = definition?.archived === true;
   const selected = snapshots.find(snapshot => sameReviewIdentity(inspection.selected, snapshot));
   const evidence = selected && inspection.evidence && sameReviewIdentity(selected, inspection.evidence.sequence) ? inspection.evidence : null;
-  const isStale = (snapshot: ReviewSequenceSnapshot) => snapshot.stale ||
-    snapshot.definitionRevision !== definitions.find(definition => definition.id === snapshot.definitionId)?.revision ||
-    snapshot.dependencies.some(dependency => clips.find(clip => clip.id === dependency.clipId)?.revision !== dependency.revision);
+  const checkingDependencies = checkedDependencies !== dependencyStamp(id);
+  useEffect(() => {
+    if (id) void loadSnapshots(id).catch(error => { if (mounted.current) setError((error as Error).message); });
+  }, [id, dependencyStamp(id)]);
+  // Revisions also include names/archive state. Only the service compares
+  // semantic definitions and actual frozen frame/pixel/time dependencies.
+  const isStale = (snapshot: ReviewSequenceSnapshot) => snapshot.stale;
 
   function update(index: number, patch: Partial<ReviewSegment>) {
     setDirty(true); setSegments(old => old.map((segment, i) => i === index ? { ...segment, ...patch } : segment));
@@ -165,12 +171,12 @@ export function ReviewSequences({ projectId, clips, definitions, onDefinition, o
     {staleDefinition && <p className="interpolation-warning">定义版本已变化。输入保留，请复制后重新选择此定义，不能静默覆盖。</p>}
     {!!snapshots.length && <>
       <label>历史固定快照<select value={selected?.id || ""} disabled={!!busy} onChange={event => inspectState({ type: "select", snapshot: snapshots.find(snapshot => snapshot.id === event.target.value) || null })}>
-        {!selected && <option value="">请选择固定快照</option>}{snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{new Date(snapshot.createdAt).toLocaleString()} · {isStale(snapshot) ? "依赖已过期" : "依赖当前"}</option>)}
+        {!selected && <option value="">请选择固定快照</option>}{snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{new Date(snapshot.createdAt).toLocaleString()} · {checkingDependencies ? "依赖待核对" : isStale(snapshot) ? "依赖已过期" : "依赖当前"}</option>)}
       </select></label>
       <button disabled={!selected} onClick={() => selected && onPlay(selected.snapshotId)}>播放所选快照</button>
       <button disabled={!!busy || !selected} onClick={() => void inspect()}>查看此快照的检查证据</button>
       <button disabled={!!busy} onClick={() => void run("刷新依赖", () => loadSnapshots(id))}>刷新过期状态</button>
-      {selected && <p>{isStale(selected) ? "依赖或定义已改变；此历史快照仍可播放，但不能证明当前成果。" : "此快照固定已保存的依赖，不包含人工尚未保存的动画草稿。"}</p>}
+      {selected && <p>{checkingDependencies ? "正在核对服务端语义依赖；尚未确认当前状态。" : isStale(selected) ? "依赖或定义已改变；此历史快照仍可播放，但不能证明当前成果。" : "此快照固定已保存的依赖，不包含人工尚未保存的动画草稿。"}</p>}
       <details><summary>依赖版本与区间映射</summary><pre>{JSON.stringify(selected, null, 2)}</pre></details>
     </>}
     {evidence && <div>

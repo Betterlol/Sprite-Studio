@@ -7,7 +7,7 @@ import { bytes, clipBody } from "./documents.ts";
 import { publishFiles } from "./file-operations.ts";
 import { type ClipAsset, type ClipSnapshot, type RenderWarning } from "./model.ts";
 import { assetRevision, atomicJson, sha256, StudioError, type ProjectStore } from "./store.ts";
-import { clipEditSchema, type ClipDraft, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type ClipEdit } from "./workflow-model.ts";
+import { clipEditSchema, type ClipDraft, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type ClipDraftDelivery, type DraftDeliveryTarget, type ClipEdit } from "./workflow-model.ts";
 
 type RecordData = { draft: ClipDraft; text: string; documentRevision: string; images: ClipSnapshot["images"]; files: Record<string, string | null>; ownedFrameIds?: string[]; receipt?: ClipDraftSave };
 type CreateInput = { clipId: string; revision: string; frameId?: string; fromDraftId?: string };
@@ -20,7 +20,7 @@ type FolderIndex = { stamp: number; entries: Ownership[] };
 const ownershipIndexes = new WeakMap<ProjectStore, Map<string, { drafts?: FolderIndex }>>();
 
 export class ClipDrafts {
-  private saving = new Map<string, Promise<ClipDraftSave>>();
+  private saving = new Map<string, Promise<unknown>>();
   private store: ProjectStore;
   constructor(store: ProjectStore) { this.store = store; }
   private path(id: string) { return `.studio/clip-drafts/${id}.json`; }
@@ -48,10 +48,11 @@ export class ClipDrafts {
     return record.draft.source === "agent" && this.store.tasks && !this.store.tasks.draftHoldsLease(record.draft.projectId, record.draft);
   }
   private assertEditable(record: RecordData) {
+    if (record.draft.delivery) throw new StudioError("已交付的助手结果为固定只读稿；请显式派生新稿", 409);
     if (this.historical(record)) throw new StudioError("所属任务/意图已结束，该Agent草稿为只读历史；请显式派生新草稿", 409);
   }
   private document(record: RecordData): ClipDraftDocument {
-    return { documentId: record.draft.id, documentRevision: record.documentRevision, text: record.text, draft: { ...structuredClone(record.draft), ...(this.historical(record) ? { readOnly: true } : {}) } };
+    return { documentId: record.draft.id, documentRevision: record.documentRevision, text: record.text, draft: { ...structuredClone(record.draft), ...(this.historical(record) || record.draft.delivery ? { readOnly: true } : {}) } };
   }
   private parse(text: string): ClipEdit {
     if (Buffer.byteLength(text) > 256 * 1024) throw new StudioError("草稿配置超过256KB");
@@ -144,6 +145,7 @@ export class ClipDrafts {
       if (existing) return this.read(pid, existing.id);
     }
     let value = body(base.clip), images = structuredClone(base.images);
+    let deliveryTarget: DraftDeliveryTarget | undefined;
     if (spec.fromDraftId) {
       const path = this.store.safePath(pid, this.path(spec.fromDraftId));
       if (existsSync(path)) {
@@ -152,9 +154,13 @@ export class ClipDrafts {
         this.check(pid, parent, parent.documentRevision);
         value = this.parse(parent.text);
         images = structuredClone(parent.images);
+        if (source === "agent") deliveryTarget = parent.draft.source === "human"
+          ? { draftId: parent.draft.id, documentRevision: parent.documentRevision }
+          : parent.draft.deliveryTarget;
       } else {
         const old = this.store.frameDrafts.get(pid, spec.fromDraftId);
         if (old.clipId !== spec.clipId || old.baseSnapshotId !== base.id || old.status !== "editing") throw new StudioError("派生草稿与当前动画基线不匹配", 409);
+        if (source === "agent" && old.source === "human") deliveryTarget = { draftId: old.id, documentRevision: old.documentRevision, kind: "frame" };
         const legacy = this.store.frameDrafts.configuration(pid, old);
         const edits = new Map(legacy.frames.map(f => [f.frameId, f]));
         if (edits.size !== legacy.frames.length || legacy.frames.some(f => !base.clip.frames.some(b => b.id === f.frameId))) throw new StudioError("旧草稿包含无效帧实例");
@@ -163,7 +169,7 @@ export class ClipDrafts {
     }
     this.validate(pid, spec.clipId, value);
     const text = bytes(value).toString();
-    const draft: ClipDraft = { id: randomUUID(), projectId: pid, clipId: spec.clipId, baseSnapshotId: base.id, source, sessionId, ...(source === "agent" ? owner : {}), status: "editing", createdAt: new Date().toISOString() };
+    const draft: ClipDraft = { id: randomUUID(), projectId: pid, clipId: spec.clipId, baseSnapshotId: base.id, source, sessionId, ...(deliveryTarget ? { deliveryTarget } : {}), ...(source === "agent" ? owner : {}), status: "editing", createdAt: new Date().toISOString() };
     const files = Object.fromEntries([base.clip.file!, base.clip.file! + ".config.json", this.store.metaPath(pid, base.clip.id)].map(path => {
       const file = this.store.safePath(pid, path);
       return [path, existsSync(file) ? sha256(readFileSync(file)) : null];
@@ -244,6 +250,7 @@ export class ClipDrafts {
   async save(pid: string, id: string, revision: string, beforeCommit?: () => void): Promise<ClipDraftSave> {
     const old = this.get(pid, id);
     if (old.documentRevision !== revision) throw new StudioError("VERSION_CONFLICT：草稿已改变", 409);
+    if (old.draft.deliveryTarget) throw new StudioError("人工草稿协作结果只能交付待采用，不能直接保存正式动画", 409);
     if (old.draft.status === "saved" && old.receipt) return structuredClone(old.receipt);
     this.assertEditable(old);
     this.store.assertClipMutation(pid, old.draft.clipId);
@@ -279,6 +286,70 @@ export class ClipDrafts {
     }).finally(() => this.saving.delete(key));
     this.saving.set(key, promise);
     return promise;
+  }
+  /** Human-input collaboration freezes a result; it never publishes the clip. */
+  async deliver(pid: string, id: string, revision: string, beforeCommit: () => void): Promise<ClipDraftDelivery> {
+    const record = this.get(pid, id), target = record.draft.deliveryTarget;
+    if (!target || record.draft.source !== "agent") throw new StudioError("此草稿不是人工草稿协作结果", 409);
+    if (record.documentRevision !== revision) throw new StudioError("VERSION_CONFLICT：结果草稿已改变", 409);
+    if (record.draft.delivery) { beforeCommit(); return structuredClone(record.draft.delivery); }
+    this.assertEditable(record);
+    const key = `${pid}/${id}`;
+    if (this.saving.has(key)) throw new StudioError("草稿正在交付", 409);
+    const promise = this.store.reading(pid, async () => {
+      const preview = await this.preview(pid, id, revision);
+      if (preview.warnings.some(w => w.blocking)) throw new StudioError("可见内容超出画布，请调整或允许裁切");
+      beforeCommit();
+      const current = this.get(pid, id);
+      this.assertEditable(current); this.check(pid, current, revision);
+      const human = target.kind === "frame" ? this.store.frameDrafts.read(pid, target.draftId) : this.read(pid, target.draftId);
+      if (human.draft.source !== "human" || human.draft.status !== "editing" || human.draft.clipId !== current.draft.clipId || human.documentRevision !== target.documentRevision) throw new StudioError("VERSION_CONFLICT：人工来源草稿已改变，双方正文保留", 409);
+      if (target.kind === "frame") this.store.frameDrafts.check(pid, target.draftId, target.documentRevision);
+      else this.check(pid, this.get(pid, target.draftId), target.documentRevision);
+      const delivery: ClipDraftDelivery = { draftId: id, documentRevision: revision, snapshotId: preview.preview.id, target: structuredClone(target) };
+      this.persist({ ...current, draft: { ...current.draft, delivery } });
+      return delivery;
+    }).finally(() => this.saving.delete(key));
+    this.saving.set(key, promise);
+    return promise;
+  }
+  adopt(pid: string, humanId: string, input: { expectedDocumentRevision: string; resultDraftId: string; expectedResultDocumentRevision: string }): ClipDraftDocument {
+    if (!this.has(pid, humanId)) return this.adoptLegacy(pid, humanId, input);
+    const human = this.get(pid, humanId), result = this.get(pid, input.resultDraftId), delivery = result.draft.delivery;
+    this.store.assertClipMutation(pid, human.draft.clipId);
+    if (human.draft.source !== "human" || result.draft.source !== "agent" || human.draft.clipId !== result.draft.clipId || !delivery || delivery.target.draftId !== humanId) throw new StudioError("采用结果与人工草稿来源/工程/动画不一致", 409);
+    if (this.saving.has(`${pid}/${humanId}`) || this.saving.has(`${pid}/${input.resultDraftId}`)) throw new StudioError("草稿正在保存或交付", 409);
+    if (input.expectedDocumentRevision !== delivery.target.documentRevision || human.documentRevision !== input.expectedDocumentRevision || result.documentRevision !== input.expectedResultDocumentRevision || delivery.documentRevision !== input.expectedResultDocumentRevision) throw new StudioError("VERSION_CONFLICT：来源或结果正文已变化，双方草稿保留", 409);
+    this.check(pid, human, input.expectedDocumentRevision);
+    this.check(pid, result, input.expectedResultDocumentRevision);
+    if (this.freeze(pid, result.draft.id, result.documentRevision).id !== delivery.snapshotId) throw new StudioError("结果快照与确切正文不一致", 409);
+    const value = this.parse(result.text); this.validate(pid, human.draft.clipId, value);
+    const next: RecordData = { ...human, text: result.text, documentRevision: result.documentRevision, images: { ...human.images, ...result.images }, ownedFrameIds: [...new Set([...(human.ownedFrameIds || []), ...(result.ownedFrameIds || [])])], draft: { ...human.draft, adoptedResult: { draftId: result.draft.id, documentRevision: result.documentRevision } } };
+    // Keep the previous human body and the immutable Agent result. This explicit
+    // CAS replaces only the human document; formal save remains a separate act.
+    publishFiles(this.store, pid, [
+      { path: `.studio/clip-draft-history/${humanId}-${human.documentRevision}.json`, bytes: bytes(human) },
+      { path: this.path(humanId), bytes: bytes(next) },
+    ], { kind: "adopt-clip-draft", draftId: humanId, resultDraftId: result.draft.id });
+    this.invalidateIndex(pid);
+    return this.document(next);
+  }
+  private adoptLegacy(pid: string, humanId: string, input: { expectedDocumentRevision: string; resultDraftId: string; expectedResultDocumentRevision: string }): ClipDraftDocument {
+    const human = this.store.frameDrafts.read(pid, humanId), result = this.get(pid, input.resultDraftId), delivery = result.draft.delivery;
+    this.store.assertClipMutation(pid, human.draft.clipId);
+    if (human.draft.source !== "human" || human.draft.status !== "editing" || result.draft.source !== "agent" || human.draft.clipId !== result.draft.clipId || human.draft.baseSnapshotId !== result.draft.baseSnapshotId || !delivery || delivery.target.kind !== "frame" || delivery.target.draftId !== humanId) throw new StudioError("旧人工来源与助手结果不一致", 409);
+    if (this.saving.has(`${pid}/${input.resultDraftId}`)) throw new StudioError("结果草稿正在交付", 409);
+    if (human.documentRevision !== input.expectedDocumentRevision || input.expectedDocumentRevision !== delivery.target.documentRevision || result.documentRevision !== input.expectedResultDocumentRevision || delivery.documentRevision !== input.expectedResultDocumentRevision) throw new StudioError("VERSION_CONFLICT：来源或结果正文已变化，双方草稿保留", 409);
+    this.store.frameDrafts.check(pid, humanId, input.expectedDocumentRevision);
+    if (this.freeze(pid, result.draft.id, result.documentRevision).id !== delivery.snapshotId) throw new StudioError("结果快照与确切正文不一致", 409);
+    this.validate(pid, human.draft.clipId, this.parse(result.text));
+    // v2 sources stay readonly. The explicit adoption starts a unified human
+    // editing session instead of truncating the full result into a frame-edit.
+    const id = randomUUID();
+    const next: RecordData = { ...result, receipt: undefined, draft: { id, projectId: pid, clipId: result.draft.clipId, baseSnapshotId: result.draft.baseSnapshotId, source: "human", status: "editing", createdAt: new Date().toISOString(), adoptedResult: { draftId: result.draft.id, documentRevision: result.documentRevision } } };
+    publishFiles(this.store, pid, [{ path: this.path(id), bytes: bytes(next) }], { kind: "adopt-legacy-clip-draft", sourceDraftId: humanId, draftId: id, resultDraftId: result.draft.id });
+    this.invalidateIndex(pid);
+    return this.document(next);
   }
   discard(pid: string, id: string, revision: string): ClipDraftDocument {
     const record = this.get(pid, id);

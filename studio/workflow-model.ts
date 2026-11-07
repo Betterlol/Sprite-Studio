@@ -49,6 +49,12 @@ export const qualityCapabilities: QualityCapabilities = {
   static: { verified: false, categories: [] }, temporal: { verified: false, categories: [] },
   unattendedGeneration: false, reason: "内置生成调用前预算拦截未验证，禁止无人值守重生成。",
 };
+export type TaskReviewEvidence = {
+  id: string; intentVersion: number; targetSnapshotId: string; definitionId: string;
+  sequenceId: string; snapshotId: string; definitionRevision: string;
+  dependencies: ReviewSequenceSnapshot["dependencies"]; coverage: { totalFrames: number; frameIds: string[]; complete: boolean; reviewIds: string[] };
+  checks: QualityCheck[]; createdAt: string;
+};
 export type ProductionTask = {
   id: string; projectId: string; requestId: string; requestHash: string; revision: number; intentVersion: number; barrierVersion: number;
   title: string; description: string; phase: "direction" | "production" | "delivery";
@@ -56,13 +62,15 @@ export type ProductionTask = {
   waitReason?: "direction" | "tool_approval" | "scope" | "version_conflict" | "budget" | "capability";
   target?: EditingContext; referenceIds: string[]; contract: ProductionContract; attempts: GenerationAttempt[];
   direction?: DirectionDecision; directionHistory: DirectionDecision[]; findings: QualityFinding[]; checks: QualityCheck[];
-  sessionId?: string; readySnapshotId?: string; acceptedSnapshotId?: string;
+  sessionId?: string; readySnapshotId?: string; acceptedSnapshotId?: string; reviewEvidence?: TaskReviewEvidence[]; readyReviewEvidenceId?: string;
   repairRounds?: { issueId: string; snapshotId: string; intentVersion: number; improved: boolean }[];
   drafts?: { draftId: string; kind: "clip" | "frame"; intentVersion: number }[];
-  acceptanceHistory: { snapshotId: string; intentVersion: number; createdAt: string }[];
+  acceptanceHistory: { snapshotId: string; intentVersion: number; reviewEvidenceId?: string; createdAt: string }[];
   createdAt: string; updatedAt: string; error?: string;
 };
-export type ClipDraft = { id: string; projectId: string; clipId: string; baseSnapshotId: string; source: "human" | "agent"; sessionId?: string; taskId?: string; intentVersion?: number; readOnly?: boolean; status: "editing" | "saved" | "discarded"; createdAt: string };
+export type DraftDeliveryTarget = { draftId: string; documentRevision: string; kind?: "frame" };
+export type ClipDraftDelivery = { draftId: string; documentRevision: string; snapshotId: string; target: DraftDeliveryTarget };
+export type ClipDraft = { id: string; projectId: string; clipId: string; baseSnapshotId: string; source: "human" | "agent"; sessionId?: string; taskId?: string; intentVersion?: number; readOnly?: boolean; deliveryTarget?: DraftDeliveryTarget; delivery?: ClipDraftDelivery; adoptedResult?: { draftId: string; documentRevision: string }; status: "editing" | "saved" | "discarded"; createdAt: string };
 export const clipEditSchema = z.object({
   schemaVersion: z.literal(1), type: z.literal("clip-edit"),
   frames: z.array(z.object({ id, imageId: id, durationUs: z.number().int().min(1000).max(60_000_000), transform: frameTransformSchema.optional() }).strict()).max(128),

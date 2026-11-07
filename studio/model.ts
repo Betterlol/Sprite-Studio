@@ -200,6 +200,7 @@ export type ChatMessage = {
   assetIds: string[];
   clipReferences?: ClipAttachment[];
   reviewIds?: string[];
+  clipDraftIds?: string[];
   changeIds?: string[];
   createdAt: string;
   status?: "streaming" | "completed" | "interrupted" | "failed";

@@ -17,11 +17,9 @@ import { fileURLToPath } from "node:url";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { ProjectStore, StudioError } from "./store.ts";
 import { AgentHub } from "./agent.ts";
-import {
-  imageKindSchema,
-  clipReferenceSchema,
-  agentModelSchema,
-} from "./model.ts";
+import { registerWorkflowRoutes } from "./workflow-routes.ts";
+import { freezeEditingContext } from "./workflow-context.ts";
+import { imageKindSchema } from "./model.ts";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const dataRoot = resolve(
@@ -70,6 +68,7 @@ app.setErrorHandler((error: any, request, reply) => {
   reply.code(error.statusCode || 400).send({ error: message || "操作失败" });
 });
 
+registerWorkflowRoutes(app, store, agent);
 const librarySelection = z.object({
   assetIds: z.array(z.string().uuid()).max(500).default([]),
   folders: z.array(z.string()).max(100).default([]),
@@ -288,9 +287,10 @@ app.post("/api/projects/:projectId/reviews", async (request) => {
       startFrameId: z.string().uuid().optional(),
       endFrameId: z.string().uuid().optional(),
     })
-    .refine((input) => !!input.snapshotId || !!input.clipId)
+    .refine((input) => !!input.draftId || !!input.snapshotId || !!input.clipId)
     .parse(request.body);
-  return store.animation.inspect(pid(request), spec);
+  const context = freezeEditingContext(store, pid(request), { ...spec, mode: spec.draftId ? "draft" : "saved" });
+  return store.animation.inspect(pid(request), { ...spec, snapshotId: context.snapshotId });
 });
 app.get(
   "/api/projects/:projectId/reviews/:reviewId/:kind",
@@ -518,29 +518,6 @@ app.delete("/api/sessions/:sessionId", async (request: any) => {
 app.get("/api/sessions/:sessionId", async (request: any) =>
   store.session(request.params.sessionId),
 );
-app.post("/api/sessions/:sessionId/messages", async (request: any, reply) => {
-  const input = z
-    .object({
-      text: z.string().trim().min(1).max(12000),
-      assetIds: z.array(z.string().uuid()).max(5).default([]),
-      requestId: z.string().uuid(),
-      clipReferences: z.array(clipReferenceSchema).max(3).default([]),
-      outputFolder: z.string().optional(),
-      model: agentModelSchema.optional(),
-    })
-    .parse(request.body);
-  const session = agent.send(
-    request.params.sessionId,
-    input.text,
-    input.assetIds,
-    input.requestId,
-    undefined,
-    input.clipReferences,
-    input.outputFolder,
-    input.model,
-  );
-  return reply.code(202).send(session);
-});
 app.post("/api/sessions/:sessionId/stop", async (request: any) => {
   await agent.stop(request.params.sessionId);
   return store.session(request.params.sessionId);

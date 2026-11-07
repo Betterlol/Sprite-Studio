@@ -259,6 +259,14 @@ export class AnimationStore {
     return { ...ref, snapshotId: snapshot.id, name: snapshot.clip.name };
   }
   stale(review: ClipReview) {
+    const sequenceStale = this.store.reviewSequences?.snapshotStale(review.projectId, review.snapshotId);
+    if (sequenceStale !== undefined) return sequenceStale;
+    if (review.draftId && this.store.clipDrafts?.has(review.projectId, review.draftId)) {
+      try {
+        const document = this.store.clipDrafts.read(review.projectId, review.draftId);
+        return document.documentRevision !== review.documentRevision || document.draft.status !== "editing" || this.store.clipDrafts.freeze(review.projectId, review.draftId, document.documentRevision).id !== review.snapshotId;
+      } catch { return true; }
+    }
     try {
       const snapshot = this.snapshot(review.projectId, review.snapshotId);
       const draft = review.draftId
@@ -458,6 +466,7 @@ export class AnimationStore {
     pid: string,
     input: unknown,
     source: "agent" | "human" = "human",
+    beforeCommit?: () => void,
   ): Promise<FrameChange> {
     const spec = frameBatchSchema.parse(input),
       running = this.adjusting.get(spec.requestId);
@@ -472,7 +481,7 @@ export class AnimationStore {
     )
       return Promise.resolve(this.change(pid, spec.requestId));
     const promise = this.store
-      .reading(pid, () => this.applyAdjustment(pid, spec, source))
+      .reading(pid, () => this.applyAdjustment(pid, spec, source, beforeCommit))
       .finally(() => this.adjusting.delete(spec.requestId));
     this.adjusting.set(spec.requestId, promise);
     return promise;
@@ -481,6 +490,7 @@ export class AnimationStore {
     pid: string,
     spec: z.infer<typeof frameBatchSchema>,
     source: "agent" | "human",
+    beforeCommit?: () => void,
   ) {
     const before = this.capture(pid, spec.clipId, spec.revision),
       byId = new Map(spec.frames.map((f) => [f.frameId, f]));
@@ -520,6 +530,7 @@ export class AnimationStore {
       JSON.stringify(before.images)
     )
       throw new StudioError("底图在预览期间发生变化，请重新检查", 409);
+    beforeCommit?.();
     const change: FrameChange = {
       id: spec.requestId,
       projectId: pid,

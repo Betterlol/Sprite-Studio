@@ -75,7 +75,7 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
-        type: { type: "string", enum: ["sheet-recipe", "clip", "frame-edit"] },
+        type: { type: "string", enum: ["sheet-recipe", "clip", "frame-edit", "clip-edit"] },
       },
       additionalProperties: false,
     },
@@ -258,6 +258,30 @@ const tools = [
       destructiveHint: false,
       openWorldHint: false,
     },
+  },
+  {
+    name: "create_clip_draft",
+    description: "Create a full clip-edit document owned by this session. Preserves complete arrangement, transforms, durations, loop and FPS. For human draft context explicitly pass fromDraftId and expectedFromDocumentRevision; never edit the human original. Inherits create_frame_draft permissions. Use write_documents, inspect_clip, then save_clip_draft.",
+    inputSchema: { type: "object", properties: { clipId: idProperty, revision: { type: "string" }, frameId: idProperty, fromDraftId: idProperty, expectedFromDocumentRevision: { type: "string" } }, required: ["clipId", "revision"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  {
+    name: "save_clip_draft",
+    description: "Commit the exact full object draft once. Requires approved task direction AND tool permission; inherits save_frame_draft policies. Uses a publish-time intent/session/barrier guard, preserves original pixels and history. Human-draft derivatives return {saved:false,delivered:true,pendingHumanAdoption:true,delivery:{draftId,documentRevision,snapshotId,target}}; they freeze a read-only proposal and NEVER publish the clip. The user explicitly adopts it into the source human draft with CAS, then separately saves the animation (legacy frame-edit sources explicitly start a new unified human session and remain untouched). Normal Agent production still saves autonomously. No model may report success before receipt. Rendering/checking is not dynamic playback acceptance.",
+    inputSchema: { type: "object", properties: { draftId: idProperty, documentRevision: { type: "string" } }, required: ["draftId", "documentRevision"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  {
+    name: "review_sequence",
+    description: "List/create/update/capture/inspect/archive a multi-action Review. archive requires sequenceId, expectedRevision and archived boolean; false restores the definition, while captured snapshots/history remain. create definition={requestId,name,loop,segments:[{id,clipId,startFrameId?,endFrameId?,repeat?,speed?}]}; update adds expectedRevision instead of requestId. inspect returns actual images for ALL batches, full coverage, source mappings and dependency stale; these are static evidence, not temporal passed. capture/inspect require sequenceId, optional inspect snapshotId is a sequence snapshot ID. Inherits existing configuration or inspection permissions.",
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "create", "update", "capture", "inspect", "archive"] }, sequenceId: idProperty, snapshotId: idProperty, definition: { type: "object" }, expectedRevision: { type: "string" }, archived: { type: "boolean" } }, required: ["action"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  {
+    name: "workflow_task",
+    description: "Use the task bound to this session: status, check (real renderer over exact contract scope, static and unverified temporal), ready (reruns trusted checks and requests human playback/acceptance). No passed/findings input is accepted. Task readiness is not human acceptance or conversation completion. New native generation is disabled in production; never regenerate automatically. Inherits list_assets/inspect_clip policies.",
+    inputSchema: { type: "object", properties: { action: { type: "string", enum: ["status", "check", "ready"] } }, required: ["action"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false },
   },
 ];
 const send = (value: unknown) =>

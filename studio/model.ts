@@ -89,6 +89,9 @@ export type FrameDraft = {
   baseSnapshotId: string;
   source: "agent" | "human";
   sessionId?: string;
+  taskId?: string;
+  intentVersion?: number;
+  readOnly?: boolean;
   status: "editing" | "pending" | "saved" | "discarded";
   createdAt: string;
   documentRevision: string;
@@ -187,6 +190,8 @@ export type DeletePlan = {
   blockers: { name: string; reason: string }[];
 };
 export type ChatMessage = {
+  context?: import("./workflow-model.ts").EditingContext;
+  taskId?: string;
   generatedIds?: string[];
   id: string;
   role: "user" | "assistant";
@@ -195,6 +200,7 @@ export type ChatMessage = {
   assetIds: string[];
   clipReferences?: ClipAttachment[];
   reviewIds?: string[];
+  clipDraftIds?: string[];
   changeIds?: string[];
   createdAt: string;
   status?: "streaming" | "completed" | "interrupted" | "failed";
@@ -231,8 +237,18 @@ export type ToolApproval = {
   label: string;
   arguments: Record<string, unknown>;
   createdAt: string;
+  taskId?: string;
+  taskRevision?: number;
+  intentVersion?: number;
+  barrierVersion?: number;
+  directionRequired?: boolean;
 };
 export type Session = {
+  taskId?: string;
+  workflowIntent?: { taskId: string; intentVersion: number; barrierVersion: number };
+  editingContext?: import("./workflow-model.ts").EditingContext;
+  agentDraftId?: string;
+  workflowReferenceHashes?: string[];
   diagnostics?: SessionDiagnostic[];
   outputFolder?: string;
   id: string;
@@ -291,6 +307,8 @@ export const interpolationSchema = z.object({
   startFrameId: z.string().uuid(),
   endFrameId: z.string().uuid(),
   count: z.number().int().min(1).max(8),
+  timingPolicy: z.enum(["preserve-duration", "fps"]).default("preserve-duration"),
+  interiorPolicy: z.enum(["preserve", "replace"]).default("preserve"),
   fps: z.number().min(1).max(60).default(12),
   description: z.string().trim().min(1).max(2000),
 });
@@ -298,7 +316,9 @@ export const interpolationLayoutSchema = z.object({
   columns: z.number().int().min(1).max(10),
   rows: z.number().int().min(1).max(10),
   includesEndpoints: z.boolean().default(true),
-  fps: z.number().min(1).max(60),
+  timingPolicy: z.enum(["preserve-duration", "fps"]).optional(),
+  interiorPolicy: z.enum(["preserve", "replace"]).optional(),
+  fps: z.number().min(1).max(60).optional(),
 });
 export type InterpolationLayout = z.infer<typeof interpolationLayoutSchema>;
 export function interpolationGrid(count: number) {

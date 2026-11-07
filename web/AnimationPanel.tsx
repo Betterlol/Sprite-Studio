@@ -19,6 +19,7 @@ import {
 } from "../studio/model.ts";
 import { api } from "./api.ts";
 type Props = {
+  disabled?: boolean;
   draftPreview?: FramePreview;
   focusReviewId?: string;
   focusChangeId?: string;
@@ -295,7 +296,7 @@ export function AnimationPanel(props: Props) {
             {change.status === "applied" && (
               <button
                 className="secondary"
-                disabled={!!operation}
+                disabled={!!operation || props.disabled}
                 onClick={() =>
                   void run("撤回修改", async () => {
                     const result = await api<ClipAsset>(

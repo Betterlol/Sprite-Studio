@@ -51,7 +51,7 @@ test("one insertion directly updates the original animation, preserves endpoints
   const { root, store, pid, sheet, clip, spec } = await fixture();
   let restored: ProjectStore | undefined;
   try {
-    const job = store.interpolations.create(pid, spec);
+    const job = store.interpolations.create(pid, { ...spec, timingPolicy: "fps", interiorPolicy: "replace" });
     store.interpolations.receive(pid, job.id, sheet.id, {
       id: "fixture",
       inputImages: [
@@ -110,7 +110,7 @@ test("one insertion directly updates the original animation, preserves endpoints
 test("layout, live image and animation version checks protect direct insertion", async () => {
   const { store, pid, sheet, clip, spec } = await fixture();
   try {
-    const job = store.interpolations.create(pid, spec);
+    const job = store.interpolations.create(pid, { ...spec, timingPolicy: "fps", interiorPolicy: "replace" });
     store.interpolations.receive(pid, job.id, sheet.id, {
       id: "fixture",
       inputImages: [],
@@ -148,7 +148,7 @@ test("layout, live image and animation version checks protect direct insertion",
 test("a concurrent edit during image processing is retained and insertion refuses to overwrite it", async () => {
   const { store, pid, sheet, clip, spec } = await fixture();
   try {
-    const job = store.interpolations.create(pid, spec);
+    const job = store.interpolations.create(pid, { ...spec, timingPolicy: "fps", interiorPolicy: "replace" });
     store.interpolations.receive(pid, job.id, sheet.id, { id: "fixture" });
     const count = store.assets(pid).length,
       pending = store.interpolations.insert(pid, job.id, layout);
@@ -172,4 +172,72 @@ test("a concurrent edit during image processing is retained and insertion refuse
   } finally {
     store.worker.close();
   }
+});
+
+test("default insertion conserves interval duration and keeps interior instances despite a different layout fps", async () => {
+  const { root, store, pid, sheet, clip, spec } = await fixture();
+  let restored: ProjectStore | undefined;
+  try {
+    const job = store.interpolations.create(pid, spec);
+    assert.equal(job.timingPolicy, "preserve-duration");
+    assert.equal(job.interiorPolicy, "preserve");
+    assert.equal(store.interpolations.create(pid, spec).id, job.id);
+    assert.throws(() => store.interpolations.create(pid, { ...spec, timingPolicy: "fps" }), /requestId/);
+    store.interpolations.receive(pid, job.id, sheet.id, { id: "fixture" });
+    // The policies and original image dependency snapshot survive a service restart.
+    store.worker.close();
+    restored = new ProjectStore(join(root, "projects"));
+    const updated = await restored.interpolations.insert(pid, job.id, { ...layout, fps: 60 });
+    assert.equal(updated.frames.length, clip.frames.length + spec.count);
+    assert.deepEqual(updated.frames.filter(f => clip.frames.some(old => old.id === f.id)).map(f => [f.id, f.imageId, f.transform]), clip.frames.map(f => [f.id, f.imageId, f.transform]));
+    assert.deepEqual(updated.frames.at(-1), clip.frames.at(-1));
+    assert.equal(updated.frames.reduce((n, f) => n + f.durationUs, 0), clip.frames.reduce((n, f) => n + f.durationUs, 0));
+    assert.deepEqual(updated.frames.slice(0, -1).map(f => f.durationUs), [60000, 60000, 60000, 60000, 60000]);
+    assert.deepEqual((await restored.interpolations.insert(pid, job.id, layout)).frames, updated.frames);
+  } finally { store.worker.close(); restored?.worker.close(); }
+});
+
+test("explicit replacement can preserve total duration without changing endpoints or outside frames", async () => {
+  const { store, pid, sheet, clip, spec } = await fixture();
+  try {
+    const job = store.interpolations.create(pid, { ...spec, interiorPolicy: "replace", endFrameId: clip.frames[2]!.id });
+    store.interpolations.receive(pid, job.id, sheet.id, { id: "fixture" });
+    const updated = await store.interpolations.insert(pid, job.id, layout);
+    assert.equal(updated.frames.length, 5);
+    assert.ok(!updated.frames.some(f => f.id === clip.frames[1]!.id));
+    assert.deepEqual(updated.frames.slice(-2), clip.frames.slice(-2));
+    assert.equal(updated.frames[0]!.id, clip.frames[0]!.id);
+    assert.equal(updated.frames[0]!.imageId, clip.frames[0]!.imageId);
+    assert.deepEqual(updated.frames.slice(0, 3).map(f => f.durationUs), [66667, 66666, 66667]);
+    assert.equal(updated.frames.reduce((n, f) => n + f.durationUs, 0), 400000);
+  } finally { store.worker.close(); }
+});
+
+test("default count limits and minimum duration fail before starting a session; explicit replace uses actual result count", async () => {
+  const { store, pid, clip, spec } = await fixture();
+  try {
+    const full = store.createClip(pid, "full", Array.from({ length: 128 }, () => ({ id: randomUUID(), imageId: clip.frames[0]!.imageId, durationUs: 100000 })));
+    const fullSpec = { ...spec, clipId: full.id, revision: full.revision, startFrameId: full.frames[0]!.id, endFrameId: full.frames[127]!.id };
+    assert.throws(() => store.interpolations.create(pid, fullSpec), /128/);
+    assert.equal(store.interpolations.list(pid).length, 0);
+    const replaced = store.interpolations.create(pid, { ...fullSpec, interiorPolicy: "replace" });
+    assert.equal(replaced.interiorPolicy, "replace");
+    const tiny = store.createClip(pid, "tiny", clip.frames.slice(0, 2).map(f => ({ ...f, id: randomUUID(), durationUs: 1000 })));
+    assert.throws(() => store.interpolations.create(pid, { ...spec, requestId: randomUUID(), clipId: tiny.id, revision: tiny.revision, startFrameId: tiny.frames[0]!.id, endFrameId: tiny.frames[1]!.id }), /1000us/);
+  } finally { store.worker.close(); }
+});
+
+test("a changed interior original-image digest blocks insertion even when clip revision is unchanged", async () => {
+  const { store, pid, sheet, clip, spec } = await fixture();
+  try {
+    const job = store.interpolations.create(pid, spec);
+    store.interpolations.receive(pid, job.id, sheet.id, { id: "fixture" });
+    const original = store.image(pid, clip.frames[1]!.imageId);
+    const replacement = store.image(pid, clip.frames[2]!.imageId);
+    // Simulate reloaded image metadata after a legitimate pixel replacement.
+    store.indexes.get(pid)!.set(original.id, { ...original, file: replacement.file, contentHash: replacement.contentHash });
+    assert.equal(store.asset(pid, clip.id).revision, clip.revision);
+    assert.throws(() => store.interpolations.insert(pid, job.id, layout), /原动画图片已改变/);
+    assert.deepEqual((store.asset(pid, clip.id) as ClipAsset).frames, clip.frames);
+  } finally { store.worker.close(); }
 });

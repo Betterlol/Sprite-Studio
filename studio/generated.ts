@@ -56,7 +56,9 @@ export class GeneratedImages {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw new StudioError("无效生成图片ID");
     const path = this.store.safePath(pid, `.studio/generated/${id}.json`);
     if (!existsSync(path)) throw new StudioError("生成图片不存在", 404);
-    return JSON.parse(readFileSync(path, "utf8"));
+    const record = JSON.parse(readFileSync(path, "utf8")) as GeneratedImage;
+    if (record.id !== id || record.projectId !== pid || (this.store.sessions.has(record.sessionId) && this.store.session(record.sessionId).projectId !== pid)) throw new StudioError("生成图片不属于该工程或会话", 404);
+    return record;
   }
   imagePath(pid: string, id: string) {
     const item = this.record(pid, id),

@@ -90,6 +90,30 @@ export const permissionTools = [
     detail: "生成逐帧图、叠图与检查记录，不应用草稿",
     writes: false,
   },
+  {
+    name: "create_clip_draft",
+    label: "创建完整动画草稿",
+    detail: "显式派生完整编排和参数；继承帧草稿创建权限",
+    writes: true,
+  },
+  {
+    name: "save_clip_draft",
+    label: "保存完整动画草稿",
+    detail: "提交确切对象草稿；继承帧草稿保存权限",
+    writes: true,
+  },
+  {
+    name: "review_sequence",
+    label: "多动作Review",
+    detail: "管理序列和全部批次证据；继承配置或检查权限",
+    writes: true,
+  },
+  {
+    name: "workflow_task",
+    label: "制作任务检查与交付",
+    detail: "读取任务、真实渲染检查或标为可验收；不代替人工接受",
+    writes: false,
+  },
 ] as const;
 export type PermissionTool = (typeof permissionTools)[number]["name"];
 export type ToolPolicies = Record<PermissionTool, PermissionPolicy>;

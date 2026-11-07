@@ -3,7 +3,7 @@ import { z } from "zod";
 import { StudioError, type ProjectStore } from "./store.ts";
 import type { AgentHub } from "./agent.ts";
 import { editingContextSchema, productionContractSchema } from "./workflow-model.ts";
-import { agentModelSchema, clipReferenceSchema } from "./model.ts";
+import { agentModelSchema, clipReferenceSchema, markdownReferenceSchema } from "./model.ts";
 
 const uuid = z.string().uuid();
 export const toolApprovalBindingSchema = z.object({ sessionId: uuid, approvalId: uuid }).strict();
@@ -27,8 +27,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, store: ProjectStore
   const pid = (request: any) => uuid.parse(request.params.projectId);
   const id = (request: any, key: string) => uuid.parse(request.params[key]);
   app.post("/api/sessions/:sessionId/messages", async (request: any, reply) => {
-    const input = z.object({ text: z.string().trim().min(1).max(12000), assetIds: z.array(uuid).max(5).default([]), requestId: uuid, clipReferences: z.array(clipReferenceSchema).max(3).default([]), outputFolder: z.string().optional(), model: agentModelSchema.optional(), context: editingContextSchema.optional(), taskId: uuid.optional(), feedbackKind: z.enum(["local", "direction"]).optional() }).parse(request.body);
-    const session = agent.send(uuid.parse(request.params.sessionId), input.text, input.assetIds, input.requestId, undefined, input.clipReferences, input.outputFolder, input.model, input.context, input.taskId, input.feedbackKind);
+    const input = z.object({ text: z.string().trim().min(1).max(12000), assetIds: z.array(uuid).max(5).default([]), requestId: uuid, clipReferences: z.array(clipReferenceSchema).max(3).default([]), markdownReferences: z.array(markdownReferenceSchema).max(3).default([]), outputFolder: z.string().optional(), model: agentModelSchema.optional(), context: editingContextSchema.optional(), taskId: uuid.optional(), feedbackKind: z.enum(["local", "direction"]).optional() }).parse(request.body);
+    const session = agent.send(uuid.parse(request.params.sessionId), input.text, input.assetIds, input.requestId, undefined, input.clipReferences, input.outputFolder, input.model, input.context, input.taskId, input.feedbackKind, input.markdownReferences);
     return reply.code(202).send(session);
   });
   app.post("/api/projects/:projectId/tasks", async request => {

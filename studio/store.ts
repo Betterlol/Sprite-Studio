@@ -1,4 +1,5 @@
 import { ToolPermissions } from "./tool-permissions.ts";
+import { MarkdownDocuments } from "./markdown.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ProductionTasks } from "./tasks.ts";
 import { ClipDrafts } from "./clip-drafts.ts";
@@ -83,6 +84,7 @@ export class ProjectStore extends EventEmitter {
   sheets: SheetDocuments;
   sheetInspection: SheetInspectionService;
   documents: ProjectDocuments;
+  markdown: MarkdownDocuments;
   generated: GeneratedImages;
   frameDrafts: FrameDrafts;
   clipDrafts: ClipDrafts;
@@ -126,6 +128,7 @@ export class ProjectStore extends EventEmitter {
       this.library.recover(project.id);
       this.loadAssets(project.id);
       organizeResourceLayout(this, project.id);
+      mkdirSync(this.safePath(project.id, "Assets/文档"), { recursive: true });
       const sessionDir = join(dir, ".studio", "sessions");
       if (existsSync(sessionDir))
         for (const file of readdirSync(sessionDir).filter((file) =>
@@ -153,6 +156,7 @@ export class ProjectStore extends EventEmitter {
     this.sheets = new SheetDocuments(this);
     this.sheetInspection = new SheetInspectionService(this);
     this.documents = new ProjectDocuments(this);
+    this.markdown = new MarkdownDocuments(this);
     this.generated = new GeneratedImages(this);
     // Legacy draft startup needs raw task/intent ownership before deciding which
     // records are mutable or eligible for its old per-frame merge recovery.

@@ -1,3 +1,7 @@
+import { lazy, Suspense } from "react";
+const MarkdownEditor = lazy(() => import("./MarkdownEditor.tsx").then(module => ({ default: module.MarkdownEditor })));
+const NewMarkdownDialog = lazy(() => import("./MarkdownEditor.tsx").then(module => ({ default: module.NewMarkdownDialog })));
+import type { MarkdownReference, MarkdownAsset, MarkdownDocument } from "../studio/model.ts";
 import { MessageRecoveries } from "./MessageRecoveries.tsx";
 import { sendMessageAttempt, postMessageInput, messageRecoveries, clearSubmittedComposer, restoreMessageInput, dismissMessageRecovery, MessageAttemptError, type MessageRecovery, type MessageInput, type ComposerInput } from "./message-recovery.ts";
 import { createPortal } from "react-dom";
@@ -28,6 +32,7 @@ import {
   Plus,
   Search,
   Image as ImageIcon,
+  FileText,
   Film,
   Sparkles,
   ArrowUp,
@@ -146,10 +151,19 @@ export function App() {
   }, [theme]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [state, setState] = useState<State | null>(null);
-  const [projectId, setProjectId] = useState("");
+  const [projectId, setProjectIdRaw] = useState("");
   const projectRef = useRef("");
   const loadVersion = useRef(0), initialLoad = useRef("");
-  const [selectedId, setSelectedId] = useState("");
+  const [selectedId, setSelectedIdRaw] = useState("");
+  const markdownDirty = useRef(false);
+  const onMarkdownDirty = useCallback((dirty: boolean) => { markdownDirty.current = dirty; }, []);
+  function leaveMarkdown() {
+    if (markdownDirty.current && !window.confirm("文档有未保存修改，确定离开并放弃这些文字？")) return false;
+    markdownDirty.current = false;
+    return true;
+  }
+  function setSelectedId(id: string) { if (id === selectedId || leaveMarkdown()) setSelectedIdRaw(id); }
+  function setProjectId(id: string) { if (id === projectId || leaveMarkdown()) setProjectIdRaw(id); }
   const [conversation, setConversation] = useState<ConversationSelection>({ taskId: "", sessionId: "" });
   const { taskId, sessionId } = conversation;
   const conversationEpoch = useRef(0), latestTasks = useRef<ProductionTask[]>([]);
@@ -215,6 +229,8 @@ export function App() {
   const [draft, setDraft] = useState("");
   const [references, setReferences] = useState<string[]>([]);
   const [clipReferences, setClipReferences] = useState<ClipReference[]>([]);
+  const [markdownReferences, setMarkdownReferences] = useState<MarkdownReference[]>([]);
+  const [newMarkdown, setNewMarkdown] = useState(false);
   const [focusedReviewId, setFocusedReviewId] = useState(""),
     [focusedChangeId, setFocusedChangeId] = useState("");
   const [operation, setOperation] = useState("");
@@ -238,7 +254,7 @@ export function App() {
   const activeMessageRequest = useRef("");
   const composerInput = useRef<ComposerInput>({text:draft,assetIds:references,clipReferences});
   const displayedContext = restoredMessage ? restoredMessage.input.context : context;
-  composerInput.current = {text:draft,assetIds:references,clipReferences,context:useContext?displayedContext || undefined:undefined,taskId:taskId || undefined,model:agentModel,outputFolder:restoredMessage?.input.outputFolder ?? folder,feedbackKind:taskContinuation === "none"?undefined:taskContinuation,recoverySourceId:restoredMessage?.requestId};
+  composerInput.current = {text:draft,assetIds:references,clipReferences,markdownReferences,context:useContext?displayedContext || undefined:undefined,taskId:taskId || undefined,model:agentModel,outputFolder:restoredMessage?.input.outputFolder ?? folder,feedbackKind:taskContinuation === "none"?undefined:taskContinuation,recoverySourceId:restoredMessage?.requestId};
   const recoveries = useMemo(() => messageRecoveries(localStorage,projectId,sessionId),[projectId,sessionId,recoveryVersion]);
   const selectedTask = state?.tasks?.find(task => task.id === taskId);
   const continuationClipId = useContext && displayedContext?.clipId && displayedContext.clipId === (selectedTask?.target?.clipId || selectedTask?.contract.scope?.clipId) ? displayedContext.clipId : "";
@@ -282,6 +298,7 @@ export function App() {
   }
 
   const upload = useRef<HTMLInputElement>(null);
+  const markdownUpload = useRef<HTMLInputElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
   const [stageSize, setStageSize] = useState({ width: 800, height: 500 });
@@ -299,17 +316,9 @@ export function App() {
     framePreview?.draft.clipId === clip?.id
       ? framePreview?.preview.clip || clip
       : clip;
-  const currentImage = (
-    clip
-      ? state?.assets.find(
-          (asset) =>
-            asset.id ===
-            displayClip!.frames[
-              Math.min(frameIndex, displayClip!.frames.length - 1)
-            ]?.imageId,
-        )
-      : selected
-  ) as ImageAsset | undefined;
+  const currentImage = clip
+    ? state?.assets.find((asset): asset is ImageAsset => asset.type === "image" && asset.id === displayClip!.frames[Math.min(frameIndex, displayClip!.frames.length - 1)]?.imageId)
+    : selected?.type === "image" ? selected : undefined;
   const session = state?.sessions.find((session) => session.id === sessionId);
   const waitingSession = state?.sessions.find(
     (s) => s.toolApproval || s.frameSaveApproval || s.prompt,
@@ -361,7 +370,7 @@ export function App() {
       setConversation(ordinaryConversation(next.tasks || [], nextSession));
       setDraft(localStorage.getItem(`studio.draft.${id}.${nextSession}`) || "");
       setReferences([]);
-      setClipReferences([]);
+      setClipReferences([]); setMarkdownReferences([]);
       setFrameIndex(0);
       setPlaying(false);
     }
@@ -452,7 +461,7 @@ export function App() {
     snapshotRequest.current++; setFixedSnapshot(null); setShareDraft(false);
     const asset = state?.assets.find(a => a.id === selectedId);
     if (asset?.type === "image") setContext({assetId: asset.id, revision: asset.revision, mode: "saved"});
-    else setContext(asset ? {clipId: asset.id, revision: asset.revision, mode: "saved"} : null);
+    else setContext(asset?.type === "clip" ? {clipId: asset.id, revision: asset.revision, mode: "saved"} : null);
   }, [selectedId]);
   useEffect(() => {
     if (
@@ -513,9 +522,11 @@ export function App() {
     }
   }
   function chooseProject(id: string) {
+    if (id !== projectId && !leaveMarkdown()) return;
+    setNewMarkdown(false);
     conversationEpoch.current++; setConversation({taskId:"",sessionId:""}); setRestoredMessage(null); setTaskContinuation("none"); setHandoffs({}); setContext(null); setShareDraft(false); setFixedSnapshot(null);
     setComparison(null);
-    setClipReferences([]);
+    setClipReferences([]); setMarkdownReferences([]);
     projectRef.current = id;
     setProjectId(id);
     setState(null);
@@ -527,7 +538,7 @@ export function App() {
     setConversation(next);
     setRestoredMessage(null); setTaskContinuation("none"); setShareDraft(false);
     setDraft(localStorage.getItem(`studio.draft.${projectId}.${next.sessionId}`) || "");
-    setReferences([]); setClipReferences([]); setPromptAnswers({});
+    setReferences([]); setClipReferences([]); setMarkdownReferences([]); setPromptAnswers({});
   }
   function chooseSession(id: string) {
     selectConversation(ordinaryConversation(state?.tasks || [], id));
@@ -576,6 +587,10 @@ export function App() {
     );
     setConversation(old => ({...old,sessionId:created.id}));
     return created;
+  }
+  function addMarkdownReference(asset: MarkdownAsset) {
+    setMarkdownReferences(old => old.some(ref => ref.id === asset.id) ? old.map(ref => ref.id === asset.id ? { id: asset.id, revision: asset.revision } : ref) : old.length < 3 ? [...old, { id: asset.id, revision: asset.revision }] : (notify("一次最多引用3份文档"), old));
+    setChatVisible(true); setRightTab("assistant");
   }
   function addReference(id?: string) {
     if (!id) return;
@@ -650,22 +665,24 @@ export function App() {
     files = Array.from(files);
     const originalProject = projectId;
     const kind = folderCategory(folder) === "参考图" ? "reference" : "image";
-    await run("正在导入图片", async () => {
+    await run("正在导入资源", async () => {
       let latest = "";
       for (const file of Array.from(files)) {
-        const body = new FormData();
-        body.append("file", file);
-        const asset = await api<ImageAsset>(
-          `/api/projects/${originalProject}/import?kind=${kind}&folder=${encodeURIComponent(folder)}`,
-          { method: "POST", body },
-        );
-        latest = asset.id;
+        const body = new FormData(); body.append("file", file);
+        if (/\.md$/i.test(file.name)) {
+          const destination = folderCategory(folder) === "文档" ? folder : "文档";
+          const result = await api<MarkdownDocument>(`/api/projects/${originalProject}/markdown/import?folder=${encodeURIComponent(destination)}`, { method: "POST", body });
+          latest = result.asset.id;
+        } else {
+          const asset = await api<ImageAsset>(`/api/projects/${originalProject}/import?kind=${kind}&folder=${encodeURIComponent(folder)}`, { method: "POST", body });
+          latest = asset.id;
+        }
       }
       if (projectRef.current === originalProject) {
         await refreshRef.current();
-        setSelectedId(latest);
+        if (projectRef.current === originalProject) setSelectedId(latest);
       }
-      notify(`已导入 ${files.length} 张图片`);
+      notify(`已导入 ${files.length} 项资源`);
     });
   }
   function restoreMessage(record: MessageRecovery) {
@@ -674,7 +691,7 @@ export function App() {
     if (!input) { notify("当前已有新输入，不会覆盖；原消息及引用仍保留在恢复记录中",true); return; }
     conversationEpoch.current++;
     setConversation({taskId:input.taskId || "",sessionId:record.sessionId});
-    setDraft(input.text); setReferences(input.assetIds); setClipReferences(input.clipReferences);
+    setDraft(input.text); setReferences(input.assetIds); setClipReferences(input.clipReferences); setMarkdownReferences(input.markdownReferences || []);
     setAgentModel(input.model); setRestoredMessage(record); setUseContext(!!input.context);
     setShareDraft(record.contextFrozen && input.context?.mode === "draft");
     setTaskContinuation(input.feedbackKind || "none");
@@ -690,7 +707,7 @@ export function App() {
     const originalProject = projectId, submittedSelection = conversation, submittedEpoch = conversationEpoch.current;
     const requestId = crypto.randomUUID(), sourceRecovery = restoredMessage;
     const input: MessageInput = {
-      text:draft, assetIds:[...references], clipReferences:structuredClone(clipReferences),
+      text:draft, assetIds:[...references], clipReferences:structuredClone(clipReferences), markdownReferences:structuredClone(markdownReferences),
       context:useContext ? displayedContext || undefined : undefined,
       taskId:submittedSelection.taskId || undefined,
       feedbackKind:taskContinuation === "none" ? undefined : taskContinuation,
@@ -716,7 +733,7 @@ export function App() {
           if (projectRef.current !== originalProject || submittedEpoch !== conversationEpoch.current) throw new Error("工程或对话已切换，消息接口尚未提交");
           const current = composerInput.current, cleared = clearSubmittedComposer(current,{...record.input,recoverySourceId:sourceRecovery?.requestId});
           if (cleared !== current) {
-            setDraft(cleared.text); setReferences(cleared.assetIds); setClipReferences(cleared.clipReferences);
+            setDraft(cleared.text); setReferences(cleared.assetIds); setClipReferences(cleared.clipReferences); setMarkdownReferences(cleared.markdownReferences || []);
             setRestoredMessage(null); setTaskContinuation("none");
           }
         },
@@ -921,6 +938,8 @@ export function App() {
           onChanged={() => refreshRef.current()}
           onImport={() => upload.current?.click()}
           onNewClip={() => setNewClip(true)}
+          onNewMarkdown={() => setNewMarkdown(true)}
+          onImportMarkdown={() => markdownUpload.current?.click()}
           disabled={!!operation}
           blockedAssetIds={(state?.assets || []).filter(asset => editingBlock(state?.tasks || [], asset.id, handoffs, state?.sessions || [])).map(asset => asset.id)}
         />
@@ -937,6 +956,8 @@ export function App() {
             <div className="asset-title">
               {selected?.type === "clip" ? (
                 <Film size={16} />
+              ) : selected?.type === "markdown" ? (
+                <FileText size={16} />
               ) : (
                 <ImageIcon size={16} />
               )}
@@ -966,7 +987,7 @@ export function App() {
                   <span>引用到对话</span>
                 </button>
               )}
-              {selected && (
+              {selected && selected.type !== "markdown" && (
                 <a
                   className="icon-button"
                   title={clip ? "导出动画 WebP" : "下载图片"}
@@ -982,7 +1003,7 @@ export function App() {
               )}
             </div>
           </div>
-          {fixedSnapshot ? <SnapshotPlayer key={fixedSnapshot.id} snapshot={fixedSnapshot} onClose={() => { setFixedSnapshot(null); if (selected?.type === "image") setContext({assetId:selected.id,revision:selected.revision,mode:"saved"}); }}/> : comparing ? <div className="stage checker"><ComparisonPlayer key={comparing.nonce} before={comparing.before} after={comparing.after} onClose={() => setComparison(null)}/></div> : clip ? <ClipWorkbench
+          {selected?.type === "markdown" ? <Suspense fallback={<p role="status">正在打开文档…</p>}><MarkdownEditor key={`${projectId}-${selected.id}`} projectId={projectId} asset={selected} onDirty={onMarkdownDirty} onSaved={() => refreshRef.current()} onReference={addMarkdownReference}/></Suspense> : fixedSnapshot ? <SnapshotPlayer key={fixedSnapshot.id} snapshot={fixedSnapshot} onClose={() => { setFixedSnapshot(null); if (selected?.type === "image") setContext({assetId:selected.id,revision:selected.revision,mode:"saved"}); }}/> : comparing ? <div className="stage checker"><ComparisonPlayer key={comparing.nonce} before={comparing.before} after={comparing.after} onClose={() => setComparison(null)}/></div> : clip ? <ClipWorkbench
             key={`${projectId}-${clip.id}`} projectId={projectId} clip={clip} assets={state?.assets || []}
             frameIndex={frameIndex} onFrame={setFrameIndex} playing={playing} onPlaying={setPlaying} propertiesHost={propertiesHost}
             locked={blocker ? `任务“${blocker.title}”持有此对象` : undefined}
@@ -1532,6 +1553,7 @@ export function App() {
                       })}
                     </div>
                   )}
+                  {!!message.markdownReferences?.length && <div className="message-markdown-refs">{message.markdownReferences.map(ref => <details key={ref.id}><summary><FileText size={13}/> {ref.name} · 引用时正文</summary><pre>{ref.text}</pre></details>)}</div>}
                   {message.assetIds.length > 0 && (
                     <div className="message-images">
                       {message.assetIds.map((id) => {
@@ -1720,7 +1742,7 @@ export function App() {
               max={350}
             />
             <div className="composer-area">
-              <MessageRecoveries records={recoveries} activeRequestId={activeMessageRequest.current} composerHasInput={!!draft.length || !!references.length || !!clipReferences.length || taskContinuation!=="none"} onRestore={restoreMessage} onDismiss={dismissRecovery}/>
+              <MessageRecoveries records={recoveries} activeRequestId={activeMessageRequest.current} composerHasInput={!!draft.length || !!references.length || !!clipReferences.length || !!markdownReferences.length || taskContinuation!=="none"} onRestore={restoreMessage} onDismiss={dismissRecovery}/>
               <div className="composer">
                 {restoredMessage && <div className="context-chip"><strong>恢复的原输入：不会自动发送</strong><small>上下文/保存建议目录锁定为原记录，浏览资源不会替换。{restoredMessage.contextFrozen?"原上下文已稳定；版本过期会被拒绝，不自动刷新。":"原上下文尚未稳定，发送前须返回原草稿重新核对。"} · 目录：{restoredMessage.input.outputFolder || "项目根目录"} · 续接意图：{restoredMessage.input.feedbackKind || "仅讨论"}</small><button className="text-button" onClick={()=>{setRestoredMessage(null);setTaskContinuation("none");setUseContext(true);setShareDraft(false);}}>明确改用当前工作对象与目录</button></div>}
                 {displayedContext && <div className="context-chip"><label><input type="checkbox" checked={useContext} onChange={e => setUseContext(e.target.checked)}/>正在讨论：{state?.assets.find(a => a.id === (displayedContext.clipId || displayedContext.assetId))?.name || "工作对象"}{displayedContext.frameId ? restoredMessage ? ` · 帧实例 ${displayedContext.frameId.slice(0,8)}` : ` · 第 ${frameIndex + 1} 帧实例` : ""} · {displayedContext.mode === "draft" ? "人工草稿" : displayedContext.snapshotId ? "固定快照" : "保存版本"}</label><small>{displayedContext.frameId || displayedContext.snapshotId || displayedContext.clipId || displayedContext.assetId} · {displayedContext.documentRevision || displayedContext.revision}</small>{displayedContext.mode === "draft" && useContext && <label><input type="checkbox" checked={shareDraft} onChange={e => setShareDraft(e.target.checked)}/>明确将此人工草稿作为助手输入（不授权覆盖原稿）</label>}</div>}
@@ -1752,6 +1774,10 @@ export function App() {
                     ))}
                   </div>
                 )}
+                {!!markdownReferences.length && <div className="reference-chips">{markdownReferences.map(ref => {
+                  const asset = state?.assets.find(asset => asset.id === ref.id);
+                  return <div className="reference-chip" key={ref.id}><FileText size={15}/><span>{asset?.name || "已删除文档"}{asset && asset.revision !== ref.revision ? " · 版本已变，请重新引用" : ""}</span><button aria-label={`移除文档引用 ${asset?.name || ref.id}`} onClick={() => setMarkdownReferences(old => old.filter(item => item.id !== ref.id))}><X size={12}/></button></div>;
+                })}</div>}
                 {!!references.length && (
                   <div className="reference-chips">
                     {references.map((id) => {
@@ -1881,6 +1907,16 @@ export function App() {
           )}
         </span>
       </footer>
+      {newMarkdown && <Suspense fallback={null}><NewMarkdownDialog key={projectId} projectId={projectId} folder={folderCategory(folder) === "文档" ? folder : "文档"} onClose={() => setNewMarkdown(false)} onCreated={asset => {
+        if (projectRef.current !== projectId) return;
+        setNewMarkdown(false);
+        void run("打开新文档", async () => {
+          await refreshRef.current();
+          if (projectRef.current !== projectId) return;
+          setSelectedId(asset.id); setFolder(asset.folder);
+        });
+      }}/></Suspense>}
+      <input ref={markdownUpload} type="file" accept=".md,text/markdown" multiple hidden aria-label="导入Markdown文件" onChange={event => { if (event.target.files?.length) void importFiles(event.target.files); event.target.value = ""; }}/>
       <input
         ref={upload}
         className="hidden"

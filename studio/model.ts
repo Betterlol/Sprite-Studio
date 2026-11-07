@@ -11,7 +11,7 @@ export const defaultAgentModel: AgentModel = "gpt-6.1-sol";
 
 export const imageKindSchema = z.enum(["reference", "image"]);
 export type ImageKind = z.infer<typeof imageKindSchema>;
-export const resourceCategories = ["参考图", "原图素材", "动画"] as const;
+export const resourceCategories = ["参考图", "原图素材", "动画", "文档"] as const;
 export type ResourceCategory = (typeof resourceCategories)[number];
 export const folderCategory = (folder: string) =>
   resourceCategories.find(
@@ -20,7 +20,9 @@ export const folderCategory = (folder: string) =>
 export const resourceCategory = (
   asset: Pick<Asset, "type"> & { kind?: ImageKind },
 ): ResourceCategory =>
-  asset.type === "clip"
+  asset.type === "markdown"
+    ? "文档"
+    : asset.type === "clip"
     ? "动画"
     : asset.kind === "reference"
       ? "参考图"
@@ -171,7 +173,24 @@ export type ClipAsset = {
   appliedFrameChangeIds?: string[];
   revertedFrameChangeIds?: string[];
 };
-export type Asset = ImageAsset | ClipAsset;
+export type MarkdownAsset = {
+  id: string;
+  type: "markdown";
+  name: string;
+  folder: string;
+  file: string;
+  revision: string;
+  contentHash: string;
+  byteLength: number;
+  createdAt: string;
+  updatedAt: string;
+  origin?: never;
+};
+export type MarkdownDocument = { asset: MarkdownAsset; text: string };
+export const markdownReferenceSchema = z.object({ id: z.string().uuid(), revision: z.string() }).strict();
+export type MarkdownReference = z.infer<typeof markdownReferenceSchema>;
+export type MarkdownAttachment = MarkdownReference & { name: string; text: string };
+export type Asset = ImageAsset | ClipAsset | MarkdownAsset;
 export type LibrarySelection = { assetIds: string[]; folders: string[] };
 export type TrashEntry = {
   resourceLayout?: 1;
@@ -199,6 +218,7 @@ export type ChatMessage = {
   displayText?: string;
   assetIds: string[];
   clipReferences?: ClipAttachment[];
+  markdownReferences?: MarkdownAttachment[];
   reviewIds?: string[];
   clipDraftIds?: string[];
   changeIds?: string[];

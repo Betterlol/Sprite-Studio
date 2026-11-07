@@ -1,10 +1,11 @@
 import { z } from "zod";
-import { agentModelSchema, clipReferenceSchema, type Session } from "../studio/model.ts";
+import { agentModelSchema, clipReferenceSchema, markdownReferenceSchema, type Session } from "../studio/model.ts";
 import { editingContextSchema } from "../studio/workflow-model.ts";
 import { api, ApiError } from "./api.ts";
 
 const inputSchema = z.object({
   text: z.string(), assetIds: z.array(z.string()), clipReferences: z.array(clipReferenceSchema),
+  markdownReferences: z.array(markdownReferenceSchema).max(3).optional(),
   context: editingContextSchema.optional(), taskId: z.string().optional(), feedbackKind: z.enum(["local", "direction"]).optional(),
   model: agentModelSchema, outputFolder: z.string(),
 });
@@ -45,15 +46,15 @@ function contextScope(context: MessageInput["context"]) {
 }
 export function clearSubmittedComposer(current: ComposerInput, submitted: ComposerInput): ComposerInput {
   if (current.text !== submitted.text || JSON.stringify(current.assetIds) !== JSON.stringify(submitted.assetIds) ||
-    JSON.stringify(current.clipReferences) !== JSON.stringify(submitted.clipReferences)) return current;
+    JSON.stringify(current.clipReferences) !== JSON.stringify(submitted.clipReferences) || JSON.stringify(current.markdownReferences || []) !== JSON.stringify(submitted.markdownReferences || [])) return current;
   for (const key of ["taskId", "model", "outputFolder", "feedbackKind", "recoverySourceId"] as const) if (key in current && current[key] !== submitted[key]) return current;
   // A draft's ack revision can advance automatically; a new target/instance or explicit intent cannot.
   if ("context" in current && JSON.stringify(contextScope(current.context)) !== JSON.stringify(contextScope(submitted.context))) return current;
-  return { text: "", assetIds: [], clipReferences: [] };
+  return { text: "", assetIds: [], clipReferences: [], ...("markdownReferences" in current ? { markdownReferences: [] } : {}) };
 }
 /** Explicit local restoration only. New input is never replaced or automatically submitted. */
 export function restoreMessageInput(record: MessageRecovery, current: ComposerInput): MessageInput | null {
-  if (current.text.length || current.assetIds.length || current.clipReferences.length || current.feedbackKind) return null;
+  if (current.text.length || current.assetIds.length || current.clipReferences.length || current.markdownReferences?.length || current.feedbackKind) return null;
   return structuredClone(record.input);
 }
 export function messageRecoveryNotice(record: MessageRecovery) {

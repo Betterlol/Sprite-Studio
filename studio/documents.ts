@@ -69,6 +69,7 @@ export class ProjectDocuments {
     if (this.store.frameDrafts.has(id))
       return this.store.frameDrafts.read(pid, id);
     const asset = this.store.asset(pid, id);
+    if (asset.type === "markdown") throw new StudioError("Markdown文档请使用read_markdown");
     if (asset.type !== "clip") return this.store.sheets.read(pid, id);
     const path = asset.file! + ".config.json",
       full = this.store.safePath(pid, path),
@@ -100,7 +101,9 @@ export class ProjectDocuments {
       this.store.frameDrafts.get(pid, id);
       return this.store.frameDrafts.parse(text);
     }
-    if (this.store.asset(pid, id).type !== "clip")
+    const asset = this.store.asset(pid, id);
+    if (asset.type === "markdown") throw new StudioError("Markdown文档请使用write_markdown");
+    if (asset.type !== "clip")
       return this.store.sheets.parse(pid, id, text);
     if (Buffer.byteLength(text) > 256 * 1024)
       throw new StudioError("INVALID_DOCUMENT：配置超过256KB");
@@ -158,6 +161,7 @@ export class ProjectDocuments {
       if (this.store.frameDrafts.has(input.documentId))
         return [this.store.frameDrafts.prepare(pid, input)];
       const asset = this.store.asset(pid, input.documentId);
+      if (asset.type === "markdown") throw new StudioError("Markdown文档请使用write_markdown");
       if (asset.type !== "clip") return [this.store.sheets.prepare(pid, input)];
       this.store.assertClipMutation(pid, asset.id);
       const current = this.read(pid, asset.id);

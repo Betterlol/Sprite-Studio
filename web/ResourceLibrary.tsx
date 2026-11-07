@@ -18,6 +18,7 @@ import {
   Plus,
   Image as ImageIcon,
   Images,
+  FileText,
 } from "lucide-react";
 import {
   assetUrl,
@@ -53,6 +54,8 @@ export function ResourceLibrary({
   onChanged,
   onImport,
   onNewClip,
+  onNewMarkdown,
+  onImportMarkdown,
   disabled,
   blockedAssetIds = [],
 }: {
@@ -65,6 +68,8 @@ export function ResourceLibrary({
   onChanged: () => Promise<void>;
   onImport: () => void;
   onNewClip: () => void;
+  onNewMarkdown?: () => void;
+  onImportMarkdown?: () => void;
   disabled: boolean;
   blockedAssetIds?: string[];
 }) {
@@ -304,7 +309,7 @@ export function ResourceLibrary({
         ? Film
         : path === "参考图"
           ? ImageIcon
-          : Images
+          : path === "文档" ? FileText : Images
       : folder === path
         ? FolderOpen
         : Folder;
@@ -534,6 +539,8 @@ export function ResourceLibrary({
                     draggable={false}
                     loading="lazy"
                   />
+                ) : asset.type === "markdown" ? (
+                  <FileText size={22} />
                 ) : (
                   <Film size={22} />
                 )}
@@ -544,7 +551,7 @@ export function ResourceLibrary({
                   {search ? `${asset.folder || "资源"} · ` : ""}
                   {asset.type === "image"
                     ? `${imageKinds[asset.kind]} · ${asset.width} × ${asset.height}`
-                    : `${asset.frames.length} 帧 · 动画片段`}
+                    : asset.type === "markdown" ? `Markdown · ${asset.byteLength.toLocaleString()} 字节` : `${asset.frames.length} 帧 · 动画片段`}
                 </small>
               </span>
             </button>
@@ -559,12 +566,16 @@ export function ResourceLibrary({
                 ? "试试资源名称或目录名称"
                 : folderCategory(folder) === "动画"
                   ? "新建动画，或从原图素材切割生成"
-                  : "导入图片，或新建文件夹"}
+                  : folderCategory(folder) === "文档" ? "导入Markdown，或新建文档" : "导入图片，或新建文件夹"}
             </small>
           </div>
         )}
       </div>
       <div className="library-footer">
+        {folderCategory(folder) === "文档" ? <>
+          <button className="import-button" disabled={disabled} onClick={onNewMarkdown}><FileText size={15}/>新建文档<Plus size={13}/></button>
+          <button className="import-button" disabled={disabled} onClick={onImportMarkdown}><Upload size={15}/>导入 Markdown<Plus size={13}/></button>
+        </> : <>
         <button
           className="import-button new-clip-button"
           disabled={disabled}
@@ -587,6 +598,7 @@ export function ResourceLibrary({
               : "导入原图素材…"}
           <Plus size={13} />
         </button>
+        </>}
       </div>
       {dialog && (
         <div

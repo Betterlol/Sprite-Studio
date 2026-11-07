@@ -6,6 +6,9 @@ import { atomicJson } from "./store.ts";
 export const permissionPolicySchema = z.enum(["allow", "ask", "deny"]);
 export type PermissionPolicy = z.infer<typeof permissionPolicySchema>;
 export const permissionTools = [
+  { name: "read_markdown", label: "读取Markdown文档", detail: "读取当前工程文档正文", writes: false },
+  { name: "create_markdown", label: "新建Markdown文档", detail: "在文档分类中新建文件", writes: true },
+  { name: "write_markdown", label: "保存Markdown文档", detail: "按确切版本直接保存正文", writes: true },
   {
     name: "save_image",
     label: "添加图片到指定目录",

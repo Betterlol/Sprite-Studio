@@ -99,7 +99,7 @@ export class ResourceLibrary {
   private managedFolder(pid: string, folder: string) {
     this.folder(pid, folder);
     if (!folderCategory(folder))
-      throw new StudioError("请在参考图、原图素材或动画分类内管理目录");
+      throw new StudioError("请在资源分类内管理目录");
   }
   revision(pid: string) {
     return sha256(
@@ -404,10 +404,10 @@ export class ResourceLibrary {
     for (const asset of chosen.direct) {
       let name = entryName(newName || asset.name);
       if (
-        asset.type === "image" &&
+        (asset.type === "image" || asset.type === "markdown") &&
         extname(name).toLowerCase() !== extname(asset.file).toLowerCase()
       )
-        throw new StudioError("重命名图片时请保留原扩展名");
+        throw new StudioError("重命名时请保留原扩展名");
       if (target === assetFolder(asset) && name === asset.name) continue;
       this.collision(pid, target, name, new Set([asset.id]));
       reserve(name);

@@ -112,7 +112,7 @@ export function precheckTaskTool(store: ProjectStore, session: Session, intent: 
       if (!imageAllowed(asset.id)) throw new StudioError("切割来源不在任务约定范围", 409);
     }
   }
-  if (["slice_sheet", "adjust_image"].includes(name) && !imageAllowed(input.assetId)) throw new StudioError("图片不在任务约定范围", 409);
+  if (["slice_sheet", "adjust_image", "inspect_sheet"].includes(name) && !imageAllowed(input.assetId)) throw new StudioError("图片不在任务约定范围", 409);
   if (productionWrite(name, input) && name !== "review_sequence") {
     const rounds = (task.repairRounds || []).filter(r => r.intentVersion === task.intentVersion);
     const currentSnapshotId = goal ? store.animation.capture(pid, goal).id : undefined;
@@ -145,6 +145,7 @@ export function precheckTaskTool(store: ProjectStore, session: Session, intent: 
 
 /** New capabilities inherit existing denials/asks instead of becoming alternate routes. */
 export function toolPolicyParents(name: PermissionTool, input: any): PermissionTool[] {
+  if (name === "inspect_sheet") return ["read_document", "inspect_clip"];
   if (name === "create_clip_draft") return ["create_frame_draft"];
   if (name === "save_clip_draft") return ["save_frame_draft"];
   if (name === "review_sequence") return [input.action === "list" ? "list_assets" : ["create", "update", "archive"].includes(input.action) ? "write_documents" : "inspect_clip"];

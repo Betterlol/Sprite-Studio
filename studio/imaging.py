@@ -78,7 +78,14 @@ def run(method, params):
     folder = inside(params['outputDir'])
     native(folder).mkdir(parents=True, exist_ok=True)
     if method == 'review': return review_images(params, folder)
+    if method in ('sheet_detect', 'sheet_preview') or (method == 'recipe_slice' and params.get('recipeVersion') == 2):
+        if count != 1: raise ValueError('切割来源必须是静态图片')
+        from sheet_imaging import process
+        from hashlib import sha256
+        source_hash = sha256(native(inside(params['path'])).read_bytes()).hexdigest()
+        return process(method, image, params, folder, native, source_hash)
     if method == 'recipe_slice':
+        if params.get('recipeVersion') != 1: raise ValueError('需要显式recipeVersion')
         if count != 1: raise ValueError('切割来源必须是静态图片')
         grid=params['grid']; cols,rows=grid['columns'],grid['rows']
         top,right,bottom,left=grid['margin']; gap_x,gap_y=grid['spacing']

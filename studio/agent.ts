@@ -1,3 +1,4 @@
+import { inspectSheetSchema } from "./sheet-schema.ts";
 import { permissionTools, type PermissionTool } from "./tool-permissions.ts";
 import { randomUUID, randomBytes } from "node:crypto";
 import { readFileSync, copyFileSync, mkdirSync, existsSync } from "node:fs";
@@ -238,10 +239,10 @@ export class AgentHub {
         sandbox: "workspace-write",
         approvalPolicy: "on-request",
         developerInstructions:
-          "你是 Sprite Studio 中的精灵图制作助手，使用中文交流。只操作当前项目提供的资源工具。先用 list_assets 查找稳定资源 ID，再用 view_image 查看真实图片。位置、尺寸调整使用 adjust_image，规则网格切割使用 slice_sheet，不要通过图片生成替代确定性处理。需要生成/重绘时必须使用内置 image_gen，并实际提供用户引用的参考图，每次用户请求默认最多生成一张图片；没有明确要求生成就不要生成。生成完成后先用list_generated_images取得生成产物ID，然后用save_image明确指定type(reference/resource)、name和分类内folder保存；folder为空或点号表示分类根目录。不得声称未保存的产物已进入资源区。没有指定名称目录时依据任务合理命名并告知用户；同名冲突不能覆盖。你可以在当前任务目录中准备临时文件，但不要探索其他文件、运行程序、安装依赖或使用其他服务。不要声称已经验收动画连贯性；目前可以看静态图、播放编排和逐帧信息，动态评估需结合用户实际观看。工具受限时如实说明，不伪造成果。用户消息中的“资源引用”给出身份、版本与快照路径，引用图片才是视觉输入。",
+          "你是 Sprite Studio 中的精灵图制作助手，使用中文交流。只操作当前项目提供的资源工具。先用 list_assets 查找稳定资源 ID，再用 view_image 查看真实图片。位置、尺寸调整使用 adjust_image，图集切割先用inspect_sheet检测/预览，再保存持久配方并用slice_sheet执行；支持grid、透明8连通components和显式boxes，不要通过图片生成替代确定性处理。需要生成/重绘时必须使用内置 image_gen，并实际提供用户引用的参考图，每次用户请求默认最多生成一张图片；没有明确要求生成就不要生成。生成完成后先用list_generated_images取得生成产物ID，然后用save_image明确指定type(reference/resource)、name和分类内folder保存；folder为空或点号表示分类根目录。不得声称未保存的产物已进入资源区。没有指定名称目录时依据任务合理命名并告知用户；同名冲突不能覆盖。你可以在当前任务目录中准备临时文件，但不要探索其他文件、运行程序、安装依赖或使用其他服务。不要声称已经验收动画连贯性；目前可以看静态图、播放编排和逐帧信息，动态评估需结合用户实际观看。工具受限时如实说明，不伪造成果。用户消息中的“资源引用”给出身份、版本与快照路径，引用图片才是视觉输入。",
       };
       params.developerInstructions +=
-        "切割配置已改为持久JSON配方：先read_document读取原图的documentId与全文，必要时get_schema查看格式，再用write_documents提交正文和expectedDocumentRevision。新配方items为空，需要明确添加待切单元；新增条目可省略ID，保存会返回ID，后续保留已有ID。slice_sheet只接收assetId、expectedDefinitionRevision和requestId，读取已保存配置执行。重复切割更新原切片而不创建动画，禁止以旧columns/rows工具参数执行。当前仅支持规则网格，动画可用create_clip创建空动画，read_document/write_documents编辑clip JSON中的frames(imageId、id、durationUs)、loop、initialFps；帧id新增可省略，重排保留id。单帧变换已有frame-edit草稿配置，按下述流程执行。";
+        "切割配置已改为持久JSON配方：先read_document读取原图的documentId与全文，必要时get_schema查看格式，再用write_documents提交正文和expectedDocumentRevision。新配方items为空，需要明确添加待切单元；新增条目可省略ID，保存会返回ID，后续保留已有ID。slice_sheet只接收assetId、expectedDefinitionRevision和requestId，读取已保存配置执行。重复切割更新原切片而不创建动画，禁止以旧columns/rows工具参数执行。v1规则网格保持原样；v2支持grid/components/boxes与统一固定output画布，先get_schema。透明components用inspect_sheet action=detect取得真实候选key和PNG；检测不要求items或画布，不给候选继承已有ID。显式分组componentKeys，来源/参数过期重新检测；已有ID只在明确编辑同一帧时保留。preview传完整未保存text取得最多16帧一批的真实证据和溢出；候选每页最多128。画布建议必须明确写入配方，scale=1保留选定像素，显式统一nearest缩放，不逐帧contain，不自动合并碎片/硬拆/补帧/去白底；执行溢出会拒绝。已批准方向内可换方法，实际缺帧或方向不符仍返回pre-check。动画可用create_clip创建空动画，read_document/write_documents编辑clip JSON中的frames(imageId、id、durationUs)、loop、initialFps；帧id新增可省略，重排保留id。单帧变换已有frame-edit草稿配置，按下述流程执行。";
       params.developerInstructions +=
         "需要把生成图保存进项目时，调用save_image并自行提供合理的名称和目录，工具本身按权限等待Approve/Deny；不要用额外的用户提问、手动保存表单或结束回合来代替工具审批。审批期间不要结束当前回合；等待工具结果后再继续。用户明确要求仅预览时不保存。";
       params.developerInstructions +=
@@ -631,6 +632,7 @@ export class AgentHub {
         create_frame_draft: "建立动画调整草稿",
         save_frame_draft: "请求保存帧调整",
         view_image: "查看图片",
+        inspect_sheet: "检测切割证据",
         slice_sheet: "切割图集",
         adjust_image: "调整图片",
         inspect_clip: "检查动画证据",
@@ -1676,6 +1678,11 @@ export class AgentHub {
       guard();
       for (const review of inspected.sequence.reviews) attach("reviewIds", review.id);
       return { content: [textContent(JSON.stringify({ ...inspected.sequence, reviews: inspected.sequence.reviews.map(r => ({ ...r, files: undefined, hashes: undefined })), observation: "全部批次静态证据；时序仍unverified，不代表实际速度播放验收" })), ...inspected.sequence.reviews.flatMap(r => evidence(r).slice(1))] };
+    }
+    if (name === "inspect_sheet") {
+      const result = await this.store.sheetInspection.inspect(pid, inspectSheetSchema.parse(input));
+      guard();
+      return { content: [textContent(JSON.stringify(result)), ...result.images.map(image => ({ type: "image", mimeType: "image/png", data: readFileSync(this.store.sheetInspection.imagePath(pid, image.hash)).toString("base64") }))] };
     }
     if (name === "inspect_clip") {
       const spec = z

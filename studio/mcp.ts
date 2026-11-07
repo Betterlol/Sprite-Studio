@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { inspectSheetSchema } from "./sheet-schema.ts";
 import { request as httpRequest } from "node:http";
 import { createInterface } from "node:readline";
 const endpoint = process.argv[2]!;
@@ -154,6 +156,12 @@ const tools = [
       destructiveHint: false,
       openWorldHint: false,
     },
+  },
+  {
+    name: "inspect_sheet",
+    description: "Read-only deterministic transparent-sheet evidence. action=detect requires only assetId/expectedSourceRevision, optional detection {alphaThreshold:16,minComponentPixels:1}, offset/limit (max128 candidates). Returns fresh candidate keys WITHOUT slice IDs and actual overlay PNG. action=preview takes complete unsaved recipe text, start/limit (max16 frames), returns resolved rectangles, fixed-canvas contact PNG, overflow/diagnostics and suggestedOutput. No recipes/assets/clips are saved. Explicitly group keys and adopt a canvas suggestion in recipe text, save with write_documents, then slice_sheet. Inherits read_document and inspect_clip permissions even on cache hits. Do not claim static evidence is visual acceptance or invent missing poses.",
+    inputSchema: { type: "object", ...z.toJSONSchema(inspectSheetSchema) },
+    annotations: { readOnlyHint: true },
   },
   {
     name: "inspect_clip",

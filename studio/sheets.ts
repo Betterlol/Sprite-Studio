@@ -11,7 +11,9 @@ import {
 } from "./store.ts";
 import type { ImageAsset } from "./model.ts";
 
-import { sheetRecipeSchema, type SheetRecipe } from "./sheet-schema.ts";
+import { sheetRecipeSchema, SHEET_ALGORITHM, MAX_SHEET_V2_BYTES, type SheetRecipe } from "./sheet-schema.ts";
+import { checkedPng } from "./sheet-inspection.ts";
+import { join } from "node:path";
 export type { SheetRecipe } from "./sheet-schema.ts";
 export type SheetDocument = {
   documentId: string;
@@ -101,7 +103,7 @@ export class SheetDocuments {
     const text = exists
       ? readFileSync(full, "utf8")
       : jsonBytes(fallback).toString();
-    const recipe = this.parse(pid, id, text),
+    const recipe = this.parse(pid, id, text, "read"),
       definitionRevision = sha256(JSON.stringify(recipe)),
       receipt = this.receipt(pid, id);
     const outputsExist = receipt?.outputIds.every((outputId) => {
@@ -122,7 +124,8 @@ export class SheetDocuments {
       recipe,
       status: !exists
         ? "unconfigured"
-        : receipt?.definitionRevision === definitionRevision &&
+        : (recipe.slicing.method !== "components" || (recipe.slicing.sourceContentHash === source.contentHash && recipe.slicing.algorithmVersion === SHEET_ALGORITHM)) &&
+            receipt?.definitionRevision === definitionRevision &&
             receipt.sourceRevision === source.revision &&
             outputsExist
           ? "ready"
@@ -133,55 +136,66 @@ export class SheetDocuments {
         ) || [],
     };
   }
-  parse(pid: string, id: string, text: string): SheetRecipe {
-    if (Buffer.byteLength(text) > 256 * 1024)
-      throw new StudioError("配置文件超过 256 KB");
+  parse(pid: string, id: string, text: string, mode: "read" | "inspect" | "save" | "execute" = "save"): SheetRecipe {
+    if (Buffer.byteLength(text) > MAX_SHEET_V2_BYTES)
+      throw new StudioError("配置文件超过 512 KB");
     let value: unknown;
-    try {
-      value = JSON.parse(text);
-    } catch {
-      throw new StudioError("INVALID_DOCUMENT：配置不是有效 JSON");
-    }
+    try { value = JSON.parse(text); } catch { throw new StudioError("INVALID_DOCUMENT：配置不是有效 JSON"); }
     const checked = sheetRecipeSchema.safeParse(value);
-    if (!checked.success)
-      throw new StudioError(
-        "INVALID_DOCUMENT：" +
-          checked.error.issues
-            .map((issue) => `/${issue.path.join("/")} ${issue.message}`)
-            .join("；"),
-      );
-    const recipe = checked.data,
-      { grid, items, outputFolder } = recipe.slicing,
-      source = this.source(pid, id);
-    if (grid.columns * grid.rows > 128)
-      throw new StudioError("一次最多切割128格");
-    if (!(outputFolder === "原图素材" || outputFolder.startsWith("原图素材/")))
-      throw new StudioError("切片目录必须位于原图素材分类");
+    if (!checked.success) throw new StudioError("INVALID_DOCUMENT：" + checked.error.issues.map(issue => `/${issue.path.join("/")} ${issue.message}`).join("；"));
+    const recipe = checked.data, slicing = recipe.slicing, source = this.source(pid, id);
+    if (recipe.schemaVersion === 1 && Buffer.byteLength(text) > 256 * 1024) throw new StudioError("配置文件超过 256 KB");
+    const { items, outputFolder } = slicing;
+    if (!(outputFolder === "原图素材" || outputFolder.startsWith("原图素材/"))) throw new StudioError("切片目录必须位于原图素材分类");
     outputFolder.split("/").forEach(entryName);
     this.store.safePath(pid, `Assets/${outputFolder}`);
-    const ids = new Set<string>(),
-      cells = new Set<string>();
+    const ids = new Set<string>(), cells = new Set<string>();
     for (const item of items) {
+      const keys = new Set<string>();
       entryName(item.name);
-      if (item.id && ids.has(item.id))
-        throw new StudioError("切片 ID 不能重复");
+      if (item.id && ids.has(item.id)) throw new StudioError("切片 ID 不能重复");
       if (item.id) ids.add(item.id);
-      if (item.cell[0] >= grid.columns || item.cell[1] >= grid.rows)
-        throw new StudioError("切片单元超出网格");
-      const cell = item.cell.join(",");
-      if (cells.has(cell))
-        throw new StudioError("网格单元不能重复，请保留原切片 ID");
-      cells.add(cell);
+      if ("cell" in item && slicing.method === "grid") {
+        if (item.cell[0] >= slicing.grid.columns || item.cell[1] >= slicing.grid.rows) throw new StudioError("切片单元超出网格");
+        const cell = item.cell.join(",");
+        if (cells.has(cell)) throw new StudioError("网格单元不能重复，请保留原切片 ID");
+        cells.add(cell);
+      }
+      if ("box" in item) {
+        const [l,t,r,b] = item.box;
+        if (!(l < r && t < b) || (mode !== "read" && (r > source.width || b > source.height))) throw new StudioError("矩形超出原图或为空");
+      }
+      if ("componentKeys" in item) for (const key of item.componentKeys) {
+        if (keys.has(key)) throw new StudioError("同一分组的组件key不能重复");
+        keys.add(key);
+      }
     }
-    const [top, right, bottom, left] = grid.margin,
-      [gapX, gapY] = grid.spacing;
-    if (
-      source.width - left - right - gapX * (grid.columns - 1) < grid.columns ||
-      source.height - top - bottom - gapY * (grid.rows - 1) < grid.rows
-    )
-      throw new StudioError("边距、间距或网格数量使切片小于一个像素");
-    this.checkReferences(pid, id, recipe);
+    if (slicing.method === "grid") {
+      const grid = slicing.grid;
+      if (grid.columns * grid.rows > 128) throw new StudioError("一次最多切割128格");
+      const [top,right,bottom,left] = grid.margin, [gx,gy] = grid.spacing;
+      if (source.width-left-right-gx*(grid.columns-1) < grid.columns || source.height-top-bottom-gy*(grid.rows-1) < grid.rows) throw new StudioError("边距、间距或网格数量使切片小于一个像素");
+    }
+    if (mode !== "read" && source.width*source.height > 16_777_216) throw new StudioError("源图像素预算超限");
+    if ("output" in slicing && slicing.output.width*slicing.output.height*items.filter(i => i.enabled).length > 67_108_864) throw new StudioError("输出总解码像素预算超限");
+    if (slicing.method === "components" && mode === "save") this.store.sheetInspection.validateComponents(pid, source.contentHash, slicing);
+    if (slicing.method === "components" && mode === "execute" && (slicing.sourceContentHash !== source.contentHash || slicing.algorithmVersion !== SHEET_ALGORITHM)) throw new StudioError("STALE_ANALYSIS：来源或算法已变化，请重新检测", 409);
+    if (mode === "save" || mode === "execute") {
+      this.checkIdentity(pid, id, recipe);
+      this.checkReferences(pid, id, recipe);
+    }
     return recipe;
+  }
+  private checkIdentity(pid: string, id: string, recipe: SheetRecipe) {
+    const owned = new Set<string>();
+    const currentPath = this.store.safePath(pid, this.path(pid, id));
+    if (existsSync(currentPath)) {
+      // Existing membership is the authority for an edited logical frame, not geometry/name.
+      const old = sheetRecipeSchema.safeParse(JSON.parse(readFileSync(currentPath, "utf8")));
+      if (old.success) for (const item of old.data.slicing.items) if (item.id) owned.add(item.id);
+    }
+    for (const asset of this.store.assets(pid)) if (asset.type === "image" && asset.producer?.sheetId === id) owned.add(asset.producer.sliceId);
+    for (const item of recipe.slicing.items) if (item.id && !owned.has(item.id)) throw new StudioError("切片 ID 不属于当前来源；新条目请省略 ID", 409);
   }
   private checkReferences(pid: string, id: string, recipe: SheetRecipe) {
     const active = new Set(
@@ -283,13 +297,15 @@ export class SheetDocuments {
         409,
       );
     if (!doc.recipe.slicing.items.some((item) => item.enabled))
-      throw new StudioError("请先选择要切割的网格单元");
+      throw new StudioError("请先选择要切割的条目");
+    const sourcePath = this.store.imagePath(pid, id, source.revision);
+    this.parse(pid, id, doc.text, "execute");
     const key = sha256(
         JSON.stringify([
           doc.definitionRevision,
           source.revision,
           source.contentHash,
-          "grid-v1",
+          doc.recipe.schemaVersion === 1 ? "grid-v1" : "sheet-v2-alpha-runs-8-v1",
         ]),
       ),
       receipt = this.receipt(pid, id);
@@ -318,36 +334,70 @@ export class SheetDocuments {
       );
       return receipt;
     }
-    const sourcePath = this.store.imagePath(pid, id, source.revision),
-      result = await this.store.worker.run("recipe_slice", {
-        path: sourcePath,
-        outputDir: this.store.stage(pid),
-        ...doc.recipe.slicing,
-      });
-    if (
-      this.read(pid, id).definitionRevision !== expected ||
-      this.source(pid, id).revision !== source.revision
-    )
-      throw new StudioError(
-        "VERSION_CONFLICT：切割期间配置或来源发生变化，未发布旧结果",
-        409,
-      );
-    this.store.imagePath(pid, id, source.revision);
-    const active = doc.recipe.slicing.items.filter((item) => item.enabled),
-      writes: { path: string; bytes: Buffer }[] = [],
-      outputs: ImageAsset[] = [];
-    const children = this.store
-      .assets(pid)
-      .filter(
-        (asset): asset is ImageAsset =>
-          asset.type === "image" && asset.producer?.sheetId === id,
-      );
-    for (const [index, item] of active.entries()) {
-      const old = children.find((asset) => asset.producer!.sliceId === item.id),
-        bytes = readFileSync(result.files[index]);
-      const folder = old?.folder || doc.recipe.slicing.outputFolder,
+    const children = this.store.assets(pid).filter((asset): asset is ImageAsset => asset.type === "image" && asset.producer?.sheetId === id);
+    const active = doc.recipe.slicing.items.filter(item => item.enabled);
+    const destination = (item: { id?: string; name: string }) => {
+      const old = children.find(asset => asset.producer!.sliceId === item.id),
+        folder = old?.folder || doc.recipe.slicing.outputFolder,
         name = old?.name || `${item.name}-${item.id!.slice(0, 8)}.png`,
-        file = old?.file || `Assets/${folder}/${name}`;
+        file = old?.file || `Assets/${folder}/${name}`,
+        meta = old ? this.store.metaPath(pid, old.id) : file + ".meta.json";
+      return { old, folder, name, file, meta };
+    };
+    const fileBaselines = new Map<string,string>();
+    const track = (path: string) => {
+      if (fileBaselines.has(path)) return;
+      const full = this.store.safePath(pid,path);
+      fileBaselines.set(path,existsSync(full) ? sha256(readFileSync(full)) : "missing");
+    };
+    for (const child of children) {
+      this.store.imagePath(pid, child.id, child.revision);
+      track(child.file!); track(this.store.metaPath(pid,child.id));
+    }
+    for (const item of active) {
+      const {old,file,meta} = destination(item);
+      if (!old && (existsSync(this.store.safePath(pid,file)) || existsSync(this.store.safePath(pid,meta)))) throw new StudioError("输出位置已有同名文件，请修改切片名称",409);
+      track(file); track(meta);
+    }
+    const baseline = JSON.stringify(children.map(a => [a.id, a.revision, a.file]));
+    const recheck = () => {
+      if (this.read(pid, id).definitionRevision !== expected || this.source(pid, id).revision !== source.revision) throw new StudioError("VERSION_CONFLICT：切割期间配置或来源发生变化，未发布旧结果", 409);
+      this.store.imagePath(pid, id, source.revision);
+      const current = this.store.assets(pid).filter((asset): asset is ImageAsset => asset.type === "image" && asset.producer?.sheetId === id);
+      if (baseline !== JSON.stringify(current.map(a => [a.id, a.revision, a.file]))) throw new StudioError("VERSION_CONFLICT：切割期间输出发生变化", 409);
+      for (const child of children) this.store.imagePath(pid, child.id, child.revision);
+      for (const [path,expectedHash] of fileBaselines) {
+        const full = this.store.safePath(pid,path), hash = existsSync(full) ? sha256(readFileSync(full)) : "missing";
+        if (hash !== expectedHash) throw new StudioError("VERSION_CONFLICT：切割输出路径或元数据在发布前变化",409);
+      }
+      this.parse(pid, id, doc.text, "execute");
+    };
+    const stage = this.store.stage(pid);
+    const result = await this.store.worker.run("recipe_slice", {
+      path: sourcePath, outputDir: stage, recipeVersion: doc.recipe.schemaVersion, ...doc.recipe.slicing,
+    }).catch(error => { recheck(); if (String(error.message).includes("STALE_ANALYSIS")) throw new StudioError(error.message, 409); throw error; });
+    recheck();
+    const slicing = doc.recipe.slicing;
+    let width: number, height: number;
+    if ("output" in slicing) { width = slicing.output.width; height = slicing.output.height; }
+    else {
+      const { grid } = slicing, [top,right,bottom,left] = grid.margin, [gx,gy] = grid.spacing;
+      width = Math.ceil((source.width-left-right-gx*(grid.columns-1))/grid.columns);
+      height = Math.ceil((source.height-top-bottom-gy*(grid.rows-1))/grid.rows);
+    }
+    if (width*height*active.length > 67_108_864) throw new StudioError("输出总解码像素预算超限");
+    if (!Array.isArray(result.files) || result.files.length !== active.length || result.width !== width || result.height !== height) throw new StudioError("图像处理输出数量或尺寸不符");
+    const indexes = doc.recipe.slicing.items.flatMap((item,index) => item.enabled ? [index] : []);
+    if (doc.recipe.schemaVersion === 2 && JSON.stringify(result.itemIndexes) !== JSON.stringify(indexes)) throw new StudioError("图像处理输出顺序协议不符");
+    const decoded: Buffer[] = [];
+    for (const [index, file] of result.files.entries()) {
+      if (file !== join(stage, `${String(index).padStart(3,"0")}.png`)) throw new StudioError("图像处理输出文件顺序不符");
+      decoded.push(await checkedPng(this.store, file, stage, width, height));
+    }
+    recheck();
+    const writes: { path: string; bytes: Buffer }[] = [], outputs: ImageAsset[] = [];
+    for (const [index, item] of active.entries()) {
+      const {old,folder,name,file,meta} = destination(item), bytes = decoded[index]!;
       if (old) this.store.imagePath(pid, old.id, old.revision);
       if (
         !old &&
@@ -378,11 +428,13 @@ export class SheetDocuments {
       writes.push(
         { path: file, bytes },
         {
-          path: old ? this.store.metaPath(pid, old.id) : file + ".meta.json",
+          path: meta,
           bytes: jsonBytes(asset),
         },
       );
       const object = `.studio/objects/${asset.contentHash}`;
+      track(object);
+      if (fileBaselines.get(object) !== "missing" && fileBaselines.get(object) !== asset.contentHash) throw new StudioError("不可变输出对象已改变",409);
       if (
         !existsSync(this.store.safePath(pid, object)) &&
         !writes.some((w) => w.path === object)
@@ -421,11 +473,12 @@ export class SheetDocuments {
         bytes: jsonBytes({ sourceId: id, key, receipt: next }),
       },
     );
+    recheck();
     publishFiles(this.store, pid, writes, {
       kind: "slice",
       sourceId: id,
       receipt: next,
-    });
+    }, recheck);
     return next;
   }
 }

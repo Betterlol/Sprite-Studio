@@ -36,6 +36,8 @@ async function fixture() {
     "image",
   );
   const draft = store.sheets.read(pid, image.id);
+  assert.equal(draft.recipe.slicing.method, "grid");
+  if (draft.recipe.slicing.method !== "grid") throw new Error("expected grid");
   draft.recipe.slicing.grid.columns = 2;
   draft.recipe.slicing.items = [
     { cell: [0, 0], name: "01", enabled: true },
@@ -135,6 +137,7 @@ test("recipe text persists; repeat slicing preserves identities, pixels, referen
     );
     const snapshot = store.animation.capture(pid, clip.id);
     const next = store.sheets.read(pid, image.id);
+    if (next.recipe.slicing.method !== "grid") throw new Error("expected grid");
     next.recipe.slicing.items.reverse();
     next.recipe.slicing.items[0]!.cell = [0, 0];
     next.recipe.slicing.items[1]!.cell = [1, 0];

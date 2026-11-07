@@ -59,8 +59,10 @@ export function publishFiles(
   pid: string,
   writes: { path: string; bytes: Buffer }[],
   result: unknown,
+  beforePublish?: () => void,
 ) {
   store.assertWriteAllowed();
+  beforePublish?.();
   const prefix = `.studio/config-operations/${randomUUID()}`;
   mkdirSync(store.safePath(pid, prefix), { recursive: true });
   const directories = new Set<string>();
@@ -90,6 +92,9 @@ export function publishFiles(
     (a, b) => a.split("/").length - b.split("/").length,
   );
   const journal = store.safePath(pid, prefix + "/operation.json");
+  // Recheck before a prepared journal exists: a rejected baseline must not be
+  // rolled back over somebody else's changes at recovery.
+  beforePublish?.();
   atomicJson(journal, record);
   try {
     for (const folder of record.directories)

@@ -267,7 +267,7 @@ const tools = [
   },
   {
     name: "save_clip_draft",
-    description: "Commit the exact full object draft once. Requires approved task direction AND tool permission; inherits save_frame_draft policies. Uses a publish-time intent/session/barrier guard, preserves original pixels and history. No model may report success before receipt. Rendering/checking is not dynamic playback acceptance.",
+    description: "Commit the exact full object draft once. Requires approved task direction AND tool permission; inherits save_frame_draft policies. Uses a publish-time intent/session/barrier guard, preserves original pixels and history. Human-draft derivatives return {saved:false,delivered:true,pendingHumanAdoption:true,delivery:{draftId,documentRevision,snapshotId,target}}; they freeze a read-only proposal and NEVER publish the clip. The user explicitly adopts it into the source human draft with CAS, then separately saves the animation (legacy frame-edit sources explicitly start a new unified human session and remain untouched). Normal Agent production still saves autonomously. No model may report success before receipt. Rendering/checking is not dynamic playback acceptance.",
     inputSchema: { type: "object", properties: { draftId: idProperty, documentRevision: { type: "string" } }, required: ["draftId", "documentRevision"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },

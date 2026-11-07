@@ -13,6 +13,7 @@ import { ProjectStore, sha256 } from "./store.ts";
 import { AgentHub } from "./agent.ts";
 import { registerWorkflowRoutes } from "./workflow-routes.ts";
 import { permissionTools, defaultToolPolicies } from "./tool-permissions.ts";
+import { contextFor, DraftQueue, taskCreationTarget, taskReviewContract, directionPayload, directionMaterial } from "../web/workflow-state.ts";
 import type { ProductionTask } from "./workflow-model.ts";
 
 class StubRuntime extends EventEmitter {
@@ -107,7 +108,9 @@ test("real store/worker: initial direction generation audit, frozen one-click pr
     const binding = { sessionId: session.id, approvalId: approval.id };
     assert.equal((await f.api(`${f.taskPath(task.id)}/direction`, { expectedRevision: task.revision - 1, accept: true, generatedId: generated.id, toolApproval: binding })).statusCode, 409);
     assert.equal(f.store.assets(f.pid).length, 1);
-    const decision = await f.api(`${f.taskPath(task.id)}/direction`, { expectedRevision: task.revision, accept: true, generatedId: generated.id, toolApproval: binding });
+    const rejectedBlank = await f.api(`${f.taskPath(task.id)}/direction`, { ...directionPayload(task, session, true, ""), accept: false, feedback: "" });
+    assert.equal(rejectedBlank.statusCode, 400); assert.equal(f.store.tasks.get(f.pid, task.id).revision, task.revision);
+    const decision = await f.api(`${f.taskPath(task.id)}/direction`, directionPayload(task, session, true, "   "));
     assert.equal(decision.statusCode, 200, decision.body);
     const saved = result(await save); assert.equal(saved.name, "approved-sheet.png");
     await waitFor(() => f.runtimes.length === 2 && session.status === "running" && session.turnId);
@@ -255,7 +258,10 @@ test("draft-only contexts freeze unsaved full body, provide transformed pixels/h
     const next = JSON.parse(derived.text); next.frames[1].durationUs = 240000;
     const written = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: derived.documentId, expectedDocumentRevision: derived.documentRevision, text: JSON.stringify(next) }] }))[0];
     const saved = result(await f.hub.tool(session.id, "save_clip_draft", { draftId: derived.documentId, documentRevision: written.documentRevision }));
-    assert.equal(saved.clip.frames[0].durationUs, 190000); assert.equal(saved.clip.frames[1].durationUs, 240000);
+    assert.equal(saved.saved, false); assert.equal(saved.delivered, true); assert.equal(saved.pendingHumanAdoption, true);
+    const proposal = f.store.animation.snapshot(f.pid, saved.delivery.snapshotId);
+    assert.equal(proposal.clip.frames[0]!.durationUs, 190000); assert.equal(proposal.clip.frames[1]!.durationUs, 240000);
+    assert.equal(f.store.animation.clip(f.pid, clip.id).revision, clip.revision);
     assert.equal(f.store.clipDrafts.read(f.pid, human.documentId).text, edited.text);
     assert.equal(f.store.generated.record(f.pid, generated.id).sessionId, session.id);
   } finally { await f.cleanup(); }
@@ -721,7 +727,7 @@ test("review I4: reversible Review archive releases the last definition lease, e
     const clip = f.clip();
     let definition = f.store.reviewSequences.create(f.pid, { requestId: randomUUID(), name: "last definition", loop: true, segments: [{ id: randomUUID(), clipId: clip.id }] });
     const captured = f.store.reviewSequences.capture(f.pid, definition.id), inspected = await f.store.reviewSequences.inspect(f.pid, definition.id, { snapshotId: captured.id });
-    const task = await f.create({ target: { mode: "saved", clipId: clip.id }, contract: { reviewSequenceId: definition.id } });
+    const task = await f.create({ target: { mode: "saved", clipId: clip.id }, contract: taskReviewContract(definition.id, [definition]) });
     const archivePath = `/api/projects/${f.pid}/review-sequences/${definition.id}/archive`;
     assert.equal((await f.api(archivePath, { expectedRevision: definition.revision, archived: true })).statusCode, 409);
     await f.hub.taskAction(f.pid, task.id, { expectedRevision: task.revision, action: "stop" });
@@ -887,6 +893,406 @@ test("round2 N1: a legacy save rechecks historical ownership after the final rea
     release(); await rejected;
     assert.equal(guardCalls, 1); assert.deepEqual(f.store.animation.clip(f.pid, clip.id).frames, clip.frames); assert.equal(f.store.animation.changes.has(draft.documentId), false);
     const historical = f.store.frameDrafts.get(f.pid, draft.documentId); assert.equal(historical.readOnly, true); assert.equal(historical.text, edited.text); assert.equal(historical.status, "editing");
+  } finally { await f.cleanup(); }
+});
+
+for (const mode of ["task", "ordinary", "legacy"] as const) test(`N1 lease: ${mode} fixed proposal protects exclusive transform dependencies, transfers to human, and releases after save`, async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(1), transformed = await f.store.transform(f.pid, f.image.id, f.image.revision, { scale: 0.8 });
+    const source = mode === "legacy" ? f.store.frameDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }, "human") : f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "human");
+    let task = mode === "task" ? await f.create({ target: { mode: "draft", draftId: source.documentId, documentRevision: source.documentRevision } }) : undefined;
+    if (task) task = f.approveExisting(task, task.target!.snapshotId);
+    const session = task ? f.store.session(task.sessionId!) : f.store.createSession(f.pid);
+    let agent = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, fromDraftId: source.documentId }, "agent", session.id, task ? { taskId: task.id, intentVersion: task.intentVersion } : undefined);
+    if (task) f.store.tasks.registerDraft(f.pid, task.id, { sessionId: session.id, intentVersion: task.intentVersion, barrierVersion: task.barrierVersion, draftId: agent.documentId, kind: "clip" });
+    const body = JSON.parse(agent.text); body.frames[0].imageId = transformed.id;
+    agent = f.store.clipDrafts.write(f.pid, agent.documentId, { expectedDocumentRevision: agent.documentRevision, text: JSON.stringify(body) });
+    const selection = { assetIds: [transformed.id], folders: [] };
+    const blocked = () => {
+      assert.ok(f.store.library.planDelete(f.pid, selection).blockers.some(blocker => /冻结图片/.test(blocker.reason)));
+      assert.throws(() => f.store.library.delete(f.pid, selection, f.store.library.revision(f.pid)), (error: any) => error.statusCode === 409 && /冻结图片/.test(error.message));
+    };
+    assert.ok(!JSON.parse(source.text).frames.some((frame: any) => frame.imageId === transformed.id));
+    blocked();
+    const delivery = await f.store.clipDrafts.deliver(f.pid, agent.documentId, agent.documentRevision, () => {});
+    assert.equal(f.store.clipDrafts.read(f.pid, agent.documentId).draft.readOnly, true);
+    assert.equal(f.store.tasks.draftHoldsLease(f.pid, agent.draft), true);
+    assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, agent.documentId), true);
+    blocked();
+    const changedSourceBody = JSON.parse(source.text); changedSourceBody.frames[0].durationUs += 1000;
+    const changedSource = f.store.documents.write(f.pid, [{ documentId: source.documentId, expectedDocumentRevision: source.documentRevision, text: JSON.stringify(changedSourceBody) }])[0]!;
+    assert.notEqual(changedSource.documentRevision, source.documentRevision);
+    assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, agent.documentId), true, "temporary CAS conflict must not release an undo-revivable proposal"); blocked();
+    const restoredSource = f.store.documents.write(f.pid, [{ documentId: source.documentId, expectedDocumentRevision: changedSource.documentRevision, text: source.text }])[0]!;
+    assert.equal(restoredSource.documentRevision, source.documentRevision, "undo returns to the exact content-hash version"); blocked();
+    if (mode === "legacy") {
+      f.store.frameDrafts.persist({ ...f.store.frameDrafts.get(f.pid, source.documentId), status: "pending" });
+      assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, agent.documentId), true, "temporary approval state is not a terminal lifecycle"); blocked();
+      f.store.frameDrafts.persist({ ...f.store.frameDrafts.get(f.pid, source.documentId), status: "editing" });
+    }
+    const pixels = readFileSync((await f.store.animation.renderFrame(f.pid, delivery.snapshotId, clip.frames[0]!.id)).path);
+    const adoption = await f.api(`/api/projects/${f.pid}/clip-drafts/${source.documentId}/adopt`, { expectedDocumentRevision: source.documentRevision, resultDraftId: agent.documentId, expectedResultDocumentRevision: agent.documentRevision });
+    assert.equal(adoption.statusCode, 200, adoption.body); let human = adoption.json();
+    assert.equal(JSON.parse(human.text).frames[0].imageId, transformed.id);
+    assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, agent.documentId), false, "consumed fixed result no longer holds a duplicate lease");
+    assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, human.documentId), true); blocked();
+    const humanBody = JSON.parse(human.text); humanBody.frames[0].imageId = f.image.id;
+    human = f.store.clipDrafts.write(f.pid, human.documentId, { expectedDocumentRevision: human.documentRevision, text: JSON.stringify(humanBody) });
+    assert.ok(f.store.clipDrafts.dependencyImageIds(f.pid, human.documentId).includes(transformed.id), "human protects every frozen dependency, even after removing it from current text");
+    blocked();
+    const saved = await f.api(`/api/projects/${f.pid}/clip-drafts/${human.documentId}/save`, { documentRevision: human.documentRevision });
+    assert.equal(saved.statusCode, 200, saved.body);
+    assert.deepEqual(f.store.library.planDelete(f.pid, selection).blockers, [], "saved human and consumed proposal release the unused dependency even if task/source still exists");
+    f.store.library.delete(f.pid, selection, f.store.library.revision(f.pid));
+    assert.equal(f.store.clipDrafts.read(f.pid, agent.documentId).text, agent.text);
+    assert.deepEqual(f.store.clipDrafts.read(f.pid, agent.documentId).draft.delivery, delivery);
+    assert.deepEqual(readFileSync((await f.store.animation.renderFrame(f.pid, delivery.snapshotId, clip.frames[0]!.id)).path), pixels);
+  } finally { await f.cleanup(); }
+});
+
+test("N1 lease: stopped/old-intent task proposals and explicitly ended taskless sources release without deleting history", async () => {
+  const f = await fixture();
+  try {
+    const transformed = await f.store.transform(f.pid, f.image.id, f.image.revision, { scale: 0.8 }), selection = { assetIds: [transformed.id], folders: [] };
+    for (const end of ["stop", "intent", "discard-source", "discard-result"] as const) {
+      const clip = f.clip(1), human = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "human");
+      let task = ["stop", "intent"].includes(end) ? await f.create({ target: { mode: "draft", draftId: human.documentId, documentRevision: human.documentRevision } }) : undefined;
+      if (task) task = f.approveExisting(task, task.target!.snapshotId);
+      const session = task ? f.store.session(task.sessionId!) : f.store.createSession(f.pid);
+      let result = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, fromDraftId: human.documentId }, "agent", session.id, task ? { taskId: task.id, intentVersion: task.intentVersion } : undefined);
+      const body = JSON.parse(result.text); body.frames[0].imageId = transformed.id;
+      result = f.store.clipDrafts.write(f.pid, result.documentId, { expectedDocumentRevision: result.documentRevision, text: JSON.stringify(body) });
+      const delivery = await f.store.clipDrafts.deliver(f.pid, result.documentId, result.documentRevision, () => {});
+      assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, result.documentId), true);
+      assert.ok(f.store.library.planDelete(f.pid, selection).blockers.some(blocker => /冻结图片/.test(blocker.reason)));
+      if (end === "stop" || end === "intent") f.store.tasks.action(f.pid, task!.id, { expectedRevision: f.store.tasks.get(f.pid, task!.id).revision, action: end === "stop" ? "stop" : "feedback", ...(end === "intent" ? { text: "明确新意图，旧结果转历史", feedbackKind: "local" as const } : {}) });
+      else if (end === "discard-source") f.store.clipDrafts.discard(f.pid, human.documentId, human.documentRevision);
+      else f.store.clipDrafts.discard(f.pid, result.documentId, result.documentRevision);
+      assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, result.documentId), false);
+      assert.deepEqual(f.store.library.planDelete(f.pid, selection).blockers, []);
+      assert.equal(f.store.clipDrafts.read(f.pid, result.documentId).text, result.text);
+      assert.deepEqual(f.store.clipDrafts.read(f.pid, result.documentId).draft.delivery, delivery);
+      assert.ok((await f.store.animation.renderFrame(f.pid, delivery.snapshotId, clip.frames[0]!.id)).path);
+    }
+    f.store.library.delete(f.pid, selection, f.store.library.revision(f.pid));
+  } finally { await f.cleanup(); }
+});
+
+test("final R1: actual UI queue/context/frame/whole payloads freeze through HTTP tasks and messages", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(3);
+    const human = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "human");
+    const path = `/api/projects/${f.pid}/clip-drafts/${human.documentId}`;
+    const q = new DraftQueue(human, async (expectedDocumentRevision, text) => {
+      const response = await f.api(path, { expectedDocumentRevision, text }, "PUT");
+      assert.equal(response.statusCode, 200, response.body); return response.json();
+    });
+    for (const edited of [false, true]) {
+      if (edited) {
+        const body = JSON.parse(q.document.text); body.frames.reverse(); body.frames.forEach((frame: any, i: number) => { frame.durationUs = 170000 + i * 20000; frame.transform = { scale: 0.7, offsetX: i, offsetY: 0, clip: false }; });
+        q.enqueue(JSON.stringify(body, null, 2));
+      }
+      const stable = await q.flush();
+      const frameId = JSON.parse(stable.text).frames[1].id;
+      for (const scope of ["frame", "whole"] as const) {
+        const context = taskCreationTarget(contextFor(clip, frameId, stable), scope)!;
+        assert.equal(context.snapshotId, undefined, "baseSnapshot is never the draft body");
+        const task = await f.create({ target: context });
+        assert.notEqual(task.target!.snapshotId, human.draft.baseSnapshotId);
+        const frozen = f.store.animation.snapshot(f.pid, task.target!.snapshotId!);
+        assert.deepEqual(frozen.clip.frames, JSON.parse(stable.text).frames);
+        assert.deepEqual(task.contract.scope, scope === "frame" ? { clipId: clip.id, startFrameId: frameId, endFrameId: frameId } : { clipId: clip.id });
+        const session = await f.begin(task, context);
+        assert.equal(session.editingContext!.snapshotId, task.target!.snapshotId);
+        await (f.hub as any).notification(session, { method: "turn/completed", params: { threadId: session.threadId, turn: { id: session.turnId, status: "completed" } } });
+      }
+    }
+    const wrong = await f.api(`/api/projects/${f.pid}/tasks`, { requestId: randomUUID(), title: "bad baseline", description: "", target: { ...contextFor(clip, undefined, q.document), snapshotId: human.draft.baseSnapshotId } });
+    assert.equal(wrong.statusCode, 409); assert.match(wrong.body, /草稿快照/);
+  } finally { await f.cleanup(); }
+});
+
+test("final R10: trusted Agent result returns to human draft with dual CAS, never auto-publishes", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(1); let human = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "human");
+    const humanBody = JSON.parse(human.text); humanBody.frames[0].durationUs = 170000;
+    human = f.store.clipDrafts.write(f.pid, human.documentId, { expectedDocumentRevision: human.documentRevision, text: JSON.stringify(humanBody) });
+    const source = structuredClone(human), context = contextFor(clip, undefined, human);
+    let task = await f.create({ target: context }); task = f.approveExisting(task, task.target!.snapshotId);
+    const session = await f.begin(task, context);
+    const agent = result(await f.hub.tool(session.id, "create_clip_draft", { clipId: clip.id, revision: clip.revision, fromDraftId: human.documentId, expectedFromDocumentRevision: human.documentRevision }));
+    assert.deepEqual(agent.draft.deliveryTarget, { draftId: human.documentId, documentRevision: human.documentRevision });
+    const body = JSON.parse(agent.text); body.frames[0].durationUs = 190000;
+    const edited = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: agent.documentId, expectedDocumentRevision: agent.documentRevision, text: JSON.stringify(body) }] }))[0];
+    const delivered = result(await f.hub.tool(session.id, "save_clip_draft", { draftId: agent.documentId, documentRevision: edited.documentRevision }));
+    assert.equal(delivered.saved, false); assert.equal(delivered.delivered, true); assert.equal(delivered.pendingHumanAdoption, true);
+    assert.ok(session.messages.some(message => message.clipDraftIds?.includes(agent.documentId)));
+    await f.emit(session.id, "item/completed", { id: "proposal-delivered", type: "mcpToolCall", tool: "save_clip_draft", status: "completed", result: { content: [{ type: "text", text: JSON.stringify(delivered) }] } });
+    assert.equal(session.activities.find(activity => activity.id === "proposal-delivered")!.status, "completed");
+    await f.emit(session.id, "item/completed", { id: "real-save-failure", type: "mcpToolCall", tool: "save_clip_draft", status: "completed", result: { content: [{ type: "text", text: JSON.stringify({ saved: false, reason: "real failure" }) }] } });
+    assert.equal(session.activities.find(activity => activity.id === "real-save-failure")!.status, "failed");
+    assert.equal(f.store.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 100000);
+    assert.deepEqual(f.store.clipDrafts.read(f.pid, human.documentId), source);
+    const proposal = f.store.clipDrafts.read(f.pid, agent.documentId); assert.equal(proposal.draft.readOnly, true);
+    assert.equal(f.store.animation.snapshot(f.pid, delivered.delivery.snapshotId).clip.frames[0]!.durationUs, 190000);
+    assert.deepEqual(result(await f.hub.tool(session.id, "save_clip_draft", { draftId: agent.documentId, documentRevision: edited.documentRevision })), delivered, "retry reads the same result, not a new publication");
+    await assert.rejects(f.store.clipDrafts.save(f.pid, agent.documentId, edited.documentRevision), /只能交付待采用/);
+    const dirtyReady = await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "ready" });
+    assert.equal(dirtyReady.statusCode, 409); assert.match(dirtyReady.body, /待显式采用/);
+    await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "handoff" });
+    const adoptPath = `/api/projects/${f.pid}/clip-drafts/${human.documentId}/adopt`;
+    const wrongResult = await f.api(adoptPath, { expectedDocumentRevision: human.documentRevision, resultDraftId: agent.documentId, expectedResultDocumentRevision: "wrong" });
+    assert.equal(wrongResult.statusCode, 409); assert.equal(f.store.clipDrafts.read(f.pid, human.documentId).text, human.text);
+    const otherClip = f.clip(1), otherHuman = f.store.clipDrafts.create(f.pid, { clipId: otherClip.id, revision: otherClip.revision }, "human");
+    assert.equal((await f.api(`/api/projects/${f.pid}/clip-drafts/${otherHuman.documentId}/adopt`, { expectedDocumentRevision: otherHuman.documentRevision, resultDraftId: agent.documentId, expectedResultDocumentRevision: edited.documentRevision })).statusCode, 409);
+    const adopted = await f.api(adoptPath, { expectedDocumentRevision: human.documentRevision, resultDraftId: agent.documentId, expectedResultDocumentRevision: edited.documentRevision });
+    assert.equal(adopted.statusCode, 200, adopted.body); human = adopted.json();
+    assert.equal(human.draft.source, "human"); assert.equal(human.documentId, source.documentId); assert.equal(JSON.parse(human.text).frames[0].durationUs, 190000);
+    assert.equal(f.store.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 100000);
+    assert.equal(f.store.clipDrafts.read(f.pid, agent.documentId).text, edited.text);
+    assert.ok(readFileSync(f.store.safePath(f.pid, `.studio/clip-draft-history/${source.documentId}-${source.documentRevision}.json`), "utf8").includes(source.documentRevision));
+    const saved = await f.api(`/api/projects/${f.pid}/clip-drafts/${human.documentId}/save`, { documentRevision: human.documentRevision });
+    assert.equal(saved.statusCode, 200, saved.body); assert.equal(f.store.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 190000);
+  } finally { await f.cleanup(); }
+});
+
+for (const linkedTask of [false, true]) test(`final R10 aliases: ${linkedTask ? "task" : "ordinary"} human collaboration cannot publish via old saves or direct clip config`, async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(1); let human = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "human");
+    const body = JSON.parse(human.text); body.frames[0].durationUs = 170000;
+    human = f.store.clipDrafts.write(f.pid, human.documentId, { expectedDocumentRevision: human.documentRevision, text: JSON.stringify(body) });
+    const context = contextFor(clip, undefined, human);
+    let task = linkedTask ? await f.create({ target: context }) : undefined;
+    if (task) task = f.approveExisting(task, task.target!.snapshotId);
+    const session = task ? f.store.session(task.sessionId!) : f.store.createSession(f.pid);
+    // Old Agent work created before the human collaboration must not become an
+    // alternate publication capability after the explicit source handoff.
+    const oldFrame = f.store.frameDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }, "agent", session.id);
+    const oldClip = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "agent", session.id);
+    if (task) await f.begin(task, context); else { f.hub.send(session.id, "改我的未保存人稿", [], randomUUID(), undefined, [], undefined, undefined, context); await waitFor(() => session.status === "running" && session.turnId); }
+    const formal = f.store.documents.read(f.pid, clip.id);
+    for (const [tool, args] of [["create_frame_draft", { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }], ["save_frame_draft", { draftId: oldFrame.documentId, documentRevision: oldFrame.documentRevision }], ["save_clip_draft", { draftId: oldClip.documentId, documentRevision: oldClip.documentRevision }], ["write_documents", { documents: [{ documentId: clip.id, expectedDocumentRevision: formal.documentRevision, text: formal.text }] }]] as const) await assert.rejects(f.hub.tool(session.id, tool, args), /人工草稿协作.*显式采用/);
+    assert.equal(f.store.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 100000); assert.equal(f.store.clipDrafts.read(f.pid, human.documentId).text, human.text);
+    assert.equal(f.store.frameDrafts.get(f.pid, oldFrame.documentId).status, "editing"); assert.equal(f.store.clipDrafts.read(f.pid, oldClip.documentId).draft.status, "editing");
+  } finally { await f.cleanup(); }
+});
+
+test("final R10 legacy source: explicit adoption starts unified human session without truncating result or editing old v2", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(1); let legacy = f.store.frameDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }, "human");
+    const sourceBody = JSON.parse(legacy.text); sourceBody.frames[0].durationUs = 170000;
+    legacy = f.store.documents.write(f.pid, [{ documentId: legacy.documentId, expectedDocumentRevision: legacy.documentRevision, text: JSON.stringify(sourceBody) }])[0]!;
+    let task = await f.create({ target: { mode: "draft", draftId: legacy.documentId, documentRevision: legacy.documentRevision } }); task = f.approveExisting(task, task.target!.snapshotId);
+    const session = await f.begin(task);
+    const draft = result(await f.hub.tool(session.id, "create_clip_draft", { clipId: clip.id, revision: clip.revision, fromDraftId: legacy.documentId, expectedFromDocumentRevision: legacy.documentRevision }));
+    assert.deepEqual(draft.draft.deliveryTarget, { draftId: legacy.documentId, documentRevision: legacy.documentRevision, kind: "frame" });
+    const body = JSON.parse(draft.text); body.frames[0].durationUs = 190000; body.frames.push({ id: randomUUID(), imageId: f.image.id, durationUs: 210000 });
+    const edited = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: draft.documentRevision, text: JSON.stringify(body) }] }))[0];
+    const delivered = result(await f.hub.tool(session.id, "save_clip_draft", { draftId: draft.documentId, documentRevision: edited.documentRevision }));
+    assert.equal(delivered.delivered, true); assert.equal(delivered.saved, false); assert.equal(f.store.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 100000);
+    await f.hub.taskAction(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "handoff" });
+    const path = `/api/projects/${f.pid}/clip-drafts/${legacy.documentId}/adopt`;
+    assert.equal((await f.api(path, { expectedDocumentRevision: legacy.documentRevision, resultDraftId: draft.documentId, expectedResultDocumentRevision: "wrong" })).statusCode, 409);
+    const adopted = await f.api(path, { expectedDocumentRevision: legacy.documentRevision, resultDraftId: draft.documentId, expectedResultDocumentRevision: edited.documentRevision });
+    assert.equal(adopted.statusCode, 200, adopted.body); const human = adopted.json();
+    assert.notEqual(human.documentId, legacy.documentId); assert.equal(human.draft.source, "human"); assert.deepEqual(JSON.parse(human.text), body);
+    assert.equal(f.store.frameDrafts.read(f.pid, legacy.documentId).text, legacy.text); assert.equal(f.store.animation.clip(f.pid, clip.id).frames.length, 1);
+    sourceBody.frames[0].durationUs = 230000;
+    const changed = f.store.documents.write(f.pid, [{ documentId: legacy.documentId, expectedDocumentRevision: legacy.documentRevision, text: JSON.stringify(sourceBody) }])[0]!;
+    for (const expectedDocumentRevision of [legacy.documentRevision, changed.documentRevision]) assert.equal((await f.api(path, { expectedDocumentRevision, resultDraftId: draft.documentId, expectedResultDocumentRevision: edited.documentRevision })).statusCode, 409);
+    assert.equal(f.store.clipDrafts.read(f.pid, draft.documentId).text, edited.text); assert.equal(f.store.frameDrafts.read(f.pid, legacy.documentId).text, changed.text);
+    const saved = await f.api(`/api/projects/${f.pid}/clip-drafts/${human.documentId}/save`, { documentRevision: human.documentRevision });
+    assert.equal(saved.statusCode, 200, saved.body); assert.equal(f.store.animation.clip(f.pid, clip.id).frames.length, 2); assert.equal(f.store.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 190000);
+  } finally { await f.cleanup(); }
+});
+
+test("final R10: a newer human revision cannot authorize overwriting proposal's older source", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(1), source = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "human");
+    const agent = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, fromDraftId: source.documentId }, "agent", f.store.createSession(f.pid).id);
+    const body = JSON.parse(agent.text); body.frames[0].durationUs = 190000;
+    const result = f.store.clipDrafts.write(f.pid, agent.documentId, { expectedDocumentRevision: agent.documentRevision, text: JSON.stringify(body) });
+    await f.store.clipDrafts.deliver(f.pid, agent.documentId, result.documentRevision, () => {});
+    const mine = JSON.parse(source.text); mine.frames[0].durationUs = 230000;
+    const changed = f.store.clipDrafts.write(f.pid, source.documentId, { expectedDocumentRevision: source.documentRevision, text: JSON.stringify(mine) });
+    for (const expectedDocumentRevision of [source.documentRevision, changed.documentRevision]) {
+      const rejected = await f.api(`/api/projects/${f.pid}/clip-drafts/${source.documentId}/adopt`, { expectedDocumentRevision, resultDraftId: agent.documentId, expectedResultDocumentRevision: result.documentRevision });
+      assert.equal(rejected.statusCode, 409); assert.match(rejected.body, /正文已变化/);
+    }
+    assert.equal(f.store.clipDrafts.read(f.pid, source.documentId).text, changed.text); assert.equal(f.store.clipDrafts.read(f.pid, agent.documentId).text, result.text);
+    assert.equal(f.store.animation.clip(f.pid, clip.id).revision, clip.revision);
+    assert.throws(() => f.store.clipDrafts.write(f.pid, agent.documentId, { expectedDocumentRevision: result.documentRevision, text: agent.text }), /只读/);
+  } finally { await f.cleanup(); }
+});
+
+for (const collaboration of [false, true]) test(`final R3: last successful repair can ${collaboration ? "deliver human proposal" : "publish"}, but another body/write cannot bypass limit`, async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(1), human = collaboration ? f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "human") : undefined;
+    let task = await f.create({ target: contextFor(clip, undefined, human), contract: { repairLimit: 1 } }); task = f.approveExisting(task, task.target!.snapshotId);
+    const session = await f.begin(task, human ? contextFor(clip, undefined, human) : undefined);
+    const draft = result(await f.hub.tool(session.id, "create_clip_draft", { clipId: clip.id, revision: clip.revision, ...(human ? { fromDraftId: human.documentId, expectedFromDocumentRevision: human.documentRevision } : {}) }));
+    const body = JSON.parse(draft.text); body.frames[0].transform = { scale: 1, offsetX: 50, offsetY: 0, clip: false };
+    const write = async (document: any, value: any) => result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: document.documentRevision, text: JSON.stringify(value) }] }))[0];
+    const failed = await write(draft, body);
+    await f.hub.tool(session.id, "inspect_clip", { draftId: draft.documentId, documentRevision: failed.documentRevision });
+    assert.equal(f.store.tasks.checksForIntent(f.pid, task.id).at(-2)!.status, "failed");
+    body.frames[0].transform.offsetX = 0; body.frames[0].durationUs = 190000;
+    const fixed = await write(failed, body);
+    await f.hub.tool(session.id, "inspect_clip", { draftId: draft.documentId, documentRevision: fixed.documentRevision });
+    task = f.store.tasks.get(f.pid, task.id); assert.equal(task.repairRounds!.length, 1); assert.equal(task.repairRounds![0]!.improved, true);
+    const changedBody = structuredClone(body); changedBody.frames[0].durationUs = 210000;
+    await assert.rejects(write(fixed, changedBody), /修复已停止.*limit/);
+    const forced = f.store.guarded(() => {}, () => f.store.clipDrafts.write(f.pid, draft.documentId, { expectedDocumentRevision: fixed.documentRevision, text: JSON.stringify(changedBody) }));
+    await assert.rejects(f.hub.tool(session.id, "save_clip_draft", { draftId: draft.documentId, documentRevision: forced.documentRevision }), /修复已停止.*limit/);
+    const restored = f.store.guarded(() => {}, () => f.store.clipDrafts.write(f.pid, draft.documentId, { expectedDocumentRevision: forced.documentRevision, text: JSON.stringify(body) }));
+    assert.equal(restored.documentRevision, fixed.documentRevision);
+    const published = result(await f.hub.tool(session.id, "save_clip_draft", { draftId: draft.documentId, documentRevision: fixed.documentRevision }));
+    assert.equal(published.saved, !collaboration); assert.equal(published.delivered, collaboration ? true : undefined);
+    assert.equal(f.store.animation.clip(f.pid, clip.id).frames[0]!.durationUs, collaboration ? 100000 : 190000);
+    assert.equal(f.store.tasks.get(f.pid, task.id).repairRounds!.length, 1);
+  } finally { await f.cleanup(); }
+});
+
+test("final R3: exact legacy final repair survives its existing pending save approval guard", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(1); let task = await f.create({ target: contextFor(clip), contract: { repairLimit: 1 } }); task = f.approveExisting(task, task.target!.snapshotId);
+    const session = await f.begin(task);
+    const draft = result(await f.hub.tool(session.id, "create_frame_draft", { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }));
+    const body = JSON.parse(draft.text); body.frames[0].transform.offsetX = 50;
+    const write = async (document: any) => result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: draft.documentId, expectedDocumentRevision: document.documentRevision, text: JSON.stringify(body) }] }))[0];
+    const failed = await write(draft); await f.hub.tool(session.id, "inspect_clip", { draftId: draft.documentId, documentRevision: failed.documentRevision });
+    body.frames[0].transform.offsetX = 0; body.frames[0].durationUs = 190000;
+    const fixed = await write(failed); await f.hub.tool(session.id, "inspect_clip", { draftId: draft.documentId, documentRevision: fixed.documentRevision });
+    assert.equal(f.store.tasks.get(f.pid, task.id).repairRounds!.at(-1)!.improved, true);
+    f.store.permissions.write({ save_frame_draft: "ask" });
+    const saving = f.hub.tool(session.id, "save_frame_draft", { draftId: draft.documentId, documentRevision: fixed.documentRevision });
+    await waitFor(() => session.frameSaveApproval);
+    await f.hub.resolveFrameSave(session.id, session.frameSaveApproval!.id, true);
+    assert.equal(result(await saving).saved, true); assert.equal(f.store.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 190000);
+  } finally { await f.cleanup(); }
+});
+
+test("final R4: invalid whole messages leave accepted task and session unchanged, then valid request advances exactly once", async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(), other = f.clip();
+    let task = await f.create({ target: contextFor(clip) }); task = f.approveExisting(task, task.target!.snapshotId);
+    const session = await f.begin(task);
+    const ready = result(await f.hub.tool(session.id, "workflow_task", { action: "ready" }));
+    task = f.store.tasks.action(f.pid, task.id, { expectedRevision: ready.task.revision, action: "accept", snapshotId: ready.snapshot.id });
+    await (f.hub as any).notification(session, { method: "turn/completed", params: { threadId: session.threadId, turn: { id: session.turnId, status: "completed" } } });
+    const beforeTask = structuredClone(f.store.tasks.get(f.pid, task.id)), beforeSession = structuredClone(session), count = f.runtimes.length;
+    const staleReference = { clipId: other.id, revision: other.revision };
+    f.store.updateClip(f.pid, other.id, { revision: other.revision, loop: other.loop, frames: other.frames.map(frame => ({ ...frame, durationUs: 120000 })) });
+    for (const extra of [{ clipReferences: [staleReference] }, { assetIds: [randomUUID()] }, { context: { ...contextFor(clip), revision: "invalid explicit source" }, feedbackKind: "local" }, { context: contextFor(other), feedbackKind: "local" }]) {
+      const request = { requestId: randomUUID(), taskId: task.id, text: "继续局部制作", ...extra };
+      for (let repeat = 0; repeat < 2; repeat++) {
+        const rejected = await f.api(`/api/sessions/${session.id}/messages`, request);
+        assert.ok(rejected.statusCode >= 400 && rejected.statusCode < 500, rejected.body);
+        assert.deepEqual(f.store.tasks.get(f.pid, task.id), beforeTask); assert.deepEqual(session, beforeSession);
+        assert.equal(f.runtimes.length, count); assert.ok(!session.messages.some(message => message.id === request.requestId));
+      }
+    }
+    const valid = { requestId: randomUUID(), taskId: task.id, text: "继续局部制作", context: contextFor(clip), feedbackKind: "local" };
+    assert.equal((await f.api(`/api/sessions/${session.id}/messages`, valid)).statusCode, 202);
+    await waitFor(() => session.status === "running" && session.turnId);
+    const advanced = f.store.tasks.get(f.pid, task.id); assert.equal(advanced.intentVersion, beforeTask.intentVersion + 1); assert.equal(advanced.barrierVersion, beforeTask.barrierVersion + 1);
+    assert.equal((await f.api(`/api/sessions/${session.id}/messages`, valid)).statusCode, 202);
+    assert.equal(f.store.tasks.get(f.pid, task.id).revision, advanced.revision); assert.equal(session.messages.filter(message => message.id === valid.requestId).length, 1);
+  } finally { await f.cleanup(); }
+});
+
+test("final R5: unknown late artifact is visible to actual UI payload and explicit direction, without retrying generation", async () => {
+  const f = await fixture();
+  try {
+    let task = await f.create(); const session = await f.begin(task), itemId = randomUUID(), turnId = session.turnId;
+    await f.emit(session.id, "item/started", { type: "imageGeneration", id: itemId, status: "inProgress" });
+    await f.hub.stop(session.id, "unknown terminal state");
+    await f.emit(session.id, "item/completed", { type: "imageGeneration", id: itemId, status: "completed", savedPath: f.sourcePath, inputImages: [] }, turnId);
+    await Promise.all(f.hub.imports.get(session.id) || []);
+    task = f.store.tasks.get(f.pid, task.id); assert.equal(task.attempts[0]!.status, "unknown");
+    const material = directionMaterial(task, session); assert.deepEqual(material, { kind: "generated", generatedId: task.attempts[0]!.generatedId });
+    task = f.store.tasks.action(f.pid, task.id, { expectedRevision: task.revision, action: "resume" });
+    const accepted = await f.api(`${f.taskPath(task.id)}/direction`, directionPayload(task, session, true, ""));
+    assert.equal(accepted.statusCode, 200, accepted.body); assert.equal(accepted.json().phase, "production");
+    assert.equal(f.store.tasks.get(f.pid, task.id).attempts[0]!.status, "unknown"); assert.equal(f.store.generated.list(f.pid).length, 1);
+    assert.throws(() => f.store.tasks.recordAttempt(f.pid, task.id, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, id: randomUUID(), status: "reserved" }), /未知|额度/);
+    assert.equal(f.runtimes.length, 1);
+  } finally { await f.cleanup(); }
+});
+
+test("final R9: mandatory Review unresolved/full-batch/current dependencies gate real ready and accept", async () => {
+  const f = await fixture();
+  try {
+    const a = f.clip(18), b = f.clip(2);
+    let definition = f.store.reviewSequences.create(f.pid, { requestId: randomUUID(), name: "A to B", loop: true, segments: [{ id: randomUUID(), clipId: a.id }, { id: randomUUID(), clipId: b.id, startFrameId: b.frames[0]!.id }] });
+    let task = await f.create({ target: contextFor(a), contract: taskReviewContract(definition.id, [definition]) }); task = f.approveExisting(task, task.target!.snapshotId);
+    const session = await f.begin(task);
+    f.store.updateClip(f.pid, b.id, { revision: b.revision, loop: b.loop, frames: b.frames.slice(1) });
+    const unresolved = await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: task.revision, action: "ready" });
+    assert.equal(unresolved.statusCode, 409); assert.match(unresolved.body, /unresolved/); assert.notEqual(f.store.tasks.get(f.pid, task.id).status, "ready");
+    definition = f.store.reviewSequences.update(f.pid, definition.id, { expectedRevision: definition.revision, name: definition.name, loop: definition.loop, segments: definition.segments.map(segment => segment.clipId === b.id ? { ...segment, startFrameId: undefined } : segment) });
+    const realInspect = f.store.reviewSequences.inspect.bind(f.store.reviewSequences);
+    f.store.reviewSequences.inspect = async (...args) => { const actual = await realInspect(...args); return { ...actual, sequence: { ...actual.sequence, coverage: { ...actual.sequence.coverage, complete: false } } }; };
+    const incomplete = await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "ready" });
+    assert.equal(incomplete.statusCode, 409); assert.notEqual(f.store.tasks.get(f.pid, task.id).status, "ready");
+    assert.equal(f.store.tasks.get(f.pid, task.id).reviewEvidence![0]!.checks[0]!.status, "failed");
+    f.store.reviewSequences.inspect = realInspect;
+    const checked = result(await f.hub.tool(session.id, "workflow_task", { action: "ready" })); task = checked.task;
+    assert.equal(task.status, "ready"); assert.equal(task.reviewEvidence!.length, 2);
+    const evidence = task.reviewEvidence!.at(-1)!; assert.equal(evidence.coverage.totalFrames, 19); assert.equal(evidence.coverage.frameIds.length, 19); assert.equal(evidence.coverage.reviewIds.length, 2); assert.equal(evidence.coverage.complete, true);
+    assert.equal(evidence.checks[0]!.status, "passed"); assert.equal(evidence.checks[1]!.status, "unverified");
+    assert.equal(task.readyReviewEvidenceId, evidence.id); assert.ok(evidence.dependencies.some(dependency => dependency.clipId === b.id));
+    // Metadata-only revisions do not invalidate the exact semantic evidence.
+    definition = f.store.reviewSequences.update(f.pid, definition.id, { expectedRevision: definition.revision, name: "renamed only", loop: definition.loop, segments: definition.segments });
+    assert.equal(f.store.tasks.get(f.pid, task.id).status, "ready");
+    const currentB = f.store.animation.clip(f.pid, b.id);
+    f.store.updateClip(f.pid, b.id, { revision: currentB.revision, loop: currentB.loop, frames: currentB.frames.map(frame => ({ ...frame, durationUs: 210000 })) });
+    assert.equal(f.store.animation.capture(f.pid, a.id).id, checked.snapshot.id, "target itself did not change");
+    assert.equal(f.store.tasks.get(f.pid, task.id).status, "blocked");
+    const rejected = await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: task.revision, action: "accept", snapshotId: checked.snapshot.id });
+    assert.equal(rejected.statusCode, 409); assert.match(rejected.body, /Review/);
+    await f.hub.taskAction(f.pid, task.id, { expectedRevision: task.revision, action: "resume" });
+    // Resume maintains intent and permits a fresh real Review; old evidence stays historical.
+    const refreshed = await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: f.store.tasks.get(f.pid, task.id).revision, action: "ready" });
+    assert.equal(refreshed.statusCode, 200, refreshed.body); task = refreshed.json(); assert.equal(task.reviewEvidence!.length, 3);
+    const accepted = await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: task.revision, action: "accept", snapshotId: task.readySnapshotId });
+    assert.equal(accepted.statusCode, 200, accepted.body); task = accepted.json(); assert.equal(task.acceptanceHistory[0]!.reviewEvidenceId, task.readyReviewEvidenceId);
+    const afterB = f.store.animation.clip(f.pid, b.id); f.store.updateClip(f.pid, b.id, { revision: afterB.revision, loop: false, frames: afterB.frames });
+    const stale = f.store.tasks.get(f.pid, task.id); assert.equal(stale.status, "blocked"); assert.equal(stale.acceptanceHistory.length, 1); assert.equal(stale.reviewEvidence!.length, 3);
+  } finally { await f.cleanup(); }
+});
+
+test("final R9: mandatory Review canvas/render failures block delivery, and valid explicit speed remains legal", async () => {
+  const f = await fixture();
+  try {
+    let a = f.clip(1), b = f.clip(1);
+    a = f.store.updateClip(f.pid, a.id, { revision: a.revision, loop: true, frames: a.frames.map(frame => ({ ...frame, durationUs: 1000 })) });
+    b = f.store.updateClip(f.pid, b.id, { revision: b.revision, loop: true, frames: b.frames.map(frame => ({ ...frame, durationUs: 1000 })) });
+    const alternatePath = join(f.root, "other-canvas.png");
+    const made = spawnSync("python", ["-I", "-c", "from PIL import Image;import sys;Image.new('RGBA',(64,64),'red').save(sys.argv[1])", alternatePath]); assert.equal(made.status, 0);
+    const alternate = await f.store.importImage(f.pid, "other-canvas.png", readFileSync(alternatePath));
+    const definition = f.store.reviewSequences.create(f.pid, { requestId: randomUUID(), name: "explicit speed and canvas", loop: true, segments: [{ id: randomUUID(), clipId: a.id, speed: 10 }, { id: randomUUID(), clipId: b.id, speed: 10 }] });
+    let task = await f.create({ target: contextFor(a), contract: taskReviewContract(definition.id, [definition]) }); task = f.approveExisting(task, task.target!.snapshotId); await f.begin(task);
+    b = f.store.updateClip(f.pid, b.id, { revision: b.revision, loop: true, frames: b.frames.map(frame => ({ ...frame, imageId: alternate.id })) });
+    const canvas = await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: task.revision, action: "ready" });
+    assert.equal(canvas.statusCode, 400); assert.match(canvas.body, /画布不一致/); assert.notEqual(f.store.tasks.get(f.pid, task.id).status, "ready");
+    b = f.store.updateClip(f.pid, b.id, { revision: b.revision, loop: true, frames: b.frames.map(frame => ({ ...frame, imageId: f.image.id, transform: { scale: 1, offsetX: 100, offsetY: 0, clip: false } })) });
+    const overflow = await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: task.revision, action: "ready" });
+    assert.ok(overflow.statusCode >= 400, overflow.body); assert.notEqual(f.store.tasks.get(f.pid, task.id).status, "ready");
+    b = f.store.updateClip(f.pid, b.id, { revision: b.revision, loop: true, frames: b.frames.map(frame => ({ ...frame, transform: { scale: 1, offsetX: 0, offsetY: 0, clip: false } })) });
+    const valid = await f.api(`${f.taskPath(task.id)}/actions`, { expectedRevision: task.revision, action: "ready" });
+    assert.equal(valid.statusCode, 200, valid.body); const evidence = valid.json().reviewEvidence.at(-1);
+    assert.equal(evidence.checks[0].status, "passed"); assert.equal(evidence.checks[1].status, "unverified");
+    assert.ok(f.store.animation.snapshot(f.pid, evidence.snapshotId).clip.frames.every(frame => frame.durationUs === 100));
   } finally { await f.cleanup(); }
 });
 

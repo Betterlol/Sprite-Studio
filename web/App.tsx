@@ -6,7 +6,7 @@ import { TaskCenter, QualityStatus } from "./TaskCenter.tsx";
 import { ReviewSequences } from "./ReviewSequences.tsx";
 import { SnapshotPlayer } from "./SnapshotPlayer.tsx";
 import { editingBlock, ordinaryConversation, taskConversation, assertConversation, conversationDestination, messageContinuation, type TaskContinuation, type ArchivableReviewDefinition, type ConversationSelection } from "./workflow-state.ts";
-import type { EditingContext, ProductionTask, QualityCapabilities, ReviewSequenceDefinition } from "../studio/workflow-model.ts";
+import type { EditingContext, ProductionTask, ClipDraft, QualityCapabilities, ReviewSequenceDefinition } from "../studio/workflow-model.ts";
 import { PermissionSettings } from "./PermissionSettings.tsx";
 import { ToolApprovals } from "./ToolApprovals.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
@@ -97,6 +97,7 @@ type State = {
   reviews: ClipReview[];
   frameChanges: FrameChange[];
   frameDrafts: FrameDraft[];
+  clipDrafts?: ClipDraft[];
   folders: string[];
   libraryRevision: string;
   configurationRevision: string;
@@ -278,7 +279,7 @@ export function App() {
     const original = projectId, token = ++snapshotRequest.current;
     await run("载入固定快照", async () => {
       const value = await api<ClipSnapshot>(`/api/projects/${projectId}/snapshots/${snapshotId}`);
-      if (projectRef.current === original && token === snapshotRequest.current) { setFixedSnapshot(value); setComparison(null); setShareDraft(false); setContext({clipId:value.clip.id,revision:value.clip.revision,snapshotId:value.id,mode:"saved"}); }
+      if (projectRef.current === original && token === snapshotRequest.current) { setFixedSnapshot(value); setComparison(null); /* Playback is not an editing-context or saved-version selection. */ }
     });
   }
 
@@ -988,7 +989,7 @@ export function App() {
             frameIndex={frameIndex} onFrame={setFrameIndex} playing={playing} onPlaying={setPlaying} propertiesHost={propertiesHost}
             locked={blocker ? `任务“${blocker.title}”持有此对象` : undefined}
             onContext={updateContext} onBridge={setBridge} onSaved={() => refreshRef.current()}
-            legacyDrafts={state?.frameDrafts || []} onLegacyPreview={id => void playSnapshot(id)}
+            legacyDrafts={state?.frameDrafts || []} clipDrafts={state?.clipDrafts || []} onLegacyPreview={id => void playSnapshot(id)}
             onTool={value => { setTool(value); setRightTab(value === "review" ? "checks" : "properties"); }}
           /> : <>
           <div className={`stage ${background}`} ref={stage}>
@@ -1381,7 +1382,7 @@ export function App() {
             </div>
             <div className="checks-view" hidden={rightTab !== "checks"}>
               <QualityStatus capabilities={state?.qualityCapabilities}/>
-              <ReviewSequences key={projectId} projectId={projectId} clips={(state?.assets || []).filter((a): a is ClipAsset => a.type === "clip")} definitions={state?.reviewSequences || []} onDefinition={publishReviewDefinition} onRefresh={() => refreshRef.current()} onPlay={id => void playSnapshot(id)}/>
+              <ReviewSequences key={projectId} projectId={projectId} clips={(state?.assets || []).filter((a): a is ClipAsset => a.type === "clip")} definitions={state?.reviewSequences || []} dependencyRevision={state?.libraryRevision} onDefinition={publishReviewDefinition} onRefresh={() => refreshRef.current()} onPlay={id => void playSnapshot(id)}/>
               {clip && <details open><summary>单动画检查与旧修改历史</summary><AnimationPanel key={`${projectId}-${clip.id}`} projectId={projectId} clip={clip} disabled={!!blocker} assets={state?.assets || []} reviews={state?.reviews || []} focusReviewId={focusedReviewId} focusChangeId={focusedChangeId} changes={state?.frameChanges || []} onRefresh={() => refreshRef.current()} onReference={addClipReference} onFrame={(id, frame) => previewClip(id,frame,false)} onAdjust={() => setRightTab("properties")} onCompare={compareChange} onPreview={id => previewClip(id)}/></details>}
             </div>
             <div className="chat-header">
@@ -1455,7 +1456,7 @@ export function App() {
               </select>
             )}
             <div className="messages">
-              <TaskCenter key={projectId} projectId={projectId} tasks={state?.tasks || []} sessions={state?.sessions || []} assets={state?.assets || []} referenceIds={references} context={useContext ? displayedContext || undefined : undefined} selectedTaskId={taskId} onSelect={chooseTask} onCreated={createdTask} onRefresh={() => refreshRef.current()} onHandoff={task => setHandoffs(old => ({...old,[task.id]:task.barrierVersion}))} stabilize={stableContext} onPlay={id => void playSnapshot(id)} onBrowse={setSelectedId}/>
+              <TaskCenter key={projectId} projectId={projectId} tasks={state?.tasks || []} clipDrafts={state?.clipDrafts || []} reviewSequences={state?.reviewSequences || []} sessions={state?.sessions || []} assets={state?.assets || []} referenceIds={references} context={useContext ? displayedContext || undefined : undefined} selectedTaskId={taskId} onSelect={chooseTask} onCreated={createdTask} onRefresh={() => refreshRef.current()} onHandoff={task => setHandoffs(old => ({...old,[task.id]:task.barrierVersion}))} stabilize={stableContext} onPlay={id => void playSnapshot(id)} onBrowse={setSelectedId}/>
 
               {!session?.messages.length && (
                 <div className="chat-empty">
@@ -1534,6 +1535,10 @@ export function App() {
                       ))}
                     </div>
                   )}
+                  {!!message.clipDraftIds?.length && <div className="message-clip-refs">{message.clipDraftIds.map(id => {
+                    const result = state?.clipDrafts?.find(draft => draft.id === id);
+                    return result?.delivery ? <span key={id}><button className="text-button" onClick={() => void playSnapshot(result.delivery!.snapshotId)}>助手固定结果 · 待采用到我的草稿</button><button className="text-button" onClick={() => { setSelectedId(result.clipId); setFixedSnapshot(null); setRightTab("properties"); }}>返回来源动画采用（不自动保存）</button></span> : <small key={id}>助手结果稿 {id} · 历史记录保留</small>;
+                  })}</div>}
                   {!!message.reviewIds?.length && (
                     <div className="message-clip-refs">
                       {message.reviewIds.map((id) => {

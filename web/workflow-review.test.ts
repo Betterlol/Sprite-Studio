@@ -63,6 +63,26 @@ test("I1 unresolved current attempt cannot silently fall back to input or an old
   assert.throws(() => directionPayload(value, undefined, true, ""), /确切方向产物/);
 });
 
+test("R5 unknown retained artifact is explicit material, but failed/cancelled attempts never unlock direction", () => {
+  const unknown = task({ attempts: [{ ...attempt, status: "unknown" }] });
+  assert.deepEqual(directionMaterial(unknown), { kind: "generated", generatedId: id(9) });
+  for (const status of ["failed", "cancelled", "reserved"] as const) {
+    const ended = task({ attempts: [{ ...attempt, status }] });
+    assert.equal(directionMaterial(ended), null);
+    assert.equal(directionMaterial(ended, session(ended)), null);
+  }
+  const unknownWithoutArtifact = task({ attempts: [{ ...attempt, status: "unknown", generatedId: undefined }] });
+  assert.equal(directionMaterial(unknownWithoutArtifact), null);
+  assert.equal(directionMaterial(unknownWithoutArtifact, session(unknownWithoutArtifact)), null);
+});
+
+test("R2 acceptance omits blank optional feedback while rejection still requires a nonblank reason", () => {
+  const value = task();
+  assert.equal("feedback" in directionPayload(value, undefined, true, " \t\n"), false);
+  assert.equal(directionPayload(value, undefined, true, "  looks right  ").feedback, "looks right");
+  assert.throws(() => directionPayload(value, undefined, false, " \t"), /需要意见/);
+});
+
 test("I2 ordinary and new conversations atomically detach the previous task", () => {
   const value = task();
   const selected = taskConversation(value);

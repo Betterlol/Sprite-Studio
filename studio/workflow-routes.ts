@@ -56,6 +56,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, store: ProjectStore
     const { documentRevision } = z.object({ documentRevision: z.string() }).strict().parse(request.body);
     return store.clipDrafts[action](pid(request), id(request, "draftId"), documentRevision);
   });
+  app.post("/api/projects/:projectId/clip-drafts/:draftId/adopt", async request => store.clipDrafts.adopt(pid(request), id(request, "draftId"), z.object({ expectedDocumentRevision: z.string(), resultDraftId: uuid, expectedResultDocumentRevision: z.string() }).strict().parse(request.body)));
   app.get("/api/projects/:projectId/review-sequences", async request => store.reviewSequences.list(pid(request)));
   app.post("/api/projects/:projectId/review-sequences", async request => store.reviewSequences.create(pid(request), request.body));
   app.put("/api/projects/:projectId/review-sequences/:sequenceId", async request => store.reviewSequences.update(pid(request), id(request, "sequenceId"), request.body));

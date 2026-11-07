@@ -84,7 +84,7 @@ export function editingBlock(tasks: ProductionTask[], assetId: string, handoffs:
 }
 export function contextFor(clip: ClipAsset, frameId?: string, document?: ClipDraftDocument): EditingContext {
   return { clipId: clip.id, revision: clip.revision, frameId,
-    ...(document ? { mode: "draft" as const, draftId: document.draft.id, documentRevision: document.documentRevision, snapshotId: document.draft.baseSnapshotId } : { mode: "saved" as const }) };
+    ...(document ? { mode: "draft" as const, draftId: document.draft.id, documentRevision: document.documentRevision } : { mode: "saved" as const }) };
 }
 export type DirectionMaterial = { kind: "generated"; generatedId: string } | { kind: "asset"; assetId: string } | { kind: "snapshot"; snapshotId: string };
 export function taskSaveApproval(task: ProductionTask, session?: Session) {
@@ -93,10 +93,13 @@ export function taskSaveApproval(task: ProductionTask, session?: Session) {
 }
 /** Result identity is exclusive. Input references never supplement a generated result. */
 export function directionMaterial(task: ProductionTask, session?: Session): DirectionMaterial | null {
+  const attempt = task.attempts.at(-1);
+  if (attempt && !["completed", "running", "unknown"].includes(attempt.status)) return null;
+  // Unknown execution is not an absent artifact. Only its own retained image
+  // can be reconciled explicitly; never fall back to a previous result/approval.
+  if (attempt?.status === "unknown") return attempt.generatedId ? { kind: "generated", generatedId: attempt.generatedId } : null;
   const approval = taskSaveApproval(task, session);
   if (approval) return typeof approval.arguments.generatedId === "string" ? { kind: "generated", generatedId: approval.arguments.generatedId } : null;
-  const attempt = task.attempts.at(-1);
-  if (attempt && !["completed", "running"].includes(attempt.status)) return null;
   if (attempt?.generatedId) return { kind: "generated", generatedId: attempt.generatedId };
   if (attempt?.assetId) return { kind: "asset", assetId: attempt.assetId };
   if (task.attempts.length) return null;
@@ -108,7 +111,8 @@ export function directionPayload(task: ProductionTask, session: Session | undefi
   if (!material) throw new Error("当前没有可确认的确切方向产物，请等待或刷新任务结果");
   const { kind, ...identity } = material;
   const approval = taskSaveApproval(task, session);
-  return { expectedRevision: task.revision, accept, feedback, ...identity, ...(approval ? { toolApproval: { sessionId: session!.id, approvalId: approval.id } } : {}) };
+  if (!accept && !feedback.trim()) throw new Error("驳回方向需要意见");
+  return { expectedRevision: task.revision, accept, ...(feedback.trim() ? { feedback: feedback.trim() } : {}), ...identity, ...(approval ? { toolApproval: { sessionId: session!.id, approvalId: approval.id } } : {}) };
 }
 export function taskFeedbackPayload(task: ProductionTask, action: "feedback" | "save-location", text: string, session?: Session, feedbackKind: "local" | "direction" = "local") {
   if (action === "feedback" && feedbackKind === "local" && !(task.direction?.accept && task.direction.intentVersion === task.intentVersion)) throw new Error("方向尚未认可，不能以局部调整保留方向");
@@ -143,6 +147,12 @@ export function conversationDestination(tasks: ProductionTask[], selection: Conv
   return { sessionId: selection.sessionId, taskId: selection.taskId || undefined, needsSession: !selection.sessionId };
 }
 
+export function taskReviewContract(reviewSequenceId: string, definitions: ReviewSequenceDefinition[]) {
+  if (!reviewSequenceId) return undefined;
+  const definition = definitions.find(definition => definition.id === reviewSequenceId);
+  if (!definition || definition.archived) throw new Error("必查Review不可用或已归档，请明确选择当前定义");
+  return { reviewSequenceId: definition.id };
+}
 export type TaskCreationScope = "selection" | "frame" | "whole";
 export function taskCreationTarget(context: EditingContext | undefined, scope: TaskCreationScope): EditingContext | undefined {
   if (!context) return undefined;

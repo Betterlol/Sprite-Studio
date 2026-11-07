@@ -15,6 +15,8 @@ export type QualityObservation = { location: string; category: "center" | "size"
 export type StaticCheckInput = {
   snapshot: ClipSnapshot; scope: QualityScope; id: string; createdAt: string;
   warnings?: RenderWarning[]; observations?: QualityObservation[]; dependencies?: string[];
+  /** Expanded Review speeds use integer microseconds, not editable clip limits. */
+  durationRange?: { min: number; max: number };
 };
 
 /** Evaluates supplied snapshot data only; the caller must resolve and verify its evidence. */
@@ -32,7 +34,7 @@ export function checkStaticQuality(input: StaticCheckInput): QualityCheck {
     findings.push({ id: `${input.id}:${findings.length + 1}`, severity: status === "failed" ? "error" : "warning", location, message, evidence, snapshotId: snapshot.id, status, resolution: "open" });
   }
   for (const frame of selected) {
-    if (!Number.isInteger(frame.durationUs) || frame.durationUs < 1000 || frame.durationUs > 60_000_000)
+    if (!Number.isInteger(frame.durationUs) || frame.durationUs < (input.durationRange?.min ?? 1000) || frame.durationUs > (input.durationRange?.max ?? 60_000_000))
       add("failed", frame.id, "非法帧时长", String(frame.durationUs));
     if (!snapshot.images[frame.imageId]) add("failed", frame.id, "图片引用缺失", frame.imageId);
   }

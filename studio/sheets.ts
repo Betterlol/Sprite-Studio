@@ -124,7 +124,7 @@ export class SheetDocuments {
       recipe,
       status: !exists
         ? "unconfigured"
-        : (recipe.slicing.method !== "components" || (recipe.slicing.sourceContentHash === source.contentHash && recipe.slicing.algorithmVersion === SHEET_ALGORITHM)) &&
+        : (recipe.schemaVersion === 3 || recipe.slicing.method !== "components" || (recipe.slicing.sourceContentHash === source.contentHash && recipe.slicing.algorithmVersion === SHEET_ALGORITHM)) &&
             receipt?.definitionRevision === definitionRevision &&
             receipt.sourceRevision === source.revision &&
             outputsExist
@@ -155,7 +155,7 @@ export class SheetDocuments {
       entryName(item.name);
       if (item.id && ids.has(item.id)) throw new StudioError("切片 ID 不能重复");
       if (item.id) ids.add(item.id);
-      if ("cell" in item && slicing.method === "grid") {
+      if ("cell" in item && "method" in slicing && slicing.method === "grid") {
         if (item.cell[0] >= slicing.grid.columns || item.cell[1] >= slicing.grid.rows) throw new StudioError("切片单元超出网格");
         const cell = item.cell.join(",");
         if (cells.has(cell)) throw new StudioError("网格单元不能重复，请保留原切片 ID");
@@ -170,7 +170,7 @@ export class SheetDocuments {
         keys.add(key);
       }
     }
-    if (slicing.method === "grid") {
+    if ("method" in slicing && slicing.method === "grid") {
       const grid = slicing.grid;
       if (grid.columns * grid.rows > 128) throw new StudioError("一次最多切割128格");
       const [top,right,bottom,left] = grid.margin, [gx,gy] = grid.spacing;
@@ -178,8 +178,15 @@ export class SheetDocuments {
     }
     if (mode !== "read" && source.width*source.height > 16_777_216) throw new StudioError("源图像素预算超限");
     if ("output" in slicing && slicing.output.width*slicing.output.height*items.filter(i => i.enabled).length > 67_108_864) throw new StudioError("输出总解码像素预算超限");
-    if (slicing.method === "components" && mode === "save") this.store.sheetInspection.validateComponents(pid, source.contentHash, slicing);
-    if (slicing.method === "components" && mode === "execute" && (slicing.sourceContentHash !== source.contentHash || slicing.algorithmVersion !== SHEET_ALGORITHM)) throw new StudioError("STALE_ANALYSIS：来源或算法已变化，请重新检测", 409);
+    if ("method" in slicing && slicing.method === "components" && mode === "save") this.store.sheetInspection.validateComponents(pid, source.contentHash, slicing);
+    if ("method" in slicing && slicing.method === "components" && mode === "execute" && (slicing.sourceContentHash !== source.contentHash || slicing.algorithmVersion !== SHEET_ALGORITHM)) throw new StudioError("STALE_ANALYSIS：来源或算法已变化，请重新检测", 409);
+    if(recipe.schemaVersion===3 && mode!=="read") for(const item of recipe.slicing.items) {
+      if(!item.selection) continue;
+      const selected=this.store.sheetInspection.selection(pid,item.selection);
+      // A new geometric range is explicitly a rectangle, for humans AND Agent JSON edits.
+      if(JSON.stringify(item.box)!==JSON.stringify(selected.box)) { delete item.selection; continue; }
+      if(selected.sourceContentHash!==source.contentHash) throw new StudioError("选区来源已变化，请重新生成区域或手动调整",409);
+    }
     if (mode === "save" || mode === "execute") {
       this.checkIdentity(pid, id, recipe);
       this.checkReferences(pid, id, recipe);
@@ -305,7 +312,7 @@ export class SheetDocuments {
           doc.definitionRevision,
           source.revision,
           source.contentHash,
-          doc.recipe.schemaVersion === 1 ? "grid-v1" : "sheet-v2-alpha-runs-8-v1",
+          doc.recipe.schemaVersion === 1 ? "grid-v1" : doc.recipe.schemaVersion === 2 ? "sheet-v2-alpha-runs-8-v1" : "regions-v3",
         ]),
       ),
       receipt = this.receipt(pid, id);
@@ -359,6 +366,9 @@ export class SheetDocuments {
       if (!old && (existsSync(this.store.safePath(pid,file)) || existsSync(this.store.safePath(pid,meta)))) throw new StudioError("输出位置已有同名文件，请修改切片名称",409);
       track(file); track(meta);
     }
+    if(doc.recipe.schemaVersion===3) for(const item of doc.recipe.slicing.items) if(item.selection) {
+      const selected=this.store.sheetInspection.selection(pid,item.selection);track(selected.path);track(selected.recordPath);
+    }
     const baseline = JSON.stringify(children.map(a => [a.id, a.revision, a.file]));
     const recheck = () => {
       if (this.read(pid, id).definitionRevision !== expected || this.source(pid, id).revision !== source.revision) throw new StudioError("VERSION_CONFLICT：切割期间配置或来源发生变化，未发布旧结果", 409);
@@ -374,7 +384,7 @@ export class SheetDocuments {
     };
     const stage = this.store.stage(pid);
     const result = await this.store.worker.run("recipe_slice", {
-      path: sourcePath, outputDir: stage, recipeVersion: doc.recipe.schemaVersion, ...doc.recipe.slicing,
+      path: sourcePath, outputDir: stage, ...this.store.sheetInspection.regionParams(pid,source.contentHash,doc.recipe),
     }).catch(error => { recheck(); if (String(error.message).includes("STALE_ANALYSIS")) throw new StudioError(error.message, 409); throw error; });
     recheck();
     const slicing = doc.recipe.slicing;
@@ -388,7 +398,7 @@ export class SheetDocuments {
     if (width*height*active.length > 67_108_864) throw new StudioError("输出总解码像素预算超限");
     if (!Array.isArray(result.files) || result.files.length !== active.length || result.width !== width || result.height !== height) throw new StudioError("图像处理输出数量或尺寸不符");
     const indexes = doc.recipe.slicing.items.flatMap((item,index) => item.enabled ? [index] : []);
-    if (doc.recipe.schemaVersion === 2 && JSON.stringify(result.itemIndexes) !== JSON.stringify(indexes)) throw new StudioError("图像处理输出顺序协议不符");
+    if (doc.recipe.schemaVersion >= 2 && JSON.stringify(result.itemIndexes) !== JSON.stringify(indexes)) throw new StudioError("图像处理输出顺序协议不符");
     const decoded: Buffer[] = [];
     for (const [index, file] of result.files.entries()) {
       if (file !== join(stage, `${String(index).padStart(3,"0")}.png`)) throw new StudioError("图像处理输出文件顺序不符");

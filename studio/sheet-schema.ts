@@ -52,13 +52,40 @@ export const sheetRecipeV2Schema = z.object({
     }).strict(),
   ]),
 }).strict();
-export const sheetRecipeSchema = z.union([sheetRecipeV1Schema, sheetRecipeV2Schema]);
+// v3 saves the final selection, not the operation which generated it.
+export const regionOutputSchema = sheetOutputSchema.extend({
+  alignment: z.enum(["center", "bottom-center", "top-left"]).default("center"),
+}).strict();
+export const regionItemSchema = z.object({
+  ...commonItem,
+  box: z.tuple([coordinate, coordinate, coordinate, coordinate]).describe("Final source-pixel half-open rectangle"),
+  selection: hash.optional().describe("Immutable source-bound pixel selection. Changing its original box converts to a plain rectangle."),
+}).strict();
+export const sheetRecipeV3Schema = z.object({
+  schemaVersion: z.literal(3), type: z.literal("sheet-recipe"),
+  slicing: z.object({
+    output: regionOutputSchema, outputFolder: z.string().min(1).max(500),
+    expectedFrames: z.number().int().min(1).max(128).optional(),
+    items: z.array(regionItemSchema).max(128),
+  }).strict(),
+}).strict();
+export const sheetRecipeSchema = z.union([sheetRecipeV1Schema, sheetRecipeV2Schema, sheetRecipeV3Schema]);
 export type SheetRecipeV1 = z.infer<typeof sheetRecipeV1Schema>;
 export type SheetRecipeV2 = z.infer<typeof sheetRecipeV2Schema>;
+export type SheetRecipeV3 = z.infer<typeof sheetRecipeV3Schema>;
+export type RegionItem = z.infer<typeof regionItemSchema>;
 export type SheetRecipe = z.infer<typeof sheetRecipeSchema>;
 export type SheetGrid = SheetRecipeV1["slicing"]["grid"];
 export type SheetRect = { box: number[]; index: number; key?: string; name?: string; enabled?: boolean };
 export const inspectSheetSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("generate"), assetId: z.string().uuid(), expectedSourceRevision: z.string(),
+    method: z.enum(["grid", "components"]), grid: sheetRecipeV1Schema.shape.slicing.shape.grid.optional(),
+    detection: detectionSchema.default({ alphaThreshold: 16, minComponentPixels: 1 }),
+    text: z.string().max(MAX_SHEET_V2_BYTES).optional(), output: regionOutputSchema.optional(),
+  }).strict(),
+  z.object({ action: z.literal("resolve"), assetId: z.string().uuid(), expectedSourceRevision: z.string(),
+    text: z.string().max(MAX_SHEET_V2_BYTES).optional(),
+  }).strict(),
   z.object({ action: z.literal("detect"), assetId: z.string().uuid(), expectedSourceRevision: z.string(),
     detection: detectionSchema.default({ alphaThreshold: 16, minComponentPixels: 1 }),
     offset: z.number().int().min(0).max(4096).default(0), limit: z.number().int().min(1).max(128).default(128),

@@ -44,7 +44,7 @@ export function parseSheet(text: string): SheetRecipe | null {
 }
 export function switchSheetMethod(state: SheetEditorState, method: "grid" | "boxes" | "components", width: number, height: number, sourceContentHash: string) {
   const recipe = parseSheet(state.text);
-  if (!recipe) return;
+  if (!recipe || recipe.schemaVersion === 3) return;
   state.methods.set(recipe.slicing.method, state.text);
   const previous = state.methods.get(method);
   if (previous) { state.edit(previous); return; }

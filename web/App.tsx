@@ -14,7 +14,7 @@ import type { FramePreview } from "./FrameAdjustmentPanel.tsx";
 import { FrameSaveApprovals } from "./FrameSaveApprovals.tsx";
 import { GeneratedPreview } from "./GeneratedPreview.tsx";
 import type { GeneratedImageInfo } from "../studio/generated.ts";
-import type { SheetRecipe } from "../studio/sheet-schema.ts";
+import type { SheetOverlay } from "./SliceConfigPanel.tsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InterpolationPanel } from "./InterpolationPanel.tsx";
 import { NewClipDialog } from "./NewClipDialog.tsx";
@@ -199,9 +199,7 @@ export function App() {
   useEffect(() => {
     localStorage.setItem("studio.tool", tool);
   }, [tool]);
-  const [sliceGrid, setSliceGrid] = useState<
-    SheetRecipe["slicing"]["grid"] | null
-  >(null);
+  const [sliceOverlay, setSliceOverlay] = useState<SheetOverlay | null>(null);
   const [showGrid, setShowGrid] = useState(true);
   const [framePreview, setFramePreview] = useState<FramePreview | null>(null);
   useEffect(() => {
@@ -1014,60 +1012,12 @@ export function App() {
                   alt={currentImage.name}
                   draggable={false}
                 />
-                {tool === "slice" &&
-                  showGrid &&
-                  !clip &&
-                  !currentImage.producer &&
-                  sliceGrid && (
-                    <svg
-                      className="grid-overlay"
-                      viewBox={`0 0 ${currentImage.width} ${currentImage.height}`}
-                      preserveAspectRatio="none"
-                      aria-hidden="true"
-                    >
-                      {Array.from(
-                        {
-                          length: Math.min(
-                            128,
-                            sliceGrid.columns * sliceGrid.rows,
-                          ),
-                        },
-                        (_, i) => {
-                          const [top, right, bottom, left] = sliceGrid.margin,
-                            [gapX, gapY] = sliceGrid.spacing;
-                          const width =
-                            (currentImage.width -
-                              left -
-                              right -
-                              gapX * (sliceGrid.columns - 1)) /
-                            sliceGrid.columns;
-                          const height =
-                            (currentImage.height -
-                              top -
-                              bottom -
-                              gapY * (sliceGrid.rows - 1)) /
-                            sliceGrid.rows;
-                          return (
-                            <rect
-                              key={i}
-                              x={
-                                left + (i % sliceGrid.columns) * (width + gapX)
-                              }
-                              y={
-                                top +
-                                Math.floor(i / sliceGrid.columns) *
-                                  (height + gapY)
-                              }
-                              width={Math.max(0, width)}
-                              height={Math.max(0, height)}
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="1"
-                              vectorEffect="non-scaling-stroke"
-                            />
-                          );
-                        },
-                      )}
+                {tool === "slice" && showGrid && !clip && !currentImage.producer &&
+                  sliceOverlay?.sourceId === currentImage.id && sliceOverlay.sourceRevision === currentImage.revision && (
+                    <svg className="grid-overlay sheet-overlay" viewBox={`0 0 ${currentImage.width} ${currentImage.height}`} preserveAspectRatio="none" aria-label="原图切割区域">
+                      {sliceOverlay.rectangles.map((rect,i) => <rect key={`${rect.selection}-${i}`} x={rect.box[0]} y={rect.box[1]} width={rect.box[2]!-rect.box[0]!} height={rect.box[3]!-rect.box[1]!}
+                        className={rect.selection===sliceOverlay.selected?"selected":""} fill="transparent" stroke="currentColor" strokeWidth="1" vectorEffect="non-scaling-stroke"
+                        role="button" tabIndex={0} aria-label={`选择原图区域${i+1}`} onClick={()=>sliceOverlay.onSelect(rect.selection)} onKeyDown={e=>{if(e.key==="Enter" || e.key===" "){e.preventDefault();sliceOverlay.onSelect(rect.selection);}}} />)}
                     </svg>
                   )}
                 {imagePreview?.result.blocking && (
@@ -1216,7 +1166,7 @@ export function App() {
                     refreshToken={`${state?.configurationRevision}-${state?.libraryRevision}`}
                     onRefresh={() => refreshRef.current()}
                     onSelect={setSelectedId}
-                    onGrid={setSliceGrid}
+                    onOverlay={setSliceOverlay}
                     gridVisible={showGrid}
                     onGridVisible={setShowGrid}
                     disabled={!!operation || !!blocker}

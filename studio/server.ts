@@ -20,6 +20,7 @@ import { AgentHub } from "./agent.ts";
 import { registerWorkflowRoutes } from "./workflow-routes.ts";
 import { freezeEditingContext } from "./workflow-context.ts";
 import { imageKindSchema } from "./model.ts";
+import { registerSheetRoutes } from "./sheet-routes.ts";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const dataRoot = resolve(
@@ -150,6 +151,7 @@ app.post("/api/projects", async (request) => {
 app.get("/api/projects/:projectId", async (request) =>
   store.state(pid(request)),
 );
+registerSheetRoutes(app, store);
 app.get("/api/projects/:projectId/schemas/sheet-recipe", async () =>
   store.sheets.schema(),
 );

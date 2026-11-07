@@ -30,6 +30,7 @@ import { ProjectDocuments } from "./documents.ts";
 import { GeneratedImages } from "./generated.ts";
 import { FrameDrafts } from "./frame-drafts.ts";
 import { SheetDocuments } from "./sheets.ts";
+import { SheetInspectionService } from "./sheet-inspection.ts";
 import {
   resourceCategories,
   resourceCategory,
@@ -80,6 +81,7 @@ export class ProjectStore extends EventEmitter {
   animation: AnimationStore;
   library: ResourceLibrary;
   sheets: SheetDocuments;
+  sheetInspection: SheetInspectionService;
   documents: ProjectDocuments;
   generated: GeneratedImages;
   frameDrafts: FrameDrafts;
@@ -149,6 +151,7 @@ export class ProjectStore extends EventEmitter {
     this.interpolations = new InterpolationStore(this);
     this.animation = new AnimationStore(this);
     this.sheets = new SheetDocuments(this);
+    this.sheetInspection = new SheetInspectionService(this);
     this.documents = new ProjectDocuments(this);
     this.generated = new GeneratedImages(this);
     // Legacy draft startup needs raw task/intent ownership before deciding which

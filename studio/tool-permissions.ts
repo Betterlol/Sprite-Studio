@@ -85,6 +85,12 @@ export const permissionTools = [
     writes: false,
   },
   {
+    name: "inspect_sheet",
+    label: "检测并预览切割",
+    detail: "只读透明连通域和配方证据；继承读取配置与动画检查权限",
+    writes: false,
+  },
+  {
     name: "inspect_clip",
     label: "预览并检查动画",
     detail: "生成逐帧图、叠图与检查记录，不应用草稿",

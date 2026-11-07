@@ -196,8 +196,10 @@ export class ClipDrafts {
     const target = record.draft.delivery.target;
     try {
       const source = target.kind === "frame" ? this.store.frameDrafts.read(pid, target.draftId) : this.read(pid, target.draftId);
-      return source.draft.source === "human" && source.draft.clipId === record.draft.clipId && source.draft.status === "editing" && source.documentRevision === target.documentRevision;
-    } catch { return false; }
+      // CAS eligibility is not a lifecycle: content hashes can ABA through undo,
+      // and legacy pending approvals may return to editing after failure.
+      return source.draft.source === "human" && source.draft.clipId === record.draft.clipId && !["saved", "discarded"].includes(source.draft.status);
+    } catch { return true; } // Unknown source state cannot safely release retained dependencies.
   }
   dependencyImageIds(pid: string, id: string): string[] { return Object.keys(this.get(pid, id).images); }
   freeze(pid: string, id: string, revision: string): ClipSnapshot {

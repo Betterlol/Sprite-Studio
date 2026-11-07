@@ -920,6 +920,17 @@ for (const mode of ["task", "ordinary", "legacy"] as const) test(`N1 lease: ${mo
     assert.equal(f.store.tasks.draftHoldsLease(f.pid, agent.draft), true);
     assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, agent.documentId), true);
     blocked();
+    const changedSourceBody = JSON.parse(source.text); changedSourceBody.frames[0].durationUs += 1000;
+    const changedSource = f.store.documents.write(f.pid, [{ documentId: source.documentId, expectedDocumentRevision: source.documentRevision, text: JSON.stringify(changedSourceBody) }])[0]!;
+    assert.notEqual(changedSource.documentRevision, source.documentRevision);
+    assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, agent.documentId), true, "temporary CAS conflict must not release an undo-revivable proposal"); blocked();
+    const restoredSource = f.store.documents.write(f.pid, [{ documentId: source.documentId, expectedDocumentRevision: changedSource.documentRevision, text: source.text }])[0]!;
+    assert.equal(restoredSource.documentRevision, source.documentRevision, "undo returns to the exact content-hash version"); blocked();
+    if (mode === "legacy") {
+      f.store.frameDrafts.persist({ ...f.store.frameDrafts.get(f.pid, source.documentId), status: "pending" });
+      assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, agent.documentId), true, "temporary approval state is not a terminal lifecycle"); blocked();
+      f.store.frameDrafts.persist({ ...f.store.frameDrafts.get(f.pid, source.documentId), status: "editing" });
+    }
     const pixels = readFileSync((await f.store.animation.renderFrame(f.pid, delivery.snapshotId, clip.frames[0]!.id)).path);
     const adoption = await f.api(`/api/projects/${f.pid}/clip-drafts/${source.documentId}/adopt`, { expectedDocumentRevision: source.documentRevision, resultDraftId: agent.documentId, expectedResultDocumentRevision: agent.documentRevision });
     assert.equal(adoption.statusCode, 200, adoption.body); let human = adoption.json();

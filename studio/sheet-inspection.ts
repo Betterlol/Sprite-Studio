@@ -80,11 +80,12 @@ export class SheetInspectionService {
     }
     if(spec.action==="generate"&&spec.method==="grid"&&!spec.grid) throw new StudioError("网格生成需要grid参数");
     const {expectedSourceRevision,...keyInput}=spec;
-    const id=sha256(JSON.stringify(["region-inspect-v3-effective-recipe-2",source.contentHash,keyInput,spec.action!=="preview"&&!spec.text?original:undefined]));
+    const id=sha256(JSON.stringify(["region-inspect-v3-preserve-settings-3",source.contentHash,keyInput,spec.action!=="preview"&&!spec.text?original:undefined]));
     let cached=this.cached(pid,id);
     if(!cached) {
       const stage=this.store.stage(pid);
-      const params=spec.action==="generate" ? {method:spec.method,grid:spec.grid,detection:spec.detection,output:spec.output} : this.regionParams(pid,source.contentHash,original);
+      // Generators replace regions, not the recipe's explicit output contract.
+      const params=spec.action==="generate" ? {method:spec.method,grid:spec.grid,detection:spec.detection,output:spec.output??("output"in original.slicing?original.slicing.output:undefined)} : this.regionParams(pid,source.contentHash,original);
       const result=await this.store.worker.run(spec.action==="generate"?"region_generate":spec.action==="resolve"?"region_resolve":"region_preview",{
         ...params,path:sourcePath,outputDir:stage,...(spec.action==="preview"?{start:spec.start,limit:spec.limit}:{})
       }).catch(error=>{this.store.imagePath(pid,source.id,spec.expectedSourceRevision);throw error;});
@@ -113,7 +114,7 @@ export class SheetInspectionService {
             }
           }
         }
-        recipe=sheetRecipeV3Schema.parse({schemaVersion:3,type:"sheet-recipe",slicing:{items,output:result.output,outputFolder:original.slicing.outputFolder,...(spec.action==="resolve"&&"expectedFrames"in original.slicing&&original.slicing.expectedFrames?{expectedFrames:original.slicing.expectedFrames}:{})}});
+        recipe=sheetRecipeV3Schema.parse({schemaVersion:3,type:"sheet-recipe",slicing:{items,output:result.output,outputFolder:original.slicing.outputFolder,...("expectedFrames"in original.slicing&&original.slicing.expectedFrames?{expectedFrames:original.slicing.expectedFrames}:{})}});
       } else {
         const indexes=original.slicing.items.flatMap((item,index)=>item.enabled?[index]:[]);
         if(result.total!==indexes.length||result.start!==spec.start||result.end!==Math.min(indexes.length,spec.start+spec.limit)||!Array.isArray(result.frames)||JSON.stringify(result.frames.map((f:any)=>f.index))!==JSON.stringify(indexes.slice(spec.start,spec.start+spec.limit))||!Array.isArray(result.frameFiles)||result.frameFiles.length!==result.frames.length) throw new StudioError("区域预览协议无效");

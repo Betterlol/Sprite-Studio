@@ -36,6 +36,16 @@ export function editedRegion(item:RegionItem,box:Box):RegionItem {
 export function regionSignature(item:RegionItem,output:SheetRecipeV3['slicing']['output']) {
   return JSON.stringify([item.box,item.selection??null,output]);
 }
+/** JSON edits can change membership and order; never identify a new region by its index. */
+export function reconcileRegionKeys(previous:RegionItem[],keys:string[],next:RegionItem[],newKey:()=>string):string[] {
+  const used=new Set<number>();
+  return next.map(item=>{
+    const index=previous.findIndex((old,i)=>!used.has(i)&&(item.id?old.id===item.id:!old.id&&JSON.stringify(old)===JSON.stringify(item)));
+    if(index<0)return item.id||newKey();
+    used.add(index);
+    return keys[index]||item.id||newKey();
+  });
+}
 export function regionShortcutAllowed(target:EventTarget|null) {
   const element=target as Element|null;
   return !element?.closest?.('input,textarea,select,[contenteditable="true"],dialog,[role="dialog"]');

@@ -10,7 +10,7 @@ const image:ImageAsset={id:id(1),type:'image',kind:'image',name:'sheet',revision
 const initial={schemaVersion:3 as const,type:'sheet-recipe' as const,slicing:{output:{width:32,height:32,scale:1,alignment:'center' as const},outputFolder:'原图素材/test',items:[{id:id(2),name:'first',enabled:true,box:[0,0,32,32] as [number,number,number,number]},{id:id(3),name:'second',enabled:true,box:[32,0,64,32] as [number,number,number,number]}]}};
 const document=(text=JSON.stringify(initial),revision='d1'):SheetDocument=>({documentId:image.id,path:'sheet.recipe.json',text,documentRevision:revision,definitionRevision:revision,exists:true,recipe:JSON.parse(text),status:'dirty',outputIds:[]});
 const json=(value:unknown,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
-function nodes(tree:any):any[]{return Array.isArray(tree)?tree.flatMap(nodes):tree&&typeof tree==='object'?[tree,...nodes(tree.props?.children)]:[];}
+function nodes(tree:any):any[]{return Array.isArray(tree)?tree.flatMap(nodes):tree&&typeof tree==='object'?[tree,...nodes(tree.props?.children),...nodes(tree.children)]:[];}
 function text(tree:any):string{return typeof tree==='string'?tree:Array.isArray(tree)?tree.map(text).join(''):tree&&typeof tree==='object'?text(tree.props?.children):'';}
 function mount(Component:(props:any)=>any){
   const cells:any[]=[],cleanups:any[]=[];let cursor=0,dirty=true,tree:any,props:any,effects:any[]=[];
@@ -25,16 +25,52 @@ function mount(Component:(props:any)=>any){
   return{render,async settle(delay=0){if(delay)await new Promise(r=>setTimeout(r,delay));for(let i=0;i<8;i++){await new Promise(r=>setImmediate(r));if(dirty)render();}return tree;},unmount(){cleanups.forEach(c=>c?.());}};
 }
 function evidence(){return{id:'inspection',action:'preview',assetId:image.id,sourceRevision:image.revision,sourceContentHash:image.contentHash,total:2,start:0,end:2,limit:16,width:32,height:32,blocking:false,diagnostics:[],images:[],frameImages:initial.slicing.items.map((_,index)=>({index,raw:{hash:`raw${index}`,url:`/raw${index}.png`},output:{hash:`out${index}`,url:`/out${index}.png`}}))};}
-async function fixture(){
+async function fixture(propertiesHost:HTMLElement|null=null){
   const oldFetch=globalThis.fetch,oldStorage=(globalThis as any).sessionStorage,storage=new Map<string,string>();
   (globalThis as any).sessionStorage={getItem:(k:string)=>storage.get(k)||null,setItem:(k:string,v:string)=>storage.set(k,v),removeItem:(k:string)=>storage.delete(k)};
   const vite=await createServer({configFile:false,root:fileURLToPath(new URL('../',import.meta.url)),server:{middlewareMode:true,hmr:false},appType:'custom'});
   const {SliceWorkbench}=await vite.ssrLoadModule('/web/SliceWorkbench.tsx'),component=mount(SliceWorkbench);
   globalThis.fetch=async(_url,options)=>options?.method==='POST'?json(evidence()):json(document());
-  const props={projectId:id(4),image,propertiesHost:null,refreshToken:'1',onRefresh:async()=>{},disabled:false};
+  const props={projectId:id(4),image,propertiesHost,refreshToken:'1',onRefresh:async()=>{},disabled:false};
   let tree=component.render(props);tree=await component.settle();
   return{Component:SliceWorkbench,component,storage,props,get tree(){return tree;},async update(delay=0){tree=await component.settle(delay);},button(label:string){const n=nodes(tree).find(n=>n.type==='button'&&text(n)===label);assert.ok(n,`button ${label}`);return n;},key(key:string,extra:any={}){tree.props.onKeyDown({key,target:{closest:()=>null},preventDefault(){},...extra});},async close(){component.unmount();await vite.close();globalThis.fetch=oldFetch;(globalThis as any).sessionStorage=oldStorage;}};
 }
+test('JSON-added regions can move, resize and undo/redo without losing their local keys',async()=>{
+  const f=await fixture({nodeType:1} as HTMLElement);
+  const oldRaf=globalThis.requestAnimationFrame,oldCancel=globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame=()=>1;globalThis.cancelAnimationFrame=()=>{};
+  const inspector=()=>nodes(f.tree).find(n=>typeof n.type==='function'&&n.type.name==='SliceConfigPanel').props;
+  const stored=()=>JSON.parse([...f.storage.values()].find(v=>v.includes('"base"'))!);
+  try {
+    const next:Record<string,any>=structuredClone(initial);
+    next.slicing.items.push({name:'new',enabled:true,box:[20,5,40,25]});
+    inspector().onText(JSON.stringify(next));await f.update();
+    const newKey=stored().keys[2];assert.ok(newKey);assert.equal(new Set(stored().keys).size,3);
+    nodes(f.tree).find(n=>n.props?.['aria-label']==='选择原帧 3').props.onClick();await f.update();
+    const svg={getBoundingClientRect:()=>({left:0,top:0,width:64,height:32}),hasPointerCapture:()=>false};
+    nodes(f.tree).find(n=>n.props?.className==='artboard slice-artboard').props.ref.current={querySelector:()=>svg};
+    nodes(f.tree).find(n=>n.props?.['aria-label']==='切割画布，拖动编辑区域，方向键微移').props.ref.current={focus(){}};
+    async function drag(start:number[],end:number[]) {
+      const event=([clientX,clientY]:number[])=>({button:0,pointerId:1,clientX,clientY,currentTarget:{setPointerCapture(){}},preventDefault(){}});
+      nodes(f.tree).find(n=>n.type==='svg').props.onPointerDown(event(start));await f.update();
+      nodes(f.tree).find(n=>n.type==='svg').props.onPointerUp(event(end));await f.update();
+    }
+    await drag([30,15],[35,15]);assert.deepEqual(inspector().recipe.slicing.items[2].box,[25,5,45,25]);
+    await drag([45,15],[50,15]);assert.deepEqual(inspector().recipe.slicing.items[2].box,[25,5,50,25]);
+    assert.equal(stored().keys[2],newKey);
+    f.key('z',{ctrlKey:true});await f.update();assert.deepEqual(inspector().recipe.slicing.items[2].box,[25,5,45,25]);
+    f.key('z',{ctrlKey:true});await f.update();assert.deepEqual(inspector().recipe.slicing.items[2].box,[20,5,40,25]);
+    f.key('y',{ctrlKey:true});await f.update();f.key('y',{ctrlKey:true});await f.update();
+    assert.deepEqual(inspector().recipe.slicing.items[2].box,[25,5,50,25]);assert.equal(stored().keys[2],newKey);
+    const reordered=structuredClone(inspector().recipe);reordered.slicing.items.reverse();
+    inspector().onText(JSON.stringify(reordered));await f.update();
+    assert.equal(stored().keys[0],newKey);assert.equal(stored().keys[1],initial.slicing.items[1]!.id);
+    const shortened=structuredClone(inspector().recipe);shortened.slicing.items.pop();
+    inspector().onText(JSON.stringify(shortened));await f.update();assert.equal(inspector().selected,1);
+    assert.equal(stored().keys.length,2);
+  } finally {globalThis.requestAnimationFrame=oldRaf;globalThis.cancelAnimationFrame=oldCancel;await f.close();}
+});
+
 // Real component hook/effect paths; genuine pointer/layout behavior is checked in browser QA.
 test('workbench exposes editable source regions and bottom strip; selection and micro-adjustment share stable frames',async()=>{
   const f=await fixture();try{

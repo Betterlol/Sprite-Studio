@@ -8,7 +8,7 @@ import type {SheetInspection} from '../studio/sheet-inspection.ts';
 import {api} from './api.ts';
 import {SheetEditorState,parseSheet,type SheetToken} from './sheet-state.ts';
 import {SliceConfigPanel} from './SliceConfigPanel.tsx';
-import {RegionHistory,editedRegion,moveRegion,createRegionBox,sourcePoint,hitRegion,regionHandles,regionSignature,regionShortcutAllowed,type RegionMode,type RegionSnapshot,type Box,type Handle} from './region-editor-state.ts';
+import {RegionHistory,editedRegion,moveRegion,createRegionBox,sourcePoint,hitRegion,regionHandles,regionSignature,reconcileRegionKeys,regionShortcutAllowed,type RegionMode,type RegionSnapshot,type Box,type Handle} from './region-editor-state.ts';
 
 const textOf=(recipe:SheetRecipeV3)=>JSON.stringify(recipe,null,2)+'\n';
 const localKey=()=>globalThis.crypto?.randomUUID?.() || `local-${Date.now()}-${Math.random()}`;
@@ -61,7 +61,16 @@ export function SliceWorkbench({projectId,image,propertiesHost,refreshToken,onRe
   function restore(value:RegionSnapshot|undefined){if(!value)return;cancelDrag();generatorSequence.current++;gridApplied.current=gridVersion;setGridPending(false);setBusy(v=>v==='generate'?'':v);state.edit(value.text);keys.current=value.keys?[...value.keys]:[];modeRef.current=value.mode;setMode(value.mode);setSelected(value.selected);setError('');persist();redraw();}
   function undo(){restore(history.current.undo(snapshot()));}
   function redo(){restore(history.current.redo(snapshot()));}
-  function editText(text:string){const before=snapshot();history.current.record(before,{text,mode:'manual',selected,keys:[...keys.current]});generatorSequence.current++;setGridPending(false);setBusy(v=>v==='generate'?'':v);state.edit(text);modeRef.current='manual';setMode('manual');persist();redraw();}
+  function editText(text:string){
+    const before=snapshot(),value=parseSheet(text);
+    let index=selected;
+    if(value?.schemaVersion===3){
+      keys.current=reconcileRegionKeys(recipe?.slicing.items||[],keys.current,value.slicing.items,localKey);
+      index=Math.max(0,Math.min(selected,value.slicing.items.length-1));
+    }
+    history.current.record(before,{text,mode:'manual',selected:index,keys:[...keys.current]});
+    generatorSequence.current++;setGridPending(false);setBusy(v=>v==='generate'?'':v);state.edit(text);modeRef.current='manual';setMode('manual');setSelected(index);persist();redraw();
+  }
   function editItem(next:RegionItem){if(!recipe||!selectedItem)return;const value=structuredClone(recipe);value.slicing.items[selected]=next;commit(value);}
   function editBox(box:Box){if(selectedItem)editItem(editedRegion(selectedItem,box));}
   function remove(){if(!recipe||!selectedItem)return;const next=structuredClone(recipe);next.slicing.items.splice(selected,1);const k=[...keys.current];k.splice(selected,1);commit(next,'manual',Math.min(selected,next.slicing.items.length-1),k);}

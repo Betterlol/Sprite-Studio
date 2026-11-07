@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {moveRegion,createRegionBox,sourcePoint,editedRegion,RegionHistory,hitRegion,regionShortcutAllowed} from './region-editor-state.ts';
+import {moveRegion,createRegionBox,sourcePoint,editedRegion,RegionHistory,hitRegion,reconcileRegionKeys,regionShortcutAllowed} from './region-editor-state.ts';
 import type {RegionItem} from '../studio/sheet-schema.ts';
 const item:RegionItem={name:'a',enabled:true,id:'00000000-0000-4000-8000-000000000001',box:[10,10,30,40],selection:'a'.repeat(64)};
 test('region move and eight handles operate in source pixels, clamp and retain positive area',()=>{
@@ -22,6 +22,15 @@ test('undo/redo restores geometry AND generator/manual mode; no-op drag creates 
   h.record(before,before);assert.equal(h.past.length,0);h.record(before,after);
   assert.deepEqual(h.undo(after),before);assert.deepEqual(h.redo(before),after);
   h.record(after,{...after,text:'new'});assert.equal(h.future.length,0);
+});
+test('JSON key reconciliation follows IDs and unchanged drafts through insertion, reordering and deletion',()=>{
+  const {id,...draft}=item;
+  const other:RegionItem={name:'new',enabled:true,box:[0,0,5,5]};let serial=0;
+  const previous=[item,draft,draft],keys=['saved','draft-a','draft-b'];
+  const next=[other,draft,{...item,name:'renamed',box:[1,1,20,20] as [number,number,number,number]},draft];
+  const reconciled=reconcileRegionKeys(previous,keys,next,()=>`new-${++serial}`);
+  assert.deepEqual(reconciled,['new-1','draft-a','saved','draft-b']);assert.equal(new Set(reconciled).size,4);
+  assert.deepEqual(reconcileRegionKeys(next,reconciled,[next[3]!,next[0]!],()=>`new-${++serial}`),['draft-a','new-1']);
 });
 test('editing controls and dialogs retain keyboard ownership',()=>{
   assert.equal(regionShortcutAllowed({closest:()=>({})} as any),false);

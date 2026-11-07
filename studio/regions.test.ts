@@ -50,6 +50,35 @@ test('generators return one v3 region form; generation parameters never enter sa
   } finally {f.store.worker.close();}
 });
 
+test('regenerating regions preserves output settings and the expected-frame guard, including cached calls',async()=>{
+  const f=await fixture();try {
+    for(const method of ['grid','components'] as const) {
+      const generated=await f.inspect({action:'generate',method,...(method==='grid'?{grid}:{})});
+      const original=generated.recipe!;
+      original.slicing.output={width:64,height:64,scale:.5,alignment:'bottom-center'};
+      original.slicing.expectedFrames=original.slicing.items.length+1;
+      const saved=f.save(original);
+      for(const text of [saved.text,undefined]) {
+        const input={action:'generate',method,...(method==='grid'?{grid}:{}),...(text?{text}:{})};
+        const next=await f.inspect(input),cached=await f.inspect(input);
+        assert.equal(cached.id,next.id);
+        for(const result of [next,cached]) {
+          assert.deepEqual(result.recipe!.slicing.output,original.slicing.output);
+          assert.equal(result.recipe!.slicing.expectedFrames,original.slicing.expectedFrames);
+          assert.deepEqual(result.recipe!.slicing.items.map(i=>i.id),saved.recipe.slicing.items.map(i=>i.id));
+        }
+        const preview=await f.inspect({action:'preview',text:JSON.stringify(next.recipe)});
+        assert.ok(preview.diagnostics.some(d=>d.code==='frame-count'));
+        f.save(next.recipe);await assert.rejects(f.execute(),/期望帧数/);
+      }
+      const output={width:48,height:48,scale:1,alignment:'center' as const};
+      const override=await f.inspect({action:'generate',method,...(method==='grid'?{grid}:{}),text:saved.text,output});
+      assert.deepEqual(override.recipe!.slicing.output,output);
+      assert.equal(override.recipe!.slicing.expectedFrames,original.slicing.expectedFrames);
+    }
+  } finally {f.store.worker.close();}
+});
+
 test('component selections are frozen; v3 preview and recut never rerun detection',async()=>{
   const f=await fixture();try {
     const generated=await f.inspect({action:'generate',method:'components'}),recipe=generated.recipe! as SheetRecipeV3;

@@ -513,7 +513,7 @@ export class ResourceLibrary {
       if ([...ids].some(id => protectedIds.has(id))) blockers.push({ name: task.title, reason: "制作任务仍持有所选资源引用" });
     }
     for (const draft of this.store.clipDrafts.list(pid)) {
-      if (draft.readOnly) continue;
+      if (!this.store.clipDrafts.holdsDependencyLease(pid, draft.id)) continue;
       const dependencies = this.store.clipDrafts.dependencyImageIds(pid, draft.id);
       if (ids.has(draft.clipId) || dependencies.some(id => ids.has(id))) blockers.push({ name: "动画草稿", reason: "未结束的对象草稿仍依赖所选动画/冻结图片" });
     }

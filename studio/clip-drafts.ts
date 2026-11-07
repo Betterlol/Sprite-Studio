@@ -9,7 +9,7 @@ import { type ClipAsset, type ClipSnapshot, type RenderWarning } from "./model.t
 import { assetRevision, atomicJson, sha256, StudioError, type ProjectStore } from "./store.ts";
 import { clipEditSchema, type ClipDraft, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type ClipDraftDelivery, type DraftDeliveryTarget, type ClipEdit } from "./workflow-model.ts";
 
-type RecordData = { draft: ClipDraft; text: string; documentRevision: string; images: ClipSnapshot["images"]; files: Record<string, string | null>; ownedFrameIds?: string[]; receipt?: ClipDraftSave };
+type RecordData = { draft: ClipDraft; text: string; documentRevision: string; images: ClipSnapshot["images"]; files: Record<string, string | null>; ownedFrameIds?: string[]; receipt?: ClipDraftSave; adoptedInto?: string };
 type CreateInput = { clipId: string; revision: string; frameId?: string; fromDraftId?: string };
 const createSchema = z.object({ clipId: z.string().uuid(), revision: z.string(), frameId: z.string().uuid().optional(), fromDraftId: z.string().uuid().optional() }).strict();
 const body = (clip: ClipAsset): ClipEdit => ({ schemaVersion: 1, type: "clip-edit", frames: structuredClone(clip.frames), loop: clip.loop, initialFps: clip.initialFps });
@@ -187,6 +187,18 @@ export class ClipDrafts {
     return z.string().uuid().safeParse(id).success && existsSync(this.store.safePath(pid, this.path(id)));
   }
   read(pid: string, id: string): ClipDraftDocument { return this.document(this.get(pid, id)); }
+  /** Editability and resource ownership are independent for fixed proposals. */
+  holdsDependencyLease(pid: string, id: string): boolean {
+    const record = this.get(pid, id);
+    if (record.draft.status !== "editing" || this.historical(record)) return false;
+    if (!record.draft.delivery) return true;
+    if (record.adoptedInto) return false; // Atomic adoption transfers protection to the human document.
+    const target = record.draft.delivery.target;
+    try {
+      const source = target.kind === "frame" ? this.store.frameDrafts.read(pid, target.draftId) : this.read(pid, target.draftId);
+      return source.draft.source === "human" && source.draft.clipId === record.draft.clipId && source.draft.status === "editing" && source.documentRevision === target.documentRevision;
+    } catch { return false; }
+  }
   dependencyImageIds(pid: string, id: string): string[] { return Object.keys(this.get(pid, id).images); }
   freeze(pid: string, id: string, revision: string): ClipSnapshot {
     const record = this.get(pid, id), base = this.check(pid, record, revision), value = this.parse(record.text);
@@ -330,6 +342,7 @@ export class ClipDrafts {
     publishFiles(this.store, pid, [
       { path: `.studio/clip-draft-history/${humanId}-${human.documentRevision}.json`, bytes: bytes(human) },
       { path: this.path(humanId), bytes: bytes(next) },
+      { path: this.path(result.draft.id), bytes: bytes({ ...result, adoptedInto: humanId }) },
     ], { kind: "adopt-clip-draft", draftId: humanId, resultDraftId: result.draft.id });
     this.invalidateIndex(pid);
     return this.document(next);
@@ -347,7 +360,7 @@ export class ClipDrafts {
     // editing session instead of truncating the full result into a frame-edit.
     const id = randomUUID();
     const next: RecordData = { ...result, receipt: undefined, draft: { id, projectId: pid, clipId: result.draft.clipId, baseSnapshotId: result.draft.baseSnapshotId, source: "human", status: "editing", createdAt: new Date().toISOString(), adoptedResult: { draftId: result.draft.id, documentRevision: result.documentRevision } } };
-    publishFiles(this.store, pid, [{ path: this.path(id), bytes: bytes(next) }], { kind: "adopt-legacy-clip-draft", sourceDraftId: humanId, draftId: id, resultDraftId: result.draft.id });
+    publishFiles(this.store, pid, [{ path: this.path(id), bytes: bytes(next) }, { path: this.path(result.draft.id), bytes: bytes({ ...result, adoptedInto: id }) }], { kind: "adopt-legacy-clip-draft", sourceDraftId: humanId, draftId: id, resultDraftId: result.draft.id });
     this.invalidateIndex(pid);
     return this.document(next);
   }

@@ -896,6 +896,78 @@ test("round2 N1: a legacy save rechecks historical ownership after the final rea
   } finally { await f.cleanup(); }
 });
 
+for (const mode of ["task", "ordinary", "legacy"] as const) test(`N1 lease: ${mode} fixed proposal protects exclusive transform dependencies, transfers to human, and releases after save`, async () => {
+  const f = await fixture();
+  try {
+    const clip = f.clip(1), transformed = await f.store.transform(f.pid, f.image.id, f.image.revision, { scale: 0.8 });
+    const source = mode === "legacy" ? f.store.frameDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, frameId: clip.frames[0]!.id }, "human") : f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "human");
+    let task = mode === "task" ? await f.create({ target: { mode: "draft", draftId: source.documentId, documentRevision: source.documentRevision } }) : undefined;
+    if (task) task = f.approveExisting(task, task.target!.snapshotId);
+    const session = task ? f.store.session(task.sessionId!) : f.store.createSession(f.pid);
+    let agent = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, fromDraftId: source.documentId }, "agent", session.id, task ? { taskId: task.id, intentVersion: task.intentVersion } : undefined);
+    if (task) f.store.tasks.registerDraft(f.pid, task.id, { sessionId: session.id, intentVersion: task.intentVersion, barrierVersion: task.barrierVersion, draftId: agent.documentId, kind: "clip" });
+    const body = JSON.parse(agent.text); body.frames[0].imageId = transformed.id;
+    agent = f.store.clipDrafts.write(f.pid, agent.documentId, { expectedDocumentRevision: agent.documentRevision, text: JSON.stringify(body) });
+    const selection = { assetIds: [transformed.id], folders: [] };
+    const blocked = () => {
+      assert.ok(f.store.library.planDelete(f.pid, selection).blockers.some(blocker => /冻结图片/.test(blocker.reason)));
+      assert.throws(() => f.store.library.delete(f.pid, selection, f.store.library.revision(f.pid)), (error: any) => error.statusCode === 409 && /冻结图片/.test(error.message));
+    };
+    assert.ok(!JSON.parse(source.text).frames.some((frame: any) => frame.imageId === transformed.id));
+    blocked();
+    const delivery = await f.store.clipDrafts.deliver(f.pid, agent.documentId, agent.documentRevision, () => {});
+    assert.equal(f.store.clipDrafts.read(f.pid, agent.documentId).draft.readOnly, true);
+    assert.equal(f.store.tasks.draftHoldsLease(f.pid, agent.draft), true);
+    assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, agent.documentId), true);
+    blocked();
+    const pixels = readFileSync((await f.store.animation.renderFrame(f.pid, delivery.snapshotId, clip.frames[0]!.id)).path);
+    const adoption = await f.api(`/api/projects/${f.pid}/clip-drafts/${source.documentId}/adopt`, { expectedDocumentRevision: source.documentRevision, resultDraftId: agent.documentId, expectedResultDocumentRevision: agent.documentRevision });
+    assert.equal(adoption.statusCode, 200, adoption.body); let human = adoption.json();
+    assert.equal(JSON.parse(human.text).frames[0].imageId, transformed.id);
+    assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, agent.documentId), false, "consumed fixed result no longer holds a duplicate lease");
+    assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, human.documentId), true); blocked();
+    const humanBody = JSON.parse(human.text); humanBody.frames[0].imageId = f.image.id;
+    human = f.store.clipDrafts.write(f.pid, human.documentId, { expectedDocumentRevision: human.documentRevision, text: JSON.stringify(humanBody) });
+    assert.ok(f.store.clipDrafts.dependencyImageIds(f.pid, human.documentId).includes(transformed.id), "human protects every frozen dependency, even after removing it from current text");
+    blocked();
+    const saved = await f.api(`/api/projects/${f.pid}/clip-drafts/${human.documentId}/save`, { documentRevision: human.documentRevision });
+    assert.equal(saved.statusCode, 200, saved.body);
+    assert.deepEqual(f.store.library.planDelete(f.pid, selection).blockers, [], "saved human and consumed proposal release the unused dependency even if task/source still exists");
+    f.store.library.delete(f.pid, selection, f.store.library.revision(f.pid));
+    assert.equal(f.store.clipDrafts.read(f.pid, agent.documentId).text, agent.text);
+    assert.deepEqual(f.store.clipDrafts.read(f.pid, agent.documentId).draft.delivery, delivery);
+    assert.deepEqual(readFileSync((await f.store.animation.renderFrame(f.pid, delivery.snapshotId, clip.frames[0]!.id)).path), pixels);
+  } finally { await f.cleanup(); }
+});
+
+test("N1 lease: stopped/old-intent task proposals and explicitly ended taskless sources release without deleting history", async () => {
+  const f = await fixture();
+  try {
+    const transformed = await f.store.transform(f.pid, f.image.id, f.image.revision, { scale: 0.8 }), selection = { assetIds: [transformed.id], folders: [] };
+    for (const end of ["stop", "intent", "discard-source", "discard-result"] as const) {
+      const clip = f.clip(1), human = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision }, "human");
+      let task = ["stop", "intent"].includes(end) ? await f.create({ target: { mode: "draft", draftId: human.documentId, documentRevision: human.documentRevision } }) : undefined;
+      if (task) task = f.approveExisting(task, task.target!.snapshotId);
+      const session = task ? f.store.session(task.sessionId!) : f.store.createSession(f.pid);
+      let result = f.store.clipDrafts.create(f.pid, { clipId: clip.id, revision: clip.revision, fromDraftId: human.documentId }, "agent", session.id, task ? { taskId: task.id, intentVersion: task.intentVersion } : undefined);
+      const body = JSON.parse(result.text); body.frames[0].imageId = transformed.id;
+      result = f.store.clipDrafts.write(f.pid, result.documentId, { expectedDocumentRevision: result.documentRevision, text: JSON.stringify(body) });
+      const delivery = await f.store.clipDrafts.deliver(f.pid, result.documentId, result.documentRevision, () => {});
+      assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, result.documentId), true);
+      assert.ok(f.store.library.planDelete(f.pid, selection).blockers.some(blocker => /冻结图片/.test(blocker.reason)));
+      if (end === "stop" || end === "intent") f.store.tasks.action(f.pid, task!.id, { expectedRevision: f.store.tasks.get(f.pid, task!.id).revision, action: end === "stop" ? "stop" : "feedback", ...(end === "intent" ? { text: "明确新意图，旧结果转历史", feedbackKind: "local" as const } : {}) });
+      else if (end === "discard-source") f.store.clipDrafts.discard(f.pid, human.documentId, human.documentRevision);
+      else f.store.clipDrafts.discard(f.pid, result.documentId, result.documentRevision);
+      assert.equal(f.store.clipDrafts.holdsDependencyLease(f.pid, result.documentId), false);
+      assert.deepEqual(f.store.library.planDelete(f.pid, selection).blockers, []);
+      assert.equal(f.store.clipDrafts.read(f.pid, result.documentId).text, result.text);
+      assert.deepEqual(f.store.clipDrafts.read(f.pid, result.documentId).draft.delivery, delivery);
+      assert.ok((await f.store.animation.renderFrame(f.pid, delivery.snapshotId, clip.frames[0]!.id)).path);
+    }
+    f.store.library.delete(f.pid, selection, f.store.library.revision(f.pid));
+  } finally { await f.cleanup(); }
+});
+
 test("final R1: actual UI queue/context/frame/whole payloads freeze through HTTP tasks and messages", async () => {
   const f = await fixture();
   try {

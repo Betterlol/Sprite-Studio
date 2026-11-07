@@ -8,7 +8,7 @@ test("one text survives method switching, exact v1 IDs and invalid JSON repair",
   const state=new SheetEditorState("source:revision");state.read(doc());const original=state.text;
   switchSheetMethod(state,"boxes",80,40,"a".repeat(64));let next=parseSheet(state.text)!;assert.equal(next.schemaVersion,2);assert.equal(next.slicing.items.length,0);
   assert.ok("output" in next.slicing && next.slicing.output.scale===1);const boxes=state.text;
-  switchSheetMethod(state,"components",80,40,"a".repeat(64));next=parseSheet(state.text)!;assert.equal(next.slicing.method,"components");
+  switchSheetMethod(state,"components",80,40,"a".repeat(64));next=parseSheet(state.text)!;if(next.schemaVersion===3)throw new Error("legacy method helper");assert.equal(next.slicing.method,"components");
   switchSheetMethod(state,"boxes",80,40,"a".repeat(64));assert.equal(state.text,boxes);
   switchSheetMethod(state,"grid",80,40,"a".repeat(64));assert.equal(state.text,original);assert.equal(parseSheet(state.text)!.slicing.items[0]!.id,recipe.slicing.items[0]!.id);
   state.edit("{");switchSheetMethod(state,"boxes",80,40,"a".repeat(64));assert.equal(state.text,"{");assert.equal(parseSheet(state.text),null);state.edit(original);assert.ok(parseSheet(state.text));

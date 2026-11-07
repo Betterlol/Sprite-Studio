@@ -18,14 +18,13 @@ import type { FramePreview } from "./FrameAdjustmentPanel.tsx";
 import { FrameSaveApprovals } from "./FrameSaveApprovals.tsx";
 import { GeneratedPreview } from "./GeneratedPreview.tsx";
 import type { GeneratedImageInfo } from "../studio/generated.ts";
-import type { SheetOverlay } from "./SliceConfigPanel.tsx";
+import { SliceWorkbench } from "./SliceWorkbench.tsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InterpolationPanel } from "./InterpolationPanel.tsx";
 import { NewClipDialog } from "./NewClipDialog.tsx";
 import { AnimationPanel } from "./AnimationPanel.tsx";
 import { ComparisonPlayer } from "./ComparisonPlayer.tsx";
 import { api } from "./api.ts";
-import { SliceConfigPanel } from "./SliceConfigPanel.tsx";
 import { ResourceLibrary } from "./ResourceLibrary.tsx";
 import {
   Upload,
@@ -213,8 +212,7 @@ export function App() {
   useEffect(() => {
     localStorage.setItem("studio.tool", tool);
   }, [tool]);
-  const [sliceOverlay, setSliceOverlay] = useState<SheetOverlay | null>(null);
-  const [showGrid, setShowGrid] = useState(true);
+  const [slicePropertiesHost, setSlicePropertiesHost] = useState<HTMLElement | null>(null);
   const [framePreview, setFramePreview] = useState<FramePreview | null>(null);
   useEffect(() => {
     if (tool !== "adjust" && tool !== "review") setFramePreview(null);
@@ -1010,6 +1008,10 @@ export function App() {
             onContext={updateContext} onBridge={setBridge} onSaved={() => refreshRef.current()}
             legacyDrafts={state?.frameDrafts || []} clipDrafts={state?.clipDrafts || []} onLegacyPreview={id => void playSnapshot(id)}
             onTool={value => { setTool(value); setRightTab(value === "review" ? "checks" : "properties"); }}
+          /> : currentImage && !currentImage.producer && currentImage.frameCount===1 && tool==="slice" ? <SliceWorkbench
+            key={`${projectId}-${currentImage.id}`} projectId={projectId} image={currentImage} propertiesHost={slicePropertiesHost}
+            refreshToken={`${state?.configurationRevision}-${state?.libraryRevision}`} onRefresh={()=>refreshRef.current()} disabled={!!operation||!!blocker}
+            onOpenFrame={id=>{setSelectedId(id);setTool("adjust");}}
           /> : <>
           <div className={`stage ${background}`} ref={stage}>
             {currentImage ? (
@@ -1033,14 +1035,6 @@ export function App() {
                   alt={currentImage.name}
                   draggable={false}
                 />
-                {tool === "slice" && showGrid && !clip && !currentImage.producer &&
-                  sliceOverlay?.sourceId === currentImage.id && sliceOverlay.sourceRevision === currentImage.revision && (
-                    <svg className="grid-overlay sheet-overlay" viewBox={`0 0 ${currentImage.width} ${currentImage.height}`} preserveAspectRatio="none" aria-label="原图切割区域">
-                      {sliceOverlay.rectangles.map((rect,i) => <rect key={`${rect.selection}-${i}`} x={rect.box[0]} y={rect.box[1]} width={rect.box[2]!-rect.box[0]!} height={rect.box[3]!-rect.box[1]!}
-                        className={rect.selection===sliceOverlay.selected?"selected":""} fill="transparent" stroke="currentColor" strokeWidth="1" vectorEffect="non-scaling-stroke"
-                        role="button" tabIndex={0} aria-label={`选择原图区域${i+1}`} onClick={()=>sliceOverlay.onSelect(rect.selection)} onKeyDown={e=>{if(e.key==="Enter" || e.key===" "){e.preventDefault();sliceOverlay.onSelect(rect.selection);}}} />)}
-                    </svg>
-                  )}
                 {imagePreview?.result.blocking && (
                   <div className="canvas-overflow-border" aria-hidden="true" />
                 )}
@@ -1179,19 +1173,7 @@ export function App() {
                 currentImage &&
                 !currentImage.producer &&
                 currentImage.frameCount === 1 ? (
-                  <SliceConfigPanel
-                    key={`${projectId}-${currentImage.id}`}
-                    projectId={projectId}
-                    image={currentImage}
-                    assets={state?.assets || []}
-                    refreshToken={`${state?.configurationRevision}-${state?.libraryRevision}`}
-                    onRefresh={() => refreshRef.current()}
-                    onSelect={setSelectedId}
-                    onOverlay={setSliceOverlay}
-                    gridVisible={showGrid}
-                    onGridVisible={setShowGrid}
-                    disabled={!!operation || !!blocker}
-                  />
+                  <div className="slice-properties-host" ref={setSlicePropertiesHost} />
                 ) : (
                   <p className="adjust-note">
                     请在原图素材或参考图中选择静态原图配置切割；动画帧可在调整页编辑。

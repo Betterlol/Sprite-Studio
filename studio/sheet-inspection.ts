@@ -2,10 +2,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { z } from "zod";
 import { sha256, StudioError, type ProjectStore } from "./store.ts";
-import { detectionSchema, inspectSheetSchema, SHEET_ALGORITHM, type InspectSheetInput, type SheetRect } from "./sheet-schema.ts";
+import { detectionSchema, inspectSheetSchema, SHEET_ALGORITHM, sheetRecipeV3Schema, type SheetRecipe, type SheetRecipeV3, type InspectSheetInput, type SheetRect } from "./sheet-schema.ts";
+import { saveSelection, readSelection } from "./sheet-selections.ts";
 
 export type SheetInspection = {
-  id: string; action: "detect" | "preview"; assetId: string; sourceRevision: string; sourceContentHash: string;
+  id: string; action: "detect" | "preview" | "generate" | "resolve"; assetId: string; sourceRevision: string; sourceContentHash: string;
+  recipe?: SheetRecipeV3;
+  frameImages?: { index: number; raw: { hash: string; url: string }; output: { hash: string; url: string } }[];
   algorithmVersion?: string; parameterHash?: string; detection?: z.infer<typeof detectionSchema>;
   total: number; offset?: number; limit: number; start?: number; end?: number;
   candidates?: { key: string; box: number[]; pixelCount: number }[];
@@ -42,6 +45,7 @@ export class SheetInspectionService {
       const value = envelope.value as Cached;
       if (value.info.id !== id) return;
       for (const hash of value.images) this.imagePath(pid, hash);
+      for (const frame of value.info.frameImages || []) { this.imagePath(pid,frame.raw.hash); this.imagePath(pid,frame.output.hash); }
       return value;
     } catch { return; }
   }
@@ -52,8 +56,99 @@ export class SheetInspectionService {
     const keys = new Set(saved.allKeys);
     if (slicing.items.some(item => item.componentKeys.some(key => !keys.has(key)))) throw new StudioError("STALE_ANALYSIS：组件key不属于当前检测，请重新检测并显式分组", 409);
   }
+  selection(pid: string, hash: string) { return readSelection(this.store,pid,hash); }
+  /** Supply only server-resolved paths; saved recipes contain no executable generator. */
+  regionParams(pid: string, sourceHash: string, recipe: SheetRecipe) {
+    if (recipe.schemaVersion !== 3) return { ...recipe.slicing, recipeVersion: recipe.schemaVersion };
+    return { ...recipe.slicing, recipeVersion: 3, items: recipe.slicing.items.map(item => {
+      if (!item.selection) return item;
+      const selected=this.selection(pid,item.selection);
+      if (JSON.stringify(item.box)!==JSON.stringify(selected.box)) {
+        const {selection,...rectangle}=item; return rectangle;
+      }
+      if (selected.sourceContentHash!==sourceHash) throw new StudioError("选区来源已变化，请重新生成区域或手动调整",409);
+      return {...item,_selectionPath:selected.path,_selectionImageHash:selected.imageHash};
+    }) };
+  }
+  private async regions(pid: string, spec: Extract<ReturnType<typeof inspectSheetSchema.parse>,{action:"generate"|"resolve"|"preview"}>): Promise<SheetInspection> {
+    const source=this.store.image(pid,spec.assetId), sourcePath=this.store.imagePath(pid,source.id,spec.expectedSourceRevision);
+    if(source.frameCount!==1||source.producer) throw new StudioError("请选择静态原图");
+    const original=spec.action==="generate" ? this.store.sheets.parse(pid,source.id,spec.text??this.store.sheets.read(pid,source.id).text,"read") : this.store.sheets.parse(pid,source.id,spec.text??this.store.sheets.read(pid,source.id).text,"inspect");
+    if(spec.action==="resolve"&&original.schemaVersion===3) {
+      const result=await this.inspect(pid,{action:"preview",assetId:source.id,expectedSourceRevision:spec.expectedSourceRevision,text:JSON.stringify(original)});
+      return {...result,action:"resolve",recipe:original};
+    }
+    if(spec.action==="generate"&&spec.method==="grid"&&!spec.grid) throw new StudioError("网格生成需要grid参数");
+    const {expectedSourceRevision,...keyInput}=spec;
+    const id=sha256(JSON.stringify(["region-inspect-v3-effective-recipe-2",source.contentHash,keyInput,spec.action!=="preview"&&!spec.text?original:undefined]));
+    let cached=this.cached(pid,id);
+    if(!cached) {
+      const stage=this.store.stage(pid);
+      const params=spec.action==="generate" ? {method:spec.method,grid:spec.grid,detection:spec.detection,output:spec.output} : this.regionParams(pid,source.contentHash,original);
+      const result=await this.store.worker.run(spec.action==="generate"?"region_generate":spec.action==="resolve"?"region_resolve":"region_preview",{
+        ...params,path:sourcePath,outputDir:stage,...(spec.action==="preview"?{start:spec.start,limit:spec.limit}:{})
+      }).catch(error=>{this.store.imagePath(pid,source.id,spec.expectedSourceRevision);throw error;});
+      this.store.imagePath(pid,source.id,spec.expectedSourceRevision);
+      const validBox=(box:unknown):box is number[]=>Array.isArray(box)&&box.length===4&&box.every(Number.isInteger)&&box[0]>=0&&box[1]>=0&&box[0]<box[2]&&box[1]<box[3]&&box[2]<=source.width&&box[3]<=source.height;
+      let recipe:SheetRecipeV3|undefined;
+      if(spec.action!=="preview") {
+        if(!Array.isArray(result.items)||result.items.length>128||result.items.some((item:any)=>!validBox(item.box))||!Array.isArray(result.selectionFiles)) throw new StudioError("区域生成协议无效");
+        const items=result.items as SheetRecipeV3["slicing"]["items"];
+        const seen=new Set<number>();let maskPixels=0;
+        for(const selected of result.selectionFiles) {
+          if(!Number.isInteger(selected.index)||!items[selected.index]||seen.has(selected.index)||JSON.stringify(items[selected.index]!.box)!==JSON.stringify(selected.box)||selected.path!==join(stage,`selection-${String(selected.index).padStart(3,"0")}.png`)) throw new StudioError("选区生成协议无效");
+          seen.add(selected.index);
+          const [l,t,r,b]=selected.box;maskPixels+=(r-l)*(b-t);if(maskPixels>67_108_864) throw new StudioError("选区总像素预算超限");
+          const bytes=await checkedPng(this.store,selected.path,stage,r-l,b-t);
+          this.store.imagePath(pid,source.id,spec.expectedSourceRevision);
+          items[selected.index]!.selection=saveSelection(this.store,pid,source.contentHash,selected.box,bytes);
+        }
+        if(spec.action==="generate") {
+          // Reuse only exact, unambiguous selections. Never map new poses by index.
+          const signature=(item:any)=>JSON.stringify([item.box,item.selection||null]);
+          for(const item of items) {
+            const matches=original.slicing.items.filter(old=>"box"in old&&signature(old)===signature(item));
+            if(matches.length===1&&items.filter(next=>signature(next)===signature(item)).length===1) {
+              const old=matches[0]!; if(old.id) item.id=old.id;item.name=old.name;item.enabled=old.enabled;
+            }
+          }
+        }
+        recipe=sheetRecipeV3Schema.parse({schemaVersion:3,type:"sheet-recipe",slicing:{items,output:result.output,outputFolder:original.slicing.outputFolder,...(spec.action==="resolve"&&"expectedFrames"in original.slicing&&original.slicing.expectedFrames?{expectedFrames:original.slicing.expectedFrames}:{})}});
+      } else {
+        const indexes=original.slicing.items.flatMap((item,index)=>item.enabled?[index]:[]);
+        if(result.total!==indexes.length||result.start!==spec.start||result.end!==Math.min(indexes.length,spec.start+spec.limit)||!Array.isArray(result.frames)||JSON.stringify(result.frames.map((f:any)=>f.index))!==JSON.stringify(indexes.slice(spec.start,spec.start+spec.limit))||!Array.isArray(result.frameFiles)||result.frameFiles.length!==result.frames.length) throw new StudioError("区域预览协议无效");
+      }
+      const folder=this.store.safePath(pid,".studio/sheet-inspections");mkdirSync(folder,{recursive:true});
+      const storeImage=async(file:string,maxDimension?:number)=>{
+        const bytes=await checkedPng(this.store,file,stage);
+        // The worker's independent decoder also enforces the source pixel ceiling.
+        if(maxDimension&&(bytes.readUInt32BE(16)>maxDimension||bytes.readUInt32BE(20)>maxDimension)) throw new StudioError("预览缩略图尺寸超限");
+        this.store.imagePath(pid,source.id,spec.expectedSourceRevision);
+        const hash=sha256(bytes),target=join(folder,hash+".png");
+        if(existsSync(target)&&sha256(readFileSync(target))!==hash)throw new StudioError("不可变检查图片已改变",409);
+        if(!existsSync(target))writeFileSync(target,bytes,{flag:"wx"});return {hash,url:""};
+      };
+      if(!Array.isArray(result.files)||result.files.length!==1)throw new StudioError("区域检查证据数量不符");
+      const image=await storeImage(result.files[0],1024);
+      const frameImages: NonNullable<SheetInspection["frameImages"]> = [];
+      if(spec.action==="preview") for(const [i,file] of result.frameFiles.entries()) {
+        if(file.index!==result.frames[i].index||file.raw!==join(stage,`raw-${String(i).padStart(3,"0")}.png`)||file.output!==join(stage,`output-${String(i).padStart(3,"0")}.png`))throw new StudioError("原帧预览文件协议无效");
+        frameImages.push({index:file.index,raw:await storeImage(file.raw,1024),output:await storeImage(file.output,1024)});
+      }
+      const {files,selectionFiles,frameFiles,items,...info}=result;
+      cached={info:{...info,id,action:spec.action,sourceContentHash:source.contentHash,...(recipe?{recipe}:{}),...(frameImages.length?{frameImages}:{})},images:[image.hash]};
+      this.store.imagePath(pid,source.id,spec.expectedSourceRevision);
+      writeFileSync(this.cachePath(pid,id),JSON.stringify({hash:sha256(JSON.stringify(cached)),value:cached}));
+    }
+    if(cached.info.recipe) this.regionParams(pid,source.contentHash,cached.info.recipe);
+    this.store.imagePath(pid,source.id,spec.expectedSourceRevision);
+    const url=(hash:string)=>`/api/projects/${pid}/sheet-inspections/${hash}/image`;
+    return {...cached.info,assetId:source.id,sourceRevision:source.revision,images:cached.images.map(hash=>({hash,url:url(hash)})),...(cached.info.frameImages?{frameImages:cached.info.frameImages.map(f=>({...f,raw:{...f.raw,url:url(f.raw.hash)},output:{...f.output,url:url(f.output.hash)}}))}:{})};
+  }
   async inspect(pid: string, input: InspectSheetInput): Promise<SheetInspection> {
     const spec = inspectSheetSchema.parse(input);
+    if(spec.action==="generate"||spec.action==="resolve") return this.store.reading(pid,()=>this.regions(pid,spec));
+    if(spec.action==="preview"&&this.store.sheets.parse(pid,spec.assetId,spec.text,"inspect").schemaVersion===3) return this.store.reading(pid,()=>this.regions(pid,spec));
     return this.store.reading(pid, async () => {
       const source = this.store.image(pid, spec.assetId);
       if (source.frameCount !== 1 || source.producer) throw new StudioError("请选择静态原图检查切割");

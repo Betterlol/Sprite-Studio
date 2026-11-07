@@ -80,7 +80,7 @@ test("component masks do not leak overlapping bbox contents; explicit groups pre
     const blue=pixels(f.store.imagePath(f.pid,receipt.outputIds[1]!));assert.equal(blue.pixels.filter(p=>p[3]===128).length,9);assert.ok(blue.pixels.filter(p=>p[3]!>0).every(p=>p.join(",")==="0,0,255,128"));
     const clip=f.store.createClip(f.pid,"reference",receipt.outputIds.map(imageId=>({id:randomUUID(),imageId,durationUs:100000})));
     const changed=f.store.sheets.read(f.pid,f.source.id).recipe;
-    if(changed.slicing.method!=="components")throw new Error("components");
+    if(changed.schemaVersion===3 || changed.slicing.method!=="components")throw new Error("components");
     changed.slicing.items[0]!.componentKeys=[ring.key,inner.key];changed.slicing.items.reverse();
     const saved=f.save(changed),next=await f.store.sheets.execute(f.pid,f.source.id,saved.definitionRevision,randomUUID());assert.deepEqual(next.outputIds,[...receipt.outputIds].reverse());
     assert.equal(pixels(f.store.imagePath(f.pid,receipt.outputIds[0]!)).pixels.filter(p=>p[3]!>0).length,41);
@@ -115,8 +115,8 @@ test("stale components remain structurally readable and repairable; saves bind k
   const f=await fixture();try {
     const d=await f.inspect(),recipe=components(f.source.contentHash,[[d.candidates![0]!.key]]);const doc=f.save(recipe);
     const path=f.store.safePath(f.pid,doc.path), stale=structuredClone(doc.recipe);
-    if(stale.slicing.method!=="components")throw new Error("components");stale.slicing.sourceContentHash="0".repeat(64);stale.slicing.algorithmVersion="old";writeFileSync(path,JSON.stringify(stale));
-    assert.equal(f.store.sheets.read(f.pid,f.source.id).recipe.slicing.method,"components");assert.ok(f.store.state(f.pid).configurationRevision);
+    if(stale.schemaVersion===3 || stale.slicing.method!=="components")throw new Error("components");stale.slicing.sourceContentHash="0".repeat(64);stale.slicing.algorithmVersion="old";writeFileSync(path,JSON.stringify(stale));
+    const readable=f.store.sheets.read(f.pid,f.source.id).recipe;if(readable.schemaVersion===3)throw new Error("legacy components");assert.equal(readable.slicing.method,"components");assert.ok(f.store.state(f.pid).configurationRevision);
     assert.throws(()=>f.save(stale),/STALE_ANALYSIS/);await assert.rejects(f.store.sheets.execute(f.pid,f.source.id,f.store.sheets.read(f.pid,f.source.id).definitionRevision,randomUUID()),/STALE_ANALYSIS/);
     const refreshed=await f.inspect();stale.slicing.sourceContentHash=f.source.contentHash;stale.slicing.algorithmVersion=SHEET_ALGORITHM;stale.slicing.items[0]!.componentKeys=[refreshed.candidates![1]!.key];const fixed=f.save(stale);assert.equal(fixed.recipe.slicing.items[0]!.id,doc.recipe.slicing.items[0]!.id);
     stale.slicing.items[0]!.componentKeys=["f".repeat(64)];assert.throws(()=>f.save(stale),/组件key/);
@@ -272,5 +272,5 @@ test("a newly occupied output path at the final guard is retained and never over
 
 test("MCP advertises the readonly shared inspect contract without a runtime or HTTP connection",()=>{
   const out=spawnSync(process.execPath,["studio/mcp.ts","http://127.0.0.1:1","test-session"],{input:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"})+"\n",env:{...process.env,SPRITE_STUDIO_TOOL_TOKEN:"stub"},windowsHide:true});
-  assert.equal(out.status,0,out.stderr.toString());const tool=JSON.parse(out.stdout.toString()).result.tools.find((t:any)=>t.name==="inspect_sheet");assert.ok(tool);assert.equal(tool.annotations.readOnlyHint,true);assert.equal(tool.inputSchema.type,"object");assert.equal(tool.inputSchema.oneOf?.length || tool.inputSchema.anyOf?.length,2);
+  assert.equal(out.status,0,out.stderr.toString());const tool=JSON.parse(out.stdout.toString()).result.tools.find((t:any)=>t.name==="inspect_sheet");assert.ok(tool);assert.equal(tool.annotations.readOnlyHint,true);assert.equal(tool.inputSchema.type,"object");assert.equal(tool.inputSchema.oneOf?.length || tool.inputSchema.anyOf?.length,4);
 });

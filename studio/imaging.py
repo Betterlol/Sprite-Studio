@@ -78,6 +78,12 @@ def run(method, params):
     folder = inside(params['outputDir'])
     native(folder).mkdir(parents=True, exist_ok=True)
     if method == 'review': return review_images(params, folder)
+    if method in ('region_generate', 'region_resolve', 'region_preview') or (method == 'recipe_slice' and params.get('recipeVersion') == 3):
+        if count != 1: raise ValueError('切割来源必须是静态图片')
+        from region_imaging import process
+        from hashlib import sha256
+        source_hash = sha256(native(inside(params['path'])).read_bytes()).hexdigest()
+        return process(method, image, params, folder, native, inside, source_hash)
     if method in ('sheet_detect', 'sheet_preview') or (method == 'recipe_slice' and params.get('recipeVersion') == 2):
         if count != 1: raise ValueError('切割来源必须是静态图片')
         from sheet_imaging import process

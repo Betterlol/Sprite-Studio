@@ -11,8 +11,9 @@ import {
   unlinkSync,
   createReadStream,
   realpathSync,
+  statSync,
 } from "node:fs";
-import { resolve, join } from "node:path";
+import { resolve, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { ProjectStore, StudioError } from "./store.ts";
@@ -514,6 +515,62 @@ app.get(
         `attachment; filename*=UTF-8''${encodeURIComponent(exported.filename)}`,
       )
       .send(createReadStream(exported.path));
+  },
+);
+
+app.get("/api/projects/:projectId/exports", async (request) =>
+  store.exports.list(pid(request)),
+);
+app.post("/api/projects/:projectId/exports", async (request, reply) =>
+  reply.code(202).send(store.exports.create(pid(request), request.body)),
+);
+app.get(
+  "/api/projects/:projectId/exports/jobs/:exportId",
+  async (request: any) =>
+    store.exports.job(
+      pid(request),
+      z.string().uuid().parse(request.params.exportId),
+    ),
+);
+app.post(
+  "/api/projects/:projectId/exports/jobs/:exportId/cancel",
+  async (request: any) =>
+    store.exports.cancel(
+      pid(request),
+      z.string().uuid().parse(request.params.exportId),
+    ),
+);
+app.get(
+  "/api/projects/:projectId/exports/files/:fileName",
+  async (request: any, reply) => {
+    // find-my-way may hand over the encoded or the decoded segment; the stored
+    // names are free of "%" so trying both is unambiguous.
+    const requested = String(request.params.fileName);
+    const names = [requested];
+    try {
+      const decoded = decodeURIComponent(requested);
+      if (decoded !== requested) names.push(decoded);
+    } catch {
+      // Keep the raw segment when it is not valid URL encoding.
+    }
+    let path = "";
+    for (const name of names) {
+      try {
+        path = store.exports.file(pid(request), name);
+        break;
+      } catch {
+        // Try the next spelling before reporting a missing file.
+      }
+    }
+    if (!path) throw new StudioError("导出文件不存在", 404);
+    return reply
+      .type("application/zip")
+      .header(
+        "Content-Disposition",
+        `attachment; filename*=UTF-8''${encodeURIComponent(basename(path))}`,
+      )
+      .header("Content-Length", String(statSync(path).size))
+      .send(createReadStream(path));
   },
 );
 

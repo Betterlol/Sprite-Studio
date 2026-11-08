@@ -13,6 +13,7 @@ import { SnapshotPlayer } from "./SnapshotPlayer.tsx";
 import { editingBlock, ordinaryConversation, taskConversation, assertConversation, conversationDestination, messageContinuation, type TaskContinuation, type ArchivableReviewDefinition, type ConversationSelection } from "./workflow-state.ts";
 import type { EditingContext, ProductionTask, ClipDraft, QualityCapabilities, ReviewSequenceDefinition } from "../studio/workflow-model.ts";
 import { PermissionSettings } from "./PermissionSettings.tsx";
+import { ExportDialog } from "./ExportDialog.tsx";
 import { ToolApprovals } from "./ToolApprovals.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
 import type { FramePreview } from "./FrameAdjustmentPanel.tsx";
@@ -144,6 +145,7 @@ export function App() {
     localStorage.setItem("studio.model", agentModel);
   }, [agentModel]);
   const [permissionsOpen, setPermissionsOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [theme, setTheme] = useState(() =>
     localStorage.getItem("studio.theme") === "light" ? "light" : "dark",
   );
@@ -970,6 +972,16 @@ export function App() {
           )}
         </div>
         <div className="header-right">
+          <button
+            className="text-button"
+            title="一键导出工程资源"
+            aria-haspopup="dialog"
+            onClick={() => setExportOpen(true)}
+            disabled={!projectId || !state}
+          >
+            <Download size={15} />
+            <span>导出</span>
+          </button>
           <button
             className="icon-button"
             title="助手工具权限"
@@ -1950,6 +1962,16 @@ export function App() {
       </main>
       {permissionsOpen && (
         <PermissionSettings onClose={() => setPermissionsOpen(false)} />
+      )}
+      {exportOpen && state && (
+        <ExportDialog
+          projectId={projectId}
+          clips={(state.assets || []).filter(
+            (asset): asset is ClipAsset => asset.type === "clip",
+          )}
+          reviewSequences={state.reviewSequences || []}
+          onClose={() => setExportOpen(false)}
+        />
       )}
       <footer className="statusbar">
         <span>

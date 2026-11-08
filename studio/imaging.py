@@ -72,6 +72,9 @@ def review_images(params, folder):
     return {'contact':str(contact_path),'onion':str(onion_path),'frames':observations,'pairs':[{'from':left,'to':right,'loopBoundary':loop} for left,right,loop in pairs]}
 
 def run(method, params):
+    if method == 'export_clip':
+        from export_imaging import process
+        return process(method, params, inside, native)
     image, count = image_at(params['path'])
     if method == 'inspect':
         return {'width': image.width, 'height': image.height, 'frameCount': count}

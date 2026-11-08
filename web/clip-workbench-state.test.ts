@@ -138,6 +138,7 @@ for (const legacySource of [false, true]) test(`R10 actual ClipWorkbench ${legac
   let adoptedPayload: any, plays: string[] = [], refreshes = 0, saves = 0;
   try {
     globalThis.fetch = async (url: any, options: any) => {
+      if (String(url).includes("/snapshots/")) return new Response(JSON.stringify({ id: human.draft.baseSnapshotId, clip }), { status: 200 });
       if (String(url).endsWith("/save")) saves++;
       if (String(url).endsWith("/adopt")) {
         adoptedPayload = JSON.parse(options.body);
@@ -206,7 +207,7 @@ test("R7 actual ClipWorkbench mounted hook/effect path follows new saved props w
     component.unmount();
 
     const human: ClipDraftDocument = { documentId: id(9), documentRevision: "human-v1", text: JSON.stringify(clipEdit(clip)), draft: { id: id(9), projectId: id(5), clipId: clip.id, source: "human", status: "editing", baseSnapshotId: id(10), createdAt: "now" } };
-    globalThis.fetch = async (url: any) => new Response(JSON.stringify(String(url).endsWith("/preview") ? { draft: human.draft, before: { id: id(10), clip }, preview: { id: id(11), clip }, modified: false, modifiedFrameIds: [], warnings: [] } : human), { status: 200, headers: { "Content-Type": "application/json" } });
+    globalThis.fetch = async (url: any) => new Response(JSON.stringify(String(url).includes("/snapshots/") ? { id: human.draft.baseSnapshotId, clip } : String(url).endsWith("/preview") ? { draft: human.draft, before: { id: id(10), clip }, preview: { id: id(11), clip }, modified: false, modifiedFrameIds: [], warnings: [] } : human), { status: 200, headers: { "Content-Type": "application/json" } });
     const editable = mountedComponent(ClipWorkbench);
     try {
       editable.render({ ...props, locked: undefined }); tree = await editable.settle();
@@ -219,5 +220,46 @@ test("R7 actual ClipWorkbench mounted hook/effect path follows new saved props w
       assert.ok(descendants(tree).some(node => typeof node.props?.title === "string" && /动画保存版本发生变化/.test(node.props.title)));
       await assert.rejects(bridge.stabilize(), /冲突/);
     } finally { editable.unmount(); }
+  } finally { component.unmount(); await vite.close(); restore(); }
+});
+
+for (const scenario of ["live", "recovered", "local-edits", "persisted-edits"] as const) test(`saved animation refresh: ${scenario}`, async () => {
+  const restore = globals();
+  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true, hmr: false, watch: null }, appType: "custom" });
+  const { ClipWorkbench } = await vite.ssrLoadModule("/web/ClipWorkbench.tsx"), component = mountedComponent(ClipWorkbench);
+  const empty = { ...clip, revision: "empty-base", frames: [] }, emptyText = JSON.stringify(clipEdit(empty));
+  const editedText = JSON.stringify({ ...clipEdit(empty), frames: [clip.frames[0]] });
+  const old: ClipDraftDocument = { documentId: id(50), documentRevision: "old-body", text: scenario === "persisted-edits" ? editedText : emptyText, draft: { id: id(50), projectId: id(5), clipId: clip.id, source: "human", status: "editing", baseSnapshotId: id(51), createdAt: "now" } };
+  let saved = scenario === "live" ? empty : clip, creations = 0;
+  const contexts: any[] = [];
+  const props = () => ({ projectId: id(5), clip: saved, assets: [image], frameIndex: 0, onFrame() {}, playing: false, onPlaying() {}, propertiesHost: null, onContext: (value: any) => contexts.push(value), onBridge() {}, onSaved: async () => {}, onTool() {}, legacyDrafts: [], clipDrafts: [], onLegacyPreview() {} });
+  if (scenario !== "live") storage.set(`studio.clip-draft.${id(5)}.${clip.id}`, JSON.stringify({ id: old.documentId, revision: old.documentRevision, baseRevision: empty.revision, text: scenario === "local-edits" ? editedText : old.text, dependencies: "[]", assetVersions: { [image.id]: image.revision } }));
+  try {
+    globalThis.fetch = async (url: any, options: any) => {
+      const path = String(url);
+      if (path.includes("/snapshots/")) return new Response(JSON.stringify({ id: path.split("/").at(-1), clip: path.endsWith(id(51)) ? empty : clip }), { status: 200 });
+      if (options?.method === "POST" && path.endsWith("/clip-drafts")) {
+        creations++;
+        if (saved.revision === empty.revision) return new Response(JSON.stringify(old), { status: 200 });
+        const fresh = { ...old, documentId: id(52), documentRevision: "fresh-body", text: JSON.stringify(clipEdit(clip)), draft: { ...old.draft, id: id(52), baseSnapshotId: id(53) } };
+        return new Response(JSON.stringify(fresh), { status: 200 });
+      }
+      if (path.endsWith(old.documentId)) return new Response(JSON.stringify(old), { status: 200 });
+      if (path.endsWith("/preview")) return new Response(JSON.stringify({ draft: old.draft, before: { id: id(53), clip }, preview: { id: id(54), clip }, modified: false, modifiedFrameIds: [], warnings: [] }), { status: 200 });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    component.render(props()); let tree = await component.settle();
+    if (scenario === "live") { saved = clip; component.render(props()); tree = await component.settle(); }
+    if (scenario === "local-edits" || scenario === "persisted-edits") {
+      assert.equal(editor(tree).props.clip.frames.length, 1, "human edits remain intact");
+      assert.equal(creations, 0, "a changed document must not be replaced");
+      assert.ok(descendants(tree).some(node => typeof node.props?.title === "string" && /版本.*变化/.test(node.props.title)));
+    } else {
+      assert.deepEqual(editor(tree).props.clip.frames, clip.frames);
+      assert.ok(canvas(tree), "new saved frames must become visible");
+      assert.equal(contexts.at(-1).documentRevision, "fresh-body");
+      assert.ok(creations <= 2, "refresh does not loop on a single version");
+      assert.equal(old.text, emptyText, "historical empty draft is retained");
+    }
   } finally { component.unmount(); await vite.close(); restore(); }
 });

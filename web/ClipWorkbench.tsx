@@ -5,7 +5,7 @@ import { AnimationEditor } from "./AnimationEditor.tsx";
 import { LegacyFrameDrafts } from "./LegacyFrameDrafts.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
 import { api } from "./api.ts";
-import { assetUrl, snapshotFrameUrl, type Asset, type ClipAsset, type FrameTransform, type FrameDraft } from "../studio/model.ts";
+import { assetUrl, snapshotFrameUrl, type Asset, type ClipAsset, type ClipSnapshot, type FrameTransform, type FrameDraft } from "../studio/model.ts";
 import { clipEditSchema, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type ClipDraft, type EditingContext } from "../studio/workflow-model.ts";
 import { clipEdit, contextFor, dependencyKey, dependencyConflicts, sameClipText, samePreview, DraftQueue, editorReducer, editorState, legacyDerivation, finishFrameDrag, offsetByDrag, shortcutAllowed, type EditorAction } from "./workflow-state.ts";
 
@@ -31,6 +31,8 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
   const latest = useRef({ clip, assets, locked, frameIndex }); latest.current = { clip, assets, locked, frameIndex };
   const storageKey = `studio.clip-draft.${projectId}.${clip.id}`;
   const baseRevision = useRef(clip.revision);
+  const baseText = useRef<string | null>(null);
+  const refreshAttempt = useRef("");
   const baseDependencies = useRef(dependencyKey(clipEdit(clip), assets));
   const assetVersions = useRef<Record<string,string>>(Object.fromEntries(clip.frames.map(frame => [frame.imageId, assets.find(asset => asset.id === frame.imageId)?.revision || "missing"])));
   const path = `/api/projects/${projectId}/clip-drafts`;
@@ -65,14 +67,16 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
     try {
       const recovery = fresh ? null : JSON.parse(localStorage.getItem(storageKey) || "null") as { id: string; revision: string; baseRevision: string; text: string; dependencies?: string; assetVersions?: Record<string,string> } | null;
       const doc = recovery ? await api<ClipDraftDocument>(`${path}/${recovery.id}`) : await api<ClipDraftDocument>(path, { method: "POST", body: JSON.stringify(fromDraft ? legacyDerivation(latest.current.clip, fromDraft) : { clipId: clip.id, revision: latest.current.clip.revision, source: "human" }) });
+      const base = await api<ClipSnapshot>(`/api/projects/${projectId}/snapshots/${doc.draft.baseSnapshotId}`);
       if (!mounted.current || token !== generation.current) return;
+      baseText.current = JSON.stringify(clipEdit(base.clip));
       const recoveredText = recovery?.text || doc.text;
       const edit = clipEditSchema.parse(JSON.parse(recoveredText));
       const next = editorState(edit); current.current = next; setEditor(next);
       setDocument(doc);
       const q = new DraftQueue(doc, (revision, text) => api<ClipDraftDocument>(`${path}/${doc.draft.id}`, { method: "PUT", body: JSON.stringify({ expectedDocumentRevision: revision, text }) }));
       queue.current = q;
-      baseRevision.current = recovery?.baseRevision || latest.current.clip.revision;
+      baseRevision.current = base.clip.revision;
       baseDependencies.current = recovery?.dependencies || dependencyKey(clipEdit(latest.current.clip), latest.current.assets);
       assetVersions.current = recovery?.assetVersions || Object.fromEntries(edit.frames.map(frame => [frame.imageId, latest.current.assets.find(asset => asset.id === frame.imageId)?.revision || "missing"]));
       if ((recovery && recovery.revision !== doc.documentRevision && !sameClipText(recovery.text, doc.text)) || (recovery && recovery.baseRevision !== latest.current.clip.revision) || dependencyConflicts(edit,latest.current.assets,assetVersions.current).length) {
@@ -109,12 +113,22 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
       setPreview(null);
       return;
     }
+    if (busy) return;
+    const sourceChanged = clip.revision !== baseRevision.current || dependencyKey(clipEdit(clip), assets) !== baseDependencies.current || dependencyConflicts(editor.present,assets,assetVersions.current).length > 0;
+    if (sourceChanged && document.draft.source === "human" && baseText.current !== null && queue.current?.settled &&
+      sameClipText(JSON.stringify(current.current.present), baseText.current) && sameClipText(queue.current.document.text, baseText.current)) {
+      // A viewing-only draft may follow a new saved version. Keep the old server
+      // draft intact; never refresh a modified or still-writing human document.
+      const key = JSON.stringify([clip.revision, dependencyKey(clipEdit(clip), assets)]);
+      if (!locked && refreshAttempt.current !== key) { refreshAttempt.current = key; void open(true); }
+      return;
+    }
     if (clip.revision !== baseRevision.current) { setConflict(true); setError("动画保存版本发生变化，本机草稿保留。需要重新载入或先复制草稿内容，不能覆盖新版本。"); }
     if (dependencyKey(clipEdit(clip), assets) !== baseDependencies.current || dependencyConflicts(editor.present,assets,assetVersions.current).length) {
       // Guard newly referenced images too; an old preview never authorizes changed pixels.
       setConflict(true); setError("依赖图片版本发生变化，旧预览已失效。草稿已保留，请重新载入后核对。");
     }
-  }, [clip.revision, assets.map(a => `${a.id}:${a.revision}`).join("|")]);
+  }, [clip.revision, assets.map(a => `${a.id}:${a.revision}`).join("|"), document?.draft.id, document?.draft.status, busy, locked]);
   useEffect(() => {
     if (!document || document.draft.status !== "editing" || document.draft.source !== "human") return;
     localStorage.setItem(storageKey, JSON.stringify({ id: document.draft.id, revision: queue.current?.document.documentRevision || document.documentRevision, baseRevision: baseRevision.current, text, dependencies: baseDependencies.current, assetVersions: assetVersions.current }));

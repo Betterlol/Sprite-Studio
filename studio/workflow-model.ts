@@ -70,7 +70,7 @@ export type ProductionTask = {
 };
 export type DraftDeliveryTarget = { draftId: string; documentRevision: string; kind?: "frame" };
 export type ClipDraftDelivery = { draftId: string; documentRevision: string; snapshotId: string; target: DraftDeliveryTarget };
-export type ClipDraft = { id: string; projectId: string; clipId: string; baseSnapshotId: string; source: "human" | "agent"; sessionId?: string; taskId?: string; intentVersion?: number; readOnly?: boolean; deliveryTarget?: DraftDeliveryTarget; delivery?: ClipDraftDelivery; adoptedResult?: { draftId: string; documentRevision: string }; status: "editing" | "saved" | "discarded"; createdAt: string };
+export type ClipDraft = { taskIndependent?: boolean; id: string; projectId: string; clipId: string; baseSnapshotId: string; source: "human" | "agent"; sessionId?: string; taskId?: string; intentVersion?: number; readOnly?: boolean; deliveryTarget?: DraftDeliveryTarget; delivery?: ClipDraftDelivery; adoptedResult?: { draftId: string; documentRevision: string }; status: "editing" | "saved" | "discarded"; createdAt: string };
 export const clipEditSchema = z.object({
   schemaVersion: z.literal(1), type: z.literal("clip-edit"),
   frames: z.array(z.object({ id, imageId: id, durationUs: z.number().int().min(1000).max(60_000_000), transform: frameTransformSchema.optional() }).strict()).max(128),

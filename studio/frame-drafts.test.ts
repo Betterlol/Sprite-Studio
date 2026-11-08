@@ -20,7 +20,7 @@ async function fixture() {
     { windowsHide: true },
   );
   assert.equal(result.status, 0, result.stderr.toString());
-  const store = new ProjectStore(join(root, "projects")),
+  const store = new ProjectStore(join(root, "projects"), { tasksEnabled: true }),
     pid = store.createProject("单帧配置验证").id;
   const image = await store.importImage(pid, "source.png", readFileSync(path));
   const clip = store.createClip(
@@ -394,7 +394,7 @@ test("permissions persist, cancellation never saves, and restart recovers pendin
       doc.documentRevision,
     );
     await pending(session);
-    restored = new ProjectStore(store.root);
+    restored = new ProjectStore(store.root, { tasksEnabled: true });
     assert.equal(restored.session(session.id).frameSaveApproval, undefined);
     assert.equal(
       restored.frameDrafts.get(pid, doc.documentId).status,
@@ -410,7 +410,7 @@ test("permissions persist, cancellation never saves, and restart recovers pendin
       doc.documentRevision,
     );
     assert.equal(result.saved, true);
-    const again = new ProjectStore(store.root);
+    const again = new ProjectStore(store.root, { tasksEnabled: true });
     assert.equal(again.frameDrafts.policy(), "allow");
     assert.equal(again.frameDrafts.get(pid, doc.documentId).status, "saved");
     assert.equal(
@@ -456,7 +456,7 @@ test("legacy single-frame drafts on one base merge without losing pending edits 
         documentRevision: "old-" + i,
       });
     }
-    restored = new ProjectStore(store.root);
+    restored = new ProjectStore(store.root, { tasksEnabled: true });
     const list = restored.frameDrafts.list(pid);
     assert.equal(list.length, 1);
     const config = JSON.parse(list[0]!.text);
@@ -477,7 +477,7 @@ test("legacy single-frame drafts on one base merge without losing pending edits 
       list[0]!.documentRevision,
     );
     assert.equal(preview.modifiedFrameIds.length, 2);
-    const again = new ProjectStore(store.root);
+    const again = new ProjectStore(store.root, { tasksEnabled: true });
     assert.equal(again.frameDrafts.list(pid).length, 1);
     again.worker.close();
   } finally {
@@ -516,7 +516,7 @@ test("task-owned historical v1 text is not migrated or merged across owners at s
     f.store.tasks.registerDraft(f.pid, thirdTask.id, { sessionId: session.id, intentVersion: thirdTask.intentVersion, barrierVersion: thirdTask.barrierVersion, draftId: another.documentId, kind: "frame" });
     const { taskId: _anotherOwner, intentVersion: _anotherIntent, ...anotherUntagged } = anotherEdited.draft;
     f.store.frameDrafts.persist(anotherUntagged);
-    await f.store.worker.close(); restored = new ProjectStore(f.store.root);
+    await f.store.worker.close(); restored = new ProjectStore(f.store.root, { tasksEnabled: true });
     assert.deepEqual(readFileSync(legacyPath), originalBytes); assert.equal(restored.frameDrafts.get(f.pid, old.documentId).readOnly, true);
     assert.equal(restored.frameDrafts.read(f.pid, old.documentId).text, legacyText); assert.equal(restored.frameDrafts.get(f.pid, old.documentId).mergedInto, undefined);
     const pendingHistory = restored.frameDrafts.get(f.pid, pendingId); assert.equal(pendingHistory.readOnly, true); assert.equal(pendingHistory.status, "editing"); assert.equal(pendingHistory.text, pendingText);

@@ -19,7 +19,7 @@ function python(script: string, args: string[] = []) {
 async function fixture(script = "d.rectangle((1,1,9,9),outline=(255,0,0,255));d.rectangle((4,4,6,6),fill=(0,0,255,128));im.putpixel((12,2),(0,255,0,255));im.putpixel((13,3),(0,255,0,255));im.putpixel((18,2),(255,255,0,16));im.putpixel((19,2),(255,255,0,17))", size="(24,16)") {
   const root=mkdtempSync(join(tmpdir(),"multi-sheet-")),file=join(root,"sheet.png");
   python(`from PIL import Image,ImageDraw;import sys;im=Image.new('RGBA',${size});d=ImageDraw.Draw(im);${script};im.save(sys.argv[1])`,[file]);
-  const store=new ProjectStore(join(root,"projects")),pid=store.createProject("multi").id;
+  const store=new ProjectStore(join(root,"projects"), { tasksEnabled: true }),pid=store.createProject("multi").id;
   const source=await store.importImage(pid,"sheet.png",readFileSync(file),"image");
   const inspect=(input: any={})=>store.sheetInspection.inspect(pid,{action:"detect",assetId:source.id,expectedSourceRevision:source.revision,...input});
   const save=(recipe: SheetRecipe)=>store.sheets.write(pid,[{documentId:source.id,expectedDocumentRevision:store.sheets.read(pid,source.id).documentRevision,text:JSON.stringify(recipe)}])[0]!;

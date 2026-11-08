@@ -84,6 +84,7 @@ export type ClipFrame = {
   transform?: FrameTransform;
 };
 export type FrameDraft = {
+  taskIndependent?: boolean;
   id: string;
   projectId: string;
   clipId: string;
@@ -263,7 +264,15 @@ export type ToolApproval = {
   barrierVersion?: number;
   directionRequired?: boolean;
 };
+export const turnPlanSchema = z.object({
+  threadId: z.string(),
+  turnId: z.string(),
+  explanation: z.string().nullable().optional(),
+  plan: z.array(z.object({ step: z.string(), status: z.enum(["pending", "inProgress", "completed"]) })),
+});
+export type TurnPlan = z.infer<typeof turnPlanSchema>;
 export type Session = {
+  plan?: TurnPlan;
   taskId?: string;
   workflowIntent?: { taskId: string; intentVersion: number; barrierVersion: number };
   editingContext?: import("./workflow-model.ts").EditingContext;

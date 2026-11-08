@@ -43,7 +43,9 @@ if (existsSync(lockPath)) {
 writeFileSync(lockPath, JSON.stringify({ pid: process.pid }), { flag: "wx" });
 const port = Number(process.env.PORT || 8766);
 const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
-const store = new ProjectStore(join(dataRoot, "projects"));
+const store = new ProjectStore(join(dataRoot, "projects"), {
+  tasksEnabled: process.env.SPRITE_STUDIO_TASKS_ENABLED === "1",
+});
 if (!store.projects.size) store.createProject("我的精灵工程");
 const agent = new AgentHub(store, `http://127.0.0.1:${port}`);
 const pid = (request: any) => z.string().uuid().parse(request.params.projectId);
@@ -390,11 +392,11 @@ app.post(
 );
 app.get("/api/tool-permissions", async () => ({
   policies: store.permissions.read(),
-  tools: permissionTools,
+  tools: permissionTools.filter(tool => store.tasksEnabled || tool.name !== "workflow_task"),
 }));
 app.put("/api/tool-permissions", async (request) => ({
   policies: store.permissions.write(request.body),
-  tools: permissionTools,
+  tools: permissionTools.filter(tool => store.tasksEnabled || tool.name !== "workflow_task"),
 }));
 app.post("/api/sessions/:sessionId/tool-approval", async (request: any) => {
   const spec = z

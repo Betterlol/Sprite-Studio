@@ -21,6 +21,7 @@ import { registerWorkflowRoutes } from "./workflow-routes.ts";
 import { freezeEditingContext } from "./workflow-context.ts";
 import { imageKindSchema } from "./model.ts";
 import { registerSheetRoutes } from "./sheet-routes.ts";
+import { registerProjectRoutes } from "./project-routes.ts";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const dataRoot = resolve(
@@ -72,6 +73,7 @@ app.setErrorHandler((error: any, request, reply) => {
 });
 
 registerWorkflowRoutes(app, store, agent);
+registerProjectRoutes(app, store, agent);
 const librarySelection = z.object({
   assetIds: z.array(z.string().uuid()).max(500).default([]),
   folders: z.array(z.string()).max(100).default([]),
@@ -142,13 +144,6 @@ app.post("/api/connect", async () => {
   agent.bootstrapPromise = agent.bootstrap();
   await agent.bootstrapPromise;
   return agent.status;
-});
-app.get("/api/projects", async () => [...store.projects.values()]);
-app.post("/api/projects", async (request) => {
-  const input = z
-    .object({ name: z.string().trim().min(1).max(100) })
-    .parse(request.body);
-  return store.createProject(input.name);
 });
 app.get("/api/projects/:projectId", async (request) =>
   store.state(pid(request)),

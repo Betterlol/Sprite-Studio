@@ -23,6 +23,8 @@ export class ClipDrafts {
   private saving = new Map<string, Promise<unknown>>();
   private store: ProjectStore;
   constructor(store: ProjectStore) { this.store = store; }
+  /** Drop the cached draft index of a project whose directory was just removed. */
+  purgeProject(pid: string) { ownershipIndexes.get(this.store)?.delete(pid); }
   private path(id: string) { return `.studio/clip-drafts/${id}.json`; }
   private get(pid: string, id: string): RecordData {
     if (!z.string().uuid().safeParse(id).success) throw new StudioError("动画草稿不存在", 404);

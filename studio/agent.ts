@@ -1834,6 +1834,34 @@ export class AgentHub {
     this.tokens.delete(id);
     this.store.deleteSession(id);
   }
+  /**
+   * Deletes a whole project. Validation runs first, then the idle runtimes of its
+   * conversations are released before the store removes files and in-memory state.
+   */
+  async deleteProject(id: string, name: string) {
+    this.store.assertProjectDeletable(id, name);
+    for (const session of [...this.store.sessions.values()]) {
+      if (session.projectId !== id) continue;
+      this.cancelTools(session, "工程已删除，待审批操作未执行");
+      this.cancelFrameSave(session, "工程已删除，修改未保存");
+      if (session.prompt) this.prompts.get(session.prompt.id)?.({});
+      const client = this.clients.get(session.id);
+      this.clients.delete(session.id);
+      await client?.close();
+      const timer = this.timers.get(session.id);
+      if (timer) clearTimeout(timer);
+      this.timers.delete(session.id);
+      this.tokens.delete(session.id);
+      this.toolTails.delete(session.id);
+      this.toolEpochs.delete(session.id);
+      this.promptTails.delete(session.id);
+      this.staleTurns.delete(session.id);
+      this.clientGenerationModes.delete(session.id);
+      this.transitioning.delete(session.id);
+      this.imports.delete(session.id);
+    }
+    return this.store.deleteProject(id, name);
+  }
   async close() {
     this.stopped = true;
     await Promise.allSettled(

@@ -64,6 +64,14 @@ export class ReviewSequences {
     }
   }
 
+  /** Drop cached definitions and snapshots of a project whose directory was just removed. */
+  purgeProject(pid: string) {
+    for (const [id, record] of [...this.definitions])
+      if (record.definition.projectId === pid) this.definitions.delete(id);
+    for (const [id, snapshot] of [...this.snapshots])
+      if (snapshot.projectId === pid) this.snapshots.delete(id);
+  }
+
   private path(pid: string, folder: string, id: string) {
     z.string().uuid().parse(id);
     return join(this.store.dir(pid), ".studio", "review-sequences", folder, `${id}.json`);

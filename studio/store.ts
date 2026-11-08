@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync,
   renameSync,
   realpathSync,
@@ -66,6 +67,9 @@ export const assetRevision = (value: any) => {
   return sha256(JSON.stringify(body));
 };
 const now = () => new Date().toISOString();
+// A deleted project's directory is renamed to this suffix before its files are erased,
+// so the project scan never half-reads a directory that is being removed.
+const deletingSuffix = ".deleting";
 const cleanName = (value: string) =>
   value
     .replace(/[\\/:*?"<>|\x00-\x1f]/g, "_")
@@ -117,6 +121,19 @@ export class ProjectStore extends EventEmitter {
     this.root = realpathSync(root);
     this.worker = new ImagingWorker(this.root);
     this.library = new ResourceLibrary(this);
+    // Finish an interrupted deletion first; a leftover is not a project and is never loaded.
+    for (const name of readdirSync(this.root))
+      if (name.endsWith(deletingSuffix))
+        try {
+          rmSync(join(this.root, name), {
+            recursive: true,
+            force: true,
+            maxRetries: 5,
+            retryDelay: 50,
+          });
+        } catch {
+          // Still locked; the next start retries without blocking this one.
+        }
     for (const name of readdirSync(this.root)) {
       const dir = join(this.root, name);
       if (!existsSync(join(dir, "project.json"))) continue;
@@ -218,6 +235,79 @@ export class ProjectStore extends EventEmitter {
     this.metadataPaths.set(project.id, new Map());
     this.changed(project.id);
     return project;
+  }
+  /**
+   * Whole-project deletion is permanent, so it needs the exact project name and
+   * refuses while the last project or anything actively running would be lost.
+   */
+  assertProjectDeletable(id: string, name: string) {
+    const project = this.project(id);
+    if (name !== project.name)
+      throw new StudioError("工程名称与确认输入不一致，未删除", 409);
+    if (this.projects.size <= 1)
+      throw new StudioError("至少保留一个工程，不能删除最后一个工程", 409);
+    if (this.resourceReaders.get(id))
+      throw new StudioError("当前工程正在读取图片，请完成后再删除", 409);
+    if (
+      [...this.sessions.values()].some(
+        (session) =>
+          session.projectId === id &&
+          ["starting", "running"].includes(session.status),
+      )
+    )
+      throw new StudioError("工程内有正在运行的对话，请先停止再删除", 409);
+    if (this.tasks.listActive(id).length)
+      throw new StudioError(
+        "工程内有尚未结束的制作任务，请先停止或接受再删除",
+        409,
+      );
+    return project;
+  }
+  deleteProject(id: string, name: string) {
+    const project = this.assertProjectDeletable(id, name);
+    const dir = join(this.root, id);
+    if (!existsSync(dir)) throw new StudioError("工程目录已不存在", 404);
+    const tombstone = join(this.root, `${id}${deletingSuffix}`);
+    const erase = () =>
+      rmSync(tombstone, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 50,
+      });
+    erase();
+    // Renaming first makes the deletion all-or-nothing for the project scan: after
+    // this point the project is gone, even if erasing the files still fails.
+    renameSync(dir, tombstone);
+    this.purgeProject(id);
+    try {
+      erase();
+    } catch {
+      // Leftover bytes are swept on the next start; the project is already gone.
+    }
+    return project;
+  }
+  private purgeProject(id: string) {
+    for (const session of [...this.sessions.values()])
+      if (session.projectId === id) this.sessions.delete(session.id);
+    this.projects.delete(id);
+    this.indexes.delete(id);
+    this.metadataPaths.delete(id);
+    this.resourceReaders.delete(id);
+    this.purgeProjectEntries(this.interpolations.jobs, id);
+    this.purgeProjectEntries(this.animation.snapshots, id);
+    this.purgeProjectEntries(this.animation.reviews, id);
+    this.purgeProjectEntries(this.animation.changes, id);
+    for (const [draftId, projectId] of [...this.frameDrafts.records])
+      if (projectId === id) this.frameDrafts.records.delete(draftId);
+    this.clipDrafts.purgeProject(id);
+    this.reviewSequences.purgeProject(id);
+  }
+  private purgeProjectEntries<T extends { projectId: string }>(
+    map: Map<string, T>,
+    id: string,
+  ) {
+    for (const [key, value] of [...map]) if (value.projectId === id) map.delete(key);
   }
   loadAssets(id: string) {
     const assets = new Map<string, Asset>();

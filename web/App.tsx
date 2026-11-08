@@ -26,6 +26,7 @@ import { NewClipDialog } from "./NewClipDialog.tsx";
 import { AnimationPanel } from "./AnimationPanel.tsx";
 import { ComparisonPlayer } from "./ComparisonPlayer.tsx";
 import { api } from "./api.ts";
+import { clearProjectStorage, deletionConfirmed, projectsAfterDeletion } from "./project-deletion.ts";
 import { ResourceLibrary } from "./ResourceLibrary.tsx";
 import {
   Upload,
@@ -153,6 +154,8 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [state, setState] = useState<State | null>(null);
   const [projectId, setProjectIdRaw] = useState("");
+  const [deleteProjectOpen, setDeleteProjectOpen] = useState(false);
+  const [deleteProjectName, setDeleteProjectName] = useState("");
   const projectRef = useRef("");
   const loadVersion = useRef(0), initialLoad = useRef("");
   const [selectedId, setSelectedIdRaw] = useState("");
@@ -306,6 +309,7 @@ export function App() {
   const [stageSize, setStageSize] = useState({ width: 800, height: 500 });
   const refreshRef = useRef<() => Promise<void>>(async () => {});
   const notify = (text: string, error = false) => setToast({ text, error });
+  const currentProject = projects.find((project) => project.id === projectId);
   const selected = state?.assets.find((asset) => asset.id === selectedId);
   const clip = selected?.type === "clip" ? selected : undefined;
   const comparing =
@@ -577,6 +581,32 @@ export function App() {
     } catch (error: any) {
       notify(error.message, true);
     }
+  }
+  async function deleteProject() {
+    const target = currentProject;
+    if (!target || !deletionConfirmed(target, deleteProjectName)) return;
+    // Unsaved Markdown belongs to this project; reuse the existing leave confirmation
+    // before anything is permanently removed.
+    if (!leaveMarkdown()) return;
+    await run("删除工程", async () => {
+      await api(`/api/projects/${target.id}`, {
+        method: "DELETE",
+        body: JSON.stringify({ name: target.name }),
+      });
+      const remaining = projectsAfterDeletion(projects, target.id);
+      clearProjectStorage(localStorage, target.id);
+      setProjects(remaining);
+      setDeleteProjectOpen(false);
+      setDeleteProjectName("");
+      notify(`已永久删除工程“${target.name}”，其素材、对话和导出内容不可恢复`);
+      const next = remaining[0];
+      if (next) chooseProject(next.id);
+      else {
+        projectRef.current = "";
+        setProjectIdRaw("");
+        setState(null);
+      }
+    });
   }
   async function makeSession(epoch: number) {
     const originalProject = projectId;
@@ -872,6 +902,22 @@ export function App() {
             onClick={() => setNewProject(true)}
           >
             <Plus size={16} />
+          </button>
+          <button
+            className="icon-button danger-hover"
+            title={
+              projects.length <= 1
+                ? "至少保留一个工程，不能删除"
+                : "删除当前工程"
+            }
+            aria-label="删除当前工程"
+            disabled={!projectId || !!operation || projects.length <= 1}
+            onClick={() => {
+              setDeleteProjectName("");
+              setDeleteProjectOpen(true);
+            }}
+          >
+            <Trash2 size={15} />
           </button>
         </div>
         <div className="header-right">
@@ -1992,6 +2038,66 @@ export function App() {
             >
               <Plus size={15} />
               创建工程
+            </button>
+          </form>
+        </div>
+      )}
+      {deleteProjectOpen && currentProject && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setDeleteProjectOpen(false);
+          }}
+        >
+          <form
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="永久删除工程"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void deleteProject();
+            }}
+          >
+            <div className="modal-heading">
+              <h2>永久删除工程</h2>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="关闭删除工程"
+                onClick={() => setDeleteProjectOpen(false)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p className="danger-note">
+              这会永久删除“{currentProject.name}”的素材、动画、文档、对话、快照、任务记录、回收站与导出内容，无法恢复，也不会进入回收站。其他工程不受影响。
+            </p>
+            <label>
+              输入完整工程名称以确认
+              <input
+                autoFocus
+                aria-label="工程名称确认"
+                maxLength={100}
+                placeholder={currentProject.name}
+                value={deleteProjectName}
+                onChange={(event) => setDeleteProjectName(event.target.value)}
+              />
+            </label>
+            {state?.sessions.some((item) => active(item)) && (
+              <p className="danger-note" role="status">
+                当前工程有正在运行的对话，服务会拒绝删除；请先停止对话。
+              </p>
+            )}
+            <button
+              className="danger-button"
+              type="submit"
+              disabled={
+                !!operation || !deletionConfirmed(currentProject, deleteProjectName)
+              }
+            >
+              <Trash2 size={15} />
+              永久删除
             </button>
           </form>
         </div>

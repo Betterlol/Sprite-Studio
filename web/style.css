@@ -2912,6 +2912,21 @@ a {
   width: 100%;
   margin-top: 22px;
 }
+.danger-note {
+  color: var(--ui-color-21) !important;
+}
+.modal > .danger-button {
+  width: 100%;
+  justify-content: center;
+  margin-top: 22px;
+}
+.modal > .danger-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.icon-button.danger-hover:hover:not(:disabled) {
+  color: var(--ui-color-21);
+}
 .spin {
   animation: spin 1s linear infinite;
 }

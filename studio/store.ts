@@ -39,6 +39,7 @@ import {
   sliceSchema,
   transformSchema,
   clipSchema,
+  idleGuideSchema,
   type Project,
   type Asset,
   type ImageAsset,
@@ -241,6 +242,44 @@ export class ProjectStore extends EventEmitter {
     this.indexes.set(project.id, new Map());
     this.metadataPaths.set(project.id, new Map());
     this.changed(project.id);
+    return project;
+  }
+  /**
+   * The IDLE baseline is a canvas overlay only: it is validated against real
+   * assets so the web never draws a stale or empty reference, but it is never
+   * read by rendering, inspections, saves or exports.
+   */
+  setIdle(projectId: string, input: unknown) {
+    const project = this.project(projectId),
+      guide = idleGuideSchema.parse(input);
+    if (guide.kind === "image") {
+      const image = this.image(projectId, guide.assetId);
+      if (image.frameCount !== 1)
+        throw new StudioError("IDLE 基准图需要静态图片");
+    } else {
+      const clip = this.asset(projectId, guide.assetId);
+      if (clip.type !== "clip")
+        throw new StudioError("IDLE 基准来源需要选择动画");
+      if (!clip.frames.length)
+        throw new StudioError("所选动画还没有帧，不能作为 IDLE 基准");
+      if (this.image(projectId, clip.frames[0]!.imageId).frameCount !== 1)
+        throw new StudioError("IDLE 基准图需要静态图片");
+    }
+    project.idle = {
+      ...guide,
+      opacity: Math.round(guide.opacity * 1000) / 1000,
+    };
+    atomicJson(join(this.dir(projectId), "project.json"), project);
+    this.changed(projectId);
+    return project;
+  }
+  clearIdle(projectId: string) {
+    const project = this.project(projectId);
+    if (project.idle) {
+      delete project.idle;
+      atomicJson(join(this.dir(projectId), "project.json"), project);
+      this.changed(projectId);
+    }
     return project;
   }
   /**

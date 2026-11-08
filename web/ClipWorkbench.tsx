@@ -8,16 +8,20 @@ import { api } from "./api.ts";
 import { assetUrl, snapshotFrameUrl, type Asset, type ClipAsset, type ClipSnapshot, type FrameTransform, type FrameDraft } from "../studio/model.ts";
 import { clipEditSchema, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type ClipDraft, type EditingContext } from "../studio/workflow-model.ts";
 import { clipEdit, contextFor, dependencyKey, dependencyConflicts, sameClipText, samePreview, DraftQueue, editorReducer, editorState, legacyDerivation, finishFrameDrag, offsetByDrag, shortcutAllowed, type EditorAction } from "./workflow-state.ts";
+import type { IdleGuideTarget } from "./idle-guide.ts";
 
 export type ClipEditorBridge = { clipId: string; stabilize: () => Promise<EditingContext> };
 const defaults: FrameTransform = { scale: 1, offsetX: 0, offsetY: 0, clip: false };
+/** Old workbench used 28% for the previous frame and 22% for the IDLE reference. */
+const ONION_OPACITY = 0.28;
 
-export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, playing, onPlaying: setPlaying, propertiesHost, locked, onContext, onBridge, onSaved, onTool, legacyDrafts, clipDrafts, onLegacyPreview }: {
+export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, playing, onPlaying: setPlaying, propertiesHost, locked, onContext, onBridge, onSaved, onTool, legacyDrafts, clipDrafts, onLegacyPreview, idle, onConfigureIdle }: {
   projectId: string; clip: ClipAsset; assets: Asset[]; frameIndex: number; onFrame: (index: number) => void;
   legacyDrafts: FrameDraft[]; clipDrafts: ClipDraft[]; onLegacyPreview: (snapshotId: string) => void;
   playing: boolean; onPlaying: (value: boolean) => void;
   propertiesHost: HTMLElement | null; locked?: string; onContext: (context: EditingContext) => void;
   onBridge: (bridge: ClipEditorBridge | null) => void; onSaved: () => Promise<void>; onTool: (tool: "interpolate" | "review") => void;
+  idle?: IdleGuideTarget | null; onConfigureIdle: () => void;
 }) {
   const [editor, setEditor] = useState(() => editorState(clipEdit(clip)));
   const current = useRef(editor); current.current = editor;
@@ -26,6 +30,8 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
   const [preview, setPreview] = useState<{ value: ClipDraftPreview; text: string; deps: string; revision: string } | null>(null);
   const [busy, setBusy] = useState(""), [error, setError] = useState(""), [conflict, setConflict] = useState(false);
   const [zoom, setZoom] = useState<number | "fit">("fit");
+  const [showOnion, setShowOnion] = useState(false), [showIdle, setIdleVisible] = useState(false);
+  const [pendingIdle, setPendingIdle] = useState(false);
   const [size, setSize] = useState({ width: 500, height: 400 });
   const stage = useRef<HTMLDivElement>(null), generation = useRef(0), mounted = useRef(true);
   const latest = useRef({ clip, assets, locked, frameIndex }); latest.current = { clip, assets, locked, frameIndex };
@@ -46,6 +52,18 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
   const width = image?.type === "image" ? image.width : 360, height = image?.type === "image" ? image.height : 360;
   const scale = zoom === "fit" ? Math.max(0.02, Math.min(size.width / width, size.height / height, 3)) : zoom;
   const validPreview = preview && sameClipText(preview.text, text) && preview.deps === deps && preview.revision === document?.documentRevision ? preview.value : null;
+  const previous = frameIndex > 0 ? editor.present.frames[frameIndex - 1] : undefined;
+  const previousImage = assets.find(a => a.id === previous?.imageId);
+  const previousTransform = { ...defaults, ...previous?.transform };
+  const idleImage = idle && assets.find(a => a.id === idle.imageId);
+  const idleVisible = showIdle && !!idle && idleImage?.type === "image";
+  const idleSize = idleImage?.type === "image" ? [idleImage.width, idleImage.height] : undefined;
+  const idleMismatch = !!idleSize && (idleSize[0] !== width || idleSize[1] !== height);
+  // Turning on IDLE without a usable baseline sends the user to the config page,
+  // then shows the overlay as soon as that configuration resolves.
+  useEffect(() => {
+    if (pendingIdle && idle) { setIdleVisible(true); setPendingIdle(false); }
+  }, [pendingIdle, idle]);
 
   function act(action: EditorAction) {
     if (readonly || busy) return;
@@ -287,11 +305,24 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
         onPointerMove={event => { const d = drag.current; if (!d) return; if (d.frameId !== current.current.present.frames[latest.current.frameIndex]?.id) { drag.current = null; setDragOffset(null); return; } d.dx = event.clientX - d.x; d.dy = event.clientY - d.y; setDragOffset(offsetByDrag(d.transform.offsetX, d.transform.offsetY, d.dx, d.dy, d.scale)); }}
         onPointerUp={event => { const d = drag.current; drag.current = null; setDragOffset(null); if (d && !readonly) { const edit = finishFrameDrag(current.current.present, current.current.present.frames[latest.current.frameIndex]?.id, d.frameId, { ...d.transform, ...offsetByDrag(d.transform.offsetX, d.transform.offsetY, d.dx, d.dy, d.scale) }); if (edit) act({type:"edit",edit}); } if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
         onPointerCancel={() => { drag.current = null; setDragOffset(null); }}>
-        {frame && image?.type === "image" ? <img draggable={false} alt={`${clip.name} 第 ${frameIndex + 1} 帧实例`} src={validPreview && !dragOffset ? snapshotFrameUrl(projectId, validPreview.preview.id, frame.id) : assetUrl(projectId, image.id, image.revision)}
+        {idleVisible && idleImage?.type === "image" && (
+          <img className="guide-layer guide-idle" aria-hidden="true" draggable={false} alt=""
+            src={assetUrl(projectId, idleImage.id, idleImage.revision)}
+            style={{ left: 0, top: 0, width: idleImage.width * scale, height: idleImage.height * scale, opacity: idle!.opacity }}/>
+        )}
+        {showOnion && previous && previousImage?.type === "image" && (
+          <img className="guide-layer guide-onion" aria-hidden="true" draggable={false} alt=""
+            src={validPreview ? snapshotFrameUrl(projectId, validPreview.preview.id, previous.id) : assetUrl(projectId, previousImage.id, previousImage.revision)}
+            style={validPreview ? { opacity: ONION_OPACITY } : { opacity: ONION_OPACITY, transform: `translate(${previousTransform.offsetX * scale}px, ${previousTransform.offsetY * scale}px) scale(${previousTransform.scale})` }}/>
+        )}
+        {frame && image?.type === "image" ? <img className="frame-layer" draggable={false} alt={`${clip.name} 第 ${frameIndex + 1} 帧实例`} src={validPreview && !dragOffset ? snapshotFrameUrl(projectId, validPreview.preview.id, frame.id) : assetUrl(projectId, image.id, image.revision)}
           style={validPreview && !dragOffset ? undefined : { transform: `translate(${shownTransform.offsetX * scale}px, ${shownTransform.offsetY * scale}px) scale(${shownTransform.scale})` }}/>
           : <p className="adjust-note">从素材库拖入静态图片到时间轴；修改只进入当前动画草稿。</p>}
       </div>
-      <div className="view-controls"><span>视图缩放</span><button aria-label="缩小视图" onClick={() => setZoom(Math.max(.05, scale / 1.25))}><ZoomOut size={15}/></button><button onClick={() => setZoom(1)}>{Math.round(scale * 100)}%</button><button aria-label="放大视图" onClick={() => setZoom(Math.min(8, scale * 1.25))}><ZoomIn size={15}/></button><button aria-label="适应画布" onClick={() => setZoom("fit")}><Maximize2 size={15}/></button></div>
+      <div className="view-controls"><span>叠图</span>
+        <label className="guide-toggle" title="以 28% 红色虚影叠加前一帧"><input type="checkbox" aria-label="前帧叠图" checked={showOnion} onChange={event => { setPlaying(false); setShowOnion(event.target.checked); }}/>前帧</label>
+        <label className="guide-toggle" title={idle ? `IDLE 基准：${idle.label}` : "还没有配置 IDLE 基准图"}><input type="checkbox" aria-label="IDLE 叠图" checked={idleVisible} onChange={event => { if (!event.target.checked) return setIdleVisible(false); if (!idle) { setPendingIdle(true); return onConfigureIdle(); } setPlaying(false); setIdleVisible(true); }}/>IDLE</label>
+        <span>视图缩放</span><button aria-label="缩小视图" onClick={() => setZoom(Math.max(.05, scale / 1.25))}><ZoomOut size={15}/></button><button onClick={() => setZoom(1)}>{Math.round(scale * 100)}%</button><button aria-label="放大视图" onClick={() => setZoom(Math.min(8, scale * 1.25))}><ZoomIn size={15}/></button><button aria-label="适应画布" onClick={() => setZoom("fit")}><Maximize2 size={15}/></button></div>
     </div>
     <ResizeHandle name="动画编排高度" target=".animation-editor" variable="--timeline-height" reverse min={140} max={400}/>
     <AnimationEditor projectId={projectId} clip={displayClip} assets={assets} frameIndex={frameIndex} playing={playing} onPlaying={setPlaying} onFrame={onFrame} previewSnapshot={validPreview?.preview} onChange={next => act({ type: "edit", edit: clipEdit(next) })} onUndo={() => act({type:"undo"})} onRedo={() => act({type:"redo"})} canUndo={!!editor.past.length} canRedo={!!editor.future.length} onTool={onTool} disabled={readonly || !!busy}/>
@@ -307,6 +338,13 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
         <label><input type="checkbox" checked={transform.clip} onChange={e => patchFrame({transform:{...transform,clip:e.target.checked}})}/>允许裁切超出画布内容</label>
         <button className="secondary" onClick={() => patchFrame({transform:defaults})}>重置当前帧参数</button>
       </fieldset>}
+      <section className="guide-settings" aria-label="叠图参考">
+        <strong>叠图参考</strong>
+        <small>前帧 28%（红）/ IDLE {Math.round((idle?.opacity ?? 0.22) * 100)}%（青）。只用于对照比例和位置，不进入帧、检查图或导出。</small>
+        <button className="secondary" onClick={onConfigureIdle}>{idle ? `IDLE 基准：${idle.label}（修改）` : "配置 IDLE 基准图"}</button>
+        {idleMismatch && <p className="adjust-note">IDLE 基准图 {idleSize![0]} × {idleSize![1]} 与当前帧画布 {width} × {height} 不同，按左上角 1:1 叠加，比例需要自行换算。</p>}
+        {!idle && <p className="adjust-note">还没有 IDLE 基准图：打开“IDLE”叠图时会先进入配置页。</p>}
+      </section>
       <button className="secondary" disabled={readonly || !!busy} onClick={() => void discard()}>放弃人工草稿，恢复保存版本</button>
       {validPreview?.warnings.map((warning,i) => <p key={i} className="interpolation-warning">第 {warning.frameNumber ?? "?"} 帧内容超出画布{warning.blocking ? "，保存受阻" : "，已允许裁切"}。</p>)}
       {error && <p role="alert" className="interpolation-warning">{error}</p>}

@@ -1,4 +1,5 @@
 import { ordinaryAgentInstructions } from "./agent-instructions.ts";
+import { checkDirectClipTransforms, documentWritesSchema, prepareAnimationApproval, writesSavedAnimation } from "./animation-approval.ts";
 import { inspectSheetSchema } from "./sheet-schema.ts";
 import { permissionTools, type PermissionTool } from "./tool-permissions.ts";
 import { randomUUID, randomBytes } from "node:crypto";
@@ -25,10 +26,20 @@ import {
   defaultAgentModel,
   frameEditSchema,
   type FrameSaveApproval,
+  type AnimationApprovalPreview,
+  type UserApprovalFeedback,
 } from "./model.ts";
 import { transformSchema, type Session, type ChatMessage } from "./model.ts";
 
 const textContent = (text: string) => ({ type: "text", text });
+type ToolDecision = {
+  accept: boolean;
+  reason: string;
+  result?: any;
+  userApproval?: UserApprovalFeedback;
+  validate?: () => void;
+  animations?: AnimationApprovalPreview[];
+};
 export class AgentHub {
   store: ProjectStore;
   endpoint: string;
@@ -44,7 +55,7 @@ export class AgentHub {
   toolWaits = new Map<
     string,
     {
-      finish: (decision: { accept: boolean; reason: string; result?: any }) => void;
+      finish: (decision: ToolDecision) => void;
       timer: NodeJS.Timeout;
       frozenArguments: any;
       argumentsHash: string;
@@ -980,6 +991,7 @@ export class AgentHub {
     const first = frameChanges[0]!;
     const approval: FrameSaveApproval = {
       id: randomUUID(),
+      clipId: preview.before.clip.id,
       draftId,
       documentRevision: revision,
       beforeSnapshotId: preview.before.id,
@@ -1013,7 +1025,7 @@ export class AgentHub {
     );
     return promise;
   }
-  cancelFrameSave(session: Session, reason: string) {
+  cancelFrameSave(session: Session, reason: string, userApproval?: UserApprovalFeedback) {
     const approval = session.frameSaveApproval;
     if (!approval) return;
     const pending = this.frameSaves.get(approval.id);
@@ -1028,7 +1040,7 @@ export class AgentHub {
     if (draft.status === "pending")
       this.store.frameDrafts.persist({ ...draft, status: "editing" });
     this.diagnose(session, "approval", `帧调整未保存：${reason}`);
-    pending.finish({ saved: false, reason });
+    pending.finish({ saved: false, reason, ...(userApproval ? { userApproval } : {}) });
   }
   async resolveFrameSave(
     sessionId: string,
@@ -1047,7 +1059,8 @@ export class AgentHub {
     if (!accept) {
       this.cancelFrameSave(
         session,
-        reason || "用户拒绝此次保存，请保留草稿并继续调整",
+        reason || "用户拒绝此次保存，请保留草稿并根据反馈调整",
+        { approvalId, accepted: false, feedback: reason, snapshotIds: [approval.previewSnapshotId] },
       );
       return { saved: false };
     }
@@ -1061,7 +1074,7 @@ export class AgentHub {
         approval.draftId,
         approval.documentRevision,
       ));
-      const result = { saved: true, change };
+      const result = { saved: true, change, userApproval: { approvalId, accepted: true, feedback: reason, snapshotIds: [approval.previewSnapshotId] } };
       this.diagnose(
         session,
         "approval",
@@ -1076,7 +1089,7 @@ export class AgentHub {
       );
       if (draft.status === "pending")
         this.store.frameDrafts.persist({ ...draft, status: "editing" });
-      pending.finish({ saved: false, reason: String(error) });
+      pending.finish({ saved: false, reason: String(error), userApproval: { approvalId, accepted: true, feedback: reason, snapshotIds: [approval.previewSnapshotId] } });
       throw error;
     } finally {
       session.frameSaveApproval = undefined;
@@ -1282,9 +1295,15 @@ export class AgentHub {
     if (pending.claimed && resolvedResult === undefined && !internalCancel) throw new StudioError("该冻结审批已有决定正在提交", 409);
     if (accept && resolvedResult === undefined) {
       if (pending.directionRequired) throw new StudioError("需要一次明确的任务方向+工具决定，请使用任务direction入口", 409);
-      pending.validate();
+      try { pending.validate(); }
+      catch (error) {
+        if (session.toolApproval.animations?.length)
+          this.resolveToolApproval(sessionId, approvalId, false, `候选已过期，未保存；请读取当前版本后重新提交：${String(error)}`, undefined, true);
+        throw error;
+      }
     }
     clearTimeout(pending.timer);
+    const snapshotIds = session.toolApproval.animations?.map(animation => animation.previewSnapshotId);
     this.toolWaits.delete(approvalId);
     session.toolApproval = undefined;
     this.diagnose(
@@ -1297,11 +1316,15 @@ export class AgentHub {
       result: resolvedResult,
       reason:
         reason || (accept ? "用户已允许" : "用户拒绝此次操作，请调整方案"),
+      ...(!internalCancel ? { userApproval: { approvalId, accepted: accept, feedback: reason, ...(snapshotIds ? { snapshotIds } : {}) } } : {}),
     });
     return { accepted: accept };
   }
-  private effectivePolicy(name: PermissionTool, input: any) {
-    const policies = this.store.permissions.read(), values = [name, ...toolPolicyParents(name, input)].map(key => policies[key]);
+  private effectivePolicy(name: PermissionTool, input: any, pid?: string) {
+    const keys = [name, ...toolPolicyParents(name, input)];
+    if (name === "write_documents" && pid && writesSavedAnimation(this.store, pid, input))
+      keys.push("save_clip_draft", "save_frame_draft");
+    const policies = this.store.permissions.read(), values = keys.map(key => policies[key]);
     return values.includes("deny") ? "deny" : values.includes("ask") ? "ask" : "allow";
   }
   private async approveTool(
@@ -1310,16 +1333,21 @@ export class AgentHub {
     input: any,
     validate: () => void,
     intent?: TaskIntent,
-  ) {
-    const policy = this.effectivePolicy(name, input);
+  ): Promise<ToolDecision> {
+    const policy = this.effectivePolicy(name, input, session.projectId);
     const task = intent ? this.store.tasks.get(session.projectId, intent.taskId) : undefined;
     const directionRequired = name === "save_image" && !!task && !this.store.tasks.directionCurrent(session.projectId, task);
-    if (policy === "allow" && !directionRequired) return { accept: true, reason: "", result: undefined as any };
+    if (policy === "allow" && !directionRequired) return { accept: true, reason: "" };
     if (policy === "deny")
       return {
         accept: false,
         reason: "权限设置禁止此操作，请勿使用其他工具绕过",
       };
+    const candidate = await this.store.reading(session.projectId, () => prepareAnimationApproval(this.store, session.projectId, session.id, name, input));
+    validate();
+    candidate.validate();
+    if (name === "save_clip_draft" && !candidate.animations.length)
+      return { accept: true, reason: "" }; // Completed save/delivery retry, not a new visual decision.
     const id = randomUUID();
     this.toolWaits ??= new Map();
     session.toolApproval = {
@@ -1328,9 +1356,10 @@ export class AgentHub {
       label: permissionTools.find((t) => t.name === name)!.label,
       arguments: structuredClone(input),
       createdAt: new Date().toISOString(),
+      ...(candidate.animations.length ? { animations: candidate.animations } : {}),
       taskId: task?.id, taskRevision: task?.revision, intentVersion: task?.intentVersion, barrierVersion: task?.barrierVersion, directionRequired,
     };
-    const result = new Promise<{ accept: boolean; reason: string; result?: any }>(
+    const result = new Promise<ToolDecision>(
       (finish) => {
         const timer = setTimeout(
           () => {
@@ -1340,6 +1369,7 @@ export class AgentHub {
         );
         this.toolWaits.set(id, { finish, timer, frozenArguments: structuredClone(input), argumentsHash: sha256(JSON.stringify(input)), intent, taskRevision: task?.revision, directionRequired, validate: () => {
           validate();
+          candidate.validate();
           if (session.toolApproval?.id !== id || sha256(JSON.stringify(session.toolApproval.arguments)) !== sha256(JSON.stringify(input))) throw new StudioError("冻结审批参数已改变", 409);
         } });
       },
@@ -1349,7 +1379,7 @@ export class AgentHub {
       "approval",
       `等待审批：${session.toolApproval!.label}`,
     );
-    return result;
+    return { ...await result, validate: candidate.validate, animations: candidate.animations };
   }
   async tool(sessionId: string, name: string, input: any) {
     const session = this.store.session(sessionId);
@@ -1364,10 +1394,13 @@ export class AgentHub {
     const intent = captureTaskIntent(this.store, session);
     precheckTaskTool(this.store, session, intent, name, args);
     const epoch = this.toolEpochs.get(sessionId) || 0;
+    let approvedCandidate: (() => void) | undefined;
+    let userApproval: UserApprovalFeedback | undefined;
     const guard = () => {
       if ((this.toolEpochs.get(sessionId) || 0) !== epoch || this.stopped || this.transitioning?.has(sessionId)) throw new StudioError("任务已取消，排队操作未执行", 409);
       precheckTaskTool(this.store, session, intent, name, args);
-      if (this.effectivePolicy(name as PermissionTool, args) === "deny") throw new StudioError("权限已禁止此操作，结果未发布", 409);
+      if (this.effectivePolicy(name as PermissionTool, args, session.projectId) === "deny") throw new StudioError("权限已禁止此操作，结果未发布", 409);
+      approvedCandidate?.();
     };
     const previous = this.toolTails.get(sessionId);
     let release!: () => void;
@@ -1389,25 +1422,27 @@ export class AgentHub {
           guard,
           intent,
         );
-        if (decision.result !== undefined) return decision.result;
+        if (decision.result !== undefined) return decision.userApproval
+          ? { ...decision.result, content: [...decision.result.content, textContent(JSON.stringify({ userApproval: decision.userApproval }))] }
+          : decision.result;
         if (!decision.accept)
           return {
-            isError: true,
-            content: [
-              textContent(
-                JSON.stringify({ executed: false, reason: decision.reason }),
-              ),
-            ],
+            ...(!decision.userApproval || !decision.animations?.length ? { isError: true } : {}),
+            content: [textContent(JSON.stringify({ executed: false, reason: decision.reason, userApproval: decision.userApproval, animations: decision.animations }))],
           };
+        approvedCandidate = decision.validate;
+        userApproval = decision.userApproval;
       }
       guard();
-      return await this.store.guarded(guard, () => this.executeTool(sessionId, name, args, guard, intent));
+      const result = await this.store.guarded(guard, () => this.executeTool(sessionId, name, args, guard, intent));
+      return userApproval ? { ...result, content: [...result.content, textContent(JSON.stringify({ userApproval }))] } : result;
     } catch (error) {
       this.diagnose(
         session,
         "tool",
         `${name} 未执行或失败：${error instanceof Error ? error.message : String(error)}`,
       );
+      if (userApproval) return { isError: true, content: [textContent(JSON.stringify({ executed: false, reason: error instanceof Error ? error.message : String(error), userApproval }))] };
       throw error;
     } finally {
       release();
@@ -1523,17 +1558,7 @@ export class AgentHub {
         ],
       };
     if (name === "write_documents") {
-      const documents = z
-        .array(
-          z.object({
-            documentId: z.string().uuid(),
-            expectedDocumentRevision: z.string(),
-            text: z.string(),
-          }),
-        )
-        .min(1)
-        .max(16)
-        .parse(input.documents);
+      const documents = documentWritesSchema.parse(input.documents);
       for (const doc of documents) {
         if (this.store.clipDrafts.has(pid, doc.documentId)) {
           const draft = this.store.clipDrafts.read(pid, doc.documentId).draft;
@@ -1552,16 +1577,7 @@ export class AgentHub {
               asset.id,
               doc.text,
             ) as z.infer<typeof clipDocumentSchema>;
-            if (
-              config.frames.some((f) => {
-                const old = asset.frames.find((o) => o.id === f.id);
-                return (
-                  old &&
-                  JSON.stringify(old.transform) !== JSON.stringify(f.transform)
-                );
-              })
-            )
-              throw new StudioError("已有帧的变换请通过单帧草稿编辑并请求保存");
+            checkDirectClipTransforms(asset, config);
           }
         }
       }

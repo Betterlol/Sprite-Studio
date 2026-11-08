@@ -143,6 +143,7 @@ export type TransformPreview = {
 };
 export type FrameSaveApproval = {
   id: string;
+  clipId?: string;
   draftId: string;
   documentRevision: string;
   beforeSnapshotId: string;
@@ -252,6 +253,22 @@ export type SessionDiagnostic = {
   method?: string;
   turnId?: string;
 };
+export type AnimationApprovalPreview = {
+  clipId: string;
+  clipName: string;
+  beforeSnapshotId: string;
+  previewSnapshotId: string;
+  draftId?: string;
+  documentRevision?: string;
+  deliveryOnly?: boolean;
+  warnings: RenderWarning[];
+};
+export type UserApprovalFeedback = {
+  approvalId: string;
+  accepted: boolean;
+  feedback: string;
+  snapshotIds?: string[];
+};
 export type ToolApproval = {
   id: string;
   tool: string;
@@ -263,6 +280,7 @@ export type ToolApproval = {
   intentVersion?: number;
   barrierVersion?: number;
   directionRequired?: boolean;
+  animations?: AnimationApprovalPreview[];
 };
 export const turnPlanSchema = z.object({
   threadId: z.string(),

@@ -24,7 +24,7 @@ export const permissionTools = [
   {
     name: "write_documents",
     label: "编辑并保存配置",
-    detail: "更新切割、动画编排或帧调整草稿的 JSON 配置",
+    detail: "更新切割或草稿JSON；直接发布动画同时遵循动画保存权限",
     writes: true,
   },
   {
@@ -48,7 +48,7 @@ export const permissionTools = [
   {
     name: "save_frame_draft",
     label: "应用动画帧调整",
-    detail: "将整份草稿保存到动画，保留修改记录",
+    detail: "将整份帧调整保存到动画；ask时播放候选并回传验收意见",
     writes: true,
   },
   {
@@ -108,7 +108,7 @@ export const permissionTools = [
   {
     name: "save_clip_draft",
     label: "保存完整动画草稿",
-    detail: "提交确切对象草稿；继承帧草稿保存权限",
+    detail: "提交确切动画候选供播放验收；继承帧草稿保存权限",
     writes: true,
   },
   {
@@ -129,7 +129,7 @@ export type ToolPolicies = Record<PermissionTool, PermissionPolicy>;
 export const defaultToolPolicies = Object.fromEntries(
   permissionTools.map((t) => [
     t.name,
-    t.name === "save_image" ? "ask" : "allow",
+    ["save_image", "save_frame_draft", "save_clip_draft"].includes(t.name) ? "ask" : "allow",
   ]),
 ) as ToolPolicies;
 export class ToolPermissions {

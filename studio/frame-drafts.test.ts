@@ -252,7 +252,9 @@ test("Agent edits config, previews, receives denial reason, and only exact Accep
     assert.equal(approval.frameChanges.length, 2);
     assert.equal(approval.frameChanges[1].after.transform.offsetX, 3);
     assert.equal(approval.before.transform, undefined);
-    const accepted = await hub.resolveFrameSave(session.id, approval.id, true);
+    const accepted = await hub.resolveFrameSave(session.id, approval.id, true, "接受，下一动作保持这个大小");
+    assert.equal(accepted.userApproval!.accepted, true);
+    assert.match(accepted.userApproval!.feedback, /保持这个大小/);
     assert.equal(accepted.saved, true);
     assert.equal(
       JSON.parse(((await saving).content[0] as { text: string }).text).saved,

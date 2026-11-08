@@ -39,7 +39,7 @@ async function waitFor(check: () => unknown) {
   assert.ok(check(), "expected pending approval or request");
 }
 
-test("only image saving asks by default; all tool policies persist and validate together", async () => {
+test("image saving and animation publication ask by default; explicit persisted choices remain unchanged", async () => {
   const { store } = fixture();
   try {
     const policies = store.permissions.read();
@@ -47,10 +47,12 @@ test("only image saving asks by default; all tool policies persist and validate 
       Object.entries(policies)
         .filter(([, p]) => p === "ask")
         .map(([n]) => n),
-      ["save_image"],
+      ["save_image", "save_frame_draft", "save_clip_draft"],
     );
     assert.equal(Object.keys(policies).length, permissionTools.length);
-    assert.equal(store.frameDrafts.policy(), "allow");
+    assert.equal(store.frameDrafts.policy(), "ask");
+    store.permissions.write({ save_frame_draft: "allow", save_clip_draft: "allow" });
+    assert.equal(new ToolPermissions(store.root).read().save_clip_draft, "allow");
     store.permissions.write({ create_clip: "ask", slice_sheet: "deny" });
     const reloaded = new ToolPermissions(store.root).read();
     assert.equal(reloaded.create_clip, "ask");

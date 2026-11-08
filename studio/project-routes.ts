@@ -24,7 +24,17 @@ export function registerProjectRoutes(
       .object({ name: z.string().trim().min(1).max(100) })
       .strict()
       .parse(request.body ?? {});
-    const project = await agent.deleteProject(pid(request), input.name);
-    return { deleted: true, projectId: project.id, name: project.name };
+    const { project, cleanupPending } = await agent.deleteProject(
+      pid(request),
+      input.name,
+    );
+    // cleanupPending means a live process still pins the directory: the project is
+    // already gone from the workbench and the files are swept on the next start.
+    return {
+      deleted: true,
+      projectId: project.id,
+      name: project.name,
+      cleanupPending,
+    };
   });
 }

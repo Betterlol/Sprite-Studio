@@ -55,6 +55,7 @@ import {
   LoaderCircle,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   MessageSquare,
   FolderOpen,
   AlertCircle,
@@ -154,8 +155,19 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [state, setState] = useState<State | null>(null);
   const [projectId, setProjectIdRaw] = useState("");
-  const [deleteProjectOpen, setDeleteProjectOpen] = useState(false);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
   const [deleteProjectName, setDeleteProjectName] = useState("");
+  useEffect(() => {
+    if (!projectMenuOpen) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setProjectMenuOpen(false);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [projectMenuOpen]);
+  // A deleted or newly created project changes the list, so never leave it open.
+  useEffect(() => setProjectMenuOpen(false), [projects.length]);
   const projectRef = useRef("");
   const loadVersion = useRef(0), initialLoad = useRef("");
   const [selectedId, setSelectedIdRaw] = useState("");
@@ -583,28 +595,35 @@ export function App() {
     }
   }
   async function deleteProject() {
-    const target = currentProject;
+    const target = deleteTarget;
     if (!target || !deletionConfirmed(target, deleteProjectName)) return;
-    // Unsaved Markdown belongs to this project; reuse the existing leave confirmation
-    // before anything is permanently removed.
-    if (!leaveMarkdown()) return;
+    // Only the open project can hold unsaved Markdown; the list never deletes it, but
+    // keep the existing leave confirmation for the defensive path below.
+    if (target.id === projectId && !leaveMarkdown()) return;
     await run("删除工程", async () => {
-      await api(`/api/projects/${target.id}`, {
-        method: "DELETE",
-        body: JSON.stringify({ name: target.name }),
-      });
+      const result = await api<{ cleanupPending?: boolean }>(
+        `/api/projects/${target.id}`,
+        { method: "DELETE", body: JSON.stringify({ name: target.name }) },
+      );
       const remaining = projectsAfterDeletion(projects, target.id);
       clearProjectStorage(localStorage, target.id);
       setProjects(remaining);
-      setDeleteProjectOpen(false);
+      setDeleteTarget(null);
       setDeleteProjectName("");
-      notify(`已永久删除工程“${target.name}”，其素材、对话和导出内容不可恢复`);
-      const next = remaining[0];
-      if (next) chooseProject(next.id);
-      else {
-        projectRef.current = "";
-        setProjectIdRaw("");
-        setState(null);
+      notify(
+        result.cleanupPending
+          ? `已删除工程“${target.name}”，目录仍被其他程序占用，残留文件会在工作台下次启动时清理`
+          : `已永久删除工程“${target.name}”，其素材、对话和导出内容不可恢复`,
+      );
+      // Defensive: the list only offers other projects, so this normally keeps `state`.
+      if (target.id === projectId) {
+        const next = remaining[0];
+        if (next) chooseProject(next.id);
+        else {
+          projectRef.current = "";
+          setProjectIdRaw("");
+          setState(null);
+        }
       }
     });
   }
@@ -884,18 +903,17 @@ export function App() {
         </div>
         <div className="project-switch">
           <FolderOpen size={15} />
-          <select
-            aria-label="当前工程"
-            value={projectId}
+          <button
+            className="project-current"
+            aria-label="展开工程列表"
+            aria-expanded={projectMenuOpen}
+            aria-haspopup="menu"
             disabled={!projects.length || !!operation}
-            onChange={(event) => chooseProject(event.target.value)}
+            onClick={() => setProjectMenuOpen((open) => !open)}
           >
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
+            <span>{currentProject?.name || "选择工程"}</span>
+            <ChevronDown size={14} />
+          </button>
           <button
             className="icon-button"
             title="新建工程"
@@ -903,22 +921,54 @@ export function App() {
           >
             <Plus size={16} />
           </button>
-          <button
-            className="icon-button danger-hover"
-            title={
-              projects.length <= 1
-                ? "至少保留一个工程，不能删除"
-                : "删除当前工程"
-            }
-            aria-label="删除当前工程"
-            disabled={!projectId || !!operation || projects.length <= 1}
-            onClick={() => {
-              setDeleteProjectName("");
-              setDeleteProjectOpen(true);
-            }}
-          >
-            <Trash2 size={15} />
-          </button>
+          {projectMenuOpen && (
+            <>
+              <div
+                className="project-menu-backdrop"
+                onMouseDown={() => setProjectMenuOpen(false)}
+              />
+              <div className="project-menu" role="menu" aria-label="工程列表">
+                {projects.map((project) => {
+                  const current = project.id === projectId;
+                  return (
+                    <div
+                      key={project.id}
+                      className={`project-menu-row${current ? " current" : ""}`}
+                    >
+                      <button
+                        role="menuitem"
+                        className="project-menu-name"
+                        aria-label={`打开工程 ${project.name}`}
+                        aria-current={current ? "true" : undefined}
+                        disabled={current}
+                        onClick={() => {
+                          setProjectMenuOpen(false);
+                          chooseProject(project.id);
+                        }}
+                      >
+                        <span>{project.name}</span>
+                        {current && <em>当前</em>}
+                      </button>
+                      {!current && (
+                        <button
+                          className="icon-button danger-hover"
+                          title="删除这个工程"
+                          aria-label={`删除工程 ${project.name}`}
+                          onClick={() => {
+                            setProjectMenuOpen(false);
+                            setDeleteProjectName("");
+                            setDeleteTarget(project);
+                          }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </div>
         <div className="header-right">
           <button
@@ -2042,11 +2092,11 @@ export function App() {
           </form>
         </div>
       )}
-      {deleteProjectOpen && currentProject && (
+      {deleteTarget && (
         <div
           className="modal-backdrop"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setDeleteProjectOpen(false);
+            if (event.target === event.currentTarget) setDeleteTarget(null);
           }}
         >
           <form
@@ -2065,13 +2115,13 @@ export function App() {
                 type="button"
                 className="icon-button"
                 aria-label="关闭删除工程"
-                onClick={() => setDeleteProjectOpen(false)}
+                onClick={() => setDeleteTarget(null)}
               >
                 <X size={18} />
               </button>
             </div>
             <p className="danger-note">
-              这会永久删除“{currentProject.name}”的素材、动画、文档、对话、快照、任务记录、回收站与导出内容，无法恢复，也不会进入回收站。其他工程不受影响。
+              这会永久删除“{deleteTarget.name}”的素材、动画、文档、对话、快照、任务记录、回收站与导出内容，无法恢复，也不会进入回收站。当前打开的工程不受影响。
             </p>
             <label>
               输入完整工程名称以确认
@@ -2079,21 +2129,19 @@ export function App() {
                 autoFocus
                 aria-label="工程名称确认"
                 maxLength={100}
-                placeholder={currentProject.name}
+                placeholder={deleteTarget.name}
                 value={deleteProjectName}
                 onChange={(event) => setDeleteProjectName(event.target.value)}
               />
             </label>
-            {state?.sessions.some((item) => active(item)) && (
-              <p className="danger-note" role="status">
-                当前工程有正在运行的对话，服务会拒绝删除；请先停止对话。
-              </p>
-            )}
+            <p className="modal-hint">
+              该工程有正在运行的对话或未结束的制作任务时，服务会拒绝删除；请先停止或接受任务。
+            </p>
             <button
               className="danger-button"
               type="submit"
               disabled={
-                !!operation || !deletionConfirmed(currentProject, deleteProjectName)
+                !!operation || !deletionConfirmed(deleteTarget, deleteProjectName)
               }
             >
               <Trash2 size={15} />

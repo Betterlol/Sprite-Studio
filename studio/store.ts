@@ -121,20 +121,27 @@ export class ProjectStore extends EventEmitter {
     this.root = realpathSync(root);
     this.worker = new ImagingWorker(this.root);
     this.library = new ResourceLibrary(this);
-    // Finish an interrupted deletion first; a leftover is not a project and is never loaded.
+    // Retire an interrupted deletion before anything else reads the directory. The
+    // marker lives beside the project, not inside it: Windows refuses to rename or
+    // remove a directory that a process uses as its working directory, but the marker
+    // can always be written, so the project stays out of the list either way.
     for (const name of readdirSync(this.root))
-      if (name.endsWith(deletingSuffix))
+      if (name.endsWith(deletingSuffix)) {
+        const target = join(this.root, name.slice(0, -deletingSuffix.length));
         try {
-          rmSync(join(this.root, name), {
+          rmSync(target, {
             recursive: true,
             force: true,
             maxRetries: 5,
             retryDelay: 50,
           });
+          rmSync(join(this.root, name), { force: true });
         } catch {
-          // Still locked; the next start retries without blocking this one.
+          // Still locked by a live process; the marker keeps hiding it.
         }
+      }
     for (const name of readdirSync(this.root)) {
+      if (existsSync(join(this.root, name + deletingSuffix))) continue;
       const dir = join(this.root, name);
       if (!existsSync(join(dir, "project.json"))) continue;
       const project = JSON.parse(
@@ -263,29 +270,36 @@ export class ProjectStore extends EventEmitter {
       );
     return project;
   }
+  /**
+   * Permanent, and therefore all-or-nothing for the caller: the project leaves the
+   * workbench as soon as the deletion marker is written, even if a live process still
+   * pins the directory and the files have to be swept on the next start.
+   */
   deleteProject(id: string, name: string) {
     const project = this.assertProjectDeletable(id, name);
     const dir = join(this.root, id);
     if (!existsSync(dir)) throw new StudioError("工程目录已不存在", 404);
-    const tombstone = join(this.root, `${id}${deletingSuffix}`);
-    const erase = () =>
-      rmSync(tombstone, {
+    const marker = join(this.root, `${id}${deletingSuffix}`);
+    // Written before touching the directory: the scan skips marked ids, so a crash or
+    // a locked directory can never bring this project back.
+    writeFileSync(
+      marker,
+      JSON.stringify({ projectId: id, name: project.name, deletedAt: now() }),
+    );
+    this.purgeProject(id);
+    let cleanupPending = false;
+    try {
+      rmSync(dir, {
         recursive: true,
         force: true,
-        maxRetries: 5,
-        retryDelay: 50,
+        maxRetries: 10,
+        retryDelay: 100,
       });
-    erase();
-    // Renaming first makes the deletion all-or-nothing for the project scan: after
-    // this point the project is gone, even if erasing the files still fails.
-    renameSync(dir, tombstone);
-    this.purgeProject(id);
-    try {
-      erase();
+      rmSync(marker, { force: true });
     } catch {
-      // Leftover bytes are swept on the next start; the project is already gone.
+      cleanupPending = true;
     }
-    return project;
+    return { project, cleanupPending };
   }
   private purgeProject(id: string) {
     for (const session of [...this.sessions.values()])

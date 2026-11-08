@@ -1836,7 +1836,8 @@ export class AgentHub {
   }
   /**
    * Deletes a whole project. Validation runs first, then the idle runtimes of its
-   * conversations are released before the store removes files and in-memory state.
+   * conversations are released before the store removes files and in-memory state;
+   * releasing them also lets the file erase succeed instead of waiting for a restart.
    */
   async deleteProject(id: string, name: string) {
     this.store.assertProjectDeletable(id, name);

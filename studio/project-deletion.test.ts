@@ -9,8 +9,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, basename } from "node:path";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import Fastify from "fastify";
 import { z } from "zod";
 import { ProjectStore } from "./store.ts";
@@ -73,6 +74,20 @@ const remove = (app: any, id: string, payload?: unknown) =>
     ...(payload === undefined ? {} : { payload }),
   });
 
+/** Ends the helper process and never lets a missing exit event hang the suite. */
+function stop(child: ReturnType<typeof spawn>) {
+  if (child.exitCode !== null) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, 5000);
+    timer.unref();
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.kill();
+  });
+}
+
 test("deletion removes exactly the confirmed project and leaves its neighbour usable", async () => {
   const f = await fixture();
   try {
@@ -99,6 +114,7 @@ test("deletion removes exactly the confirmed project and leaves its neighbour us
       deleted: true,
       projectId: gone.id,
       name: "删除工程",
+      cleanupPending: false,
     });
 
     assert.equal(existsSync(goneDir), false);
@@ -240,7 +256,65 @@ test("cached snapshots, reviews, drafts and jobs of the deleted project are drop
   }
 });
 
-test("a half-erased project directory is swept on start and never loaded as a project", async () => {
+test("a project whose directory a live process pins is deleted anyway and swept on start", async () => {
+  const root = mkdtempSync(join(tmpdir(), "studio-project-delete-locked-"));
+  const projects = join(root, "projects");
+  const store = new ProjectStore(projects);
+  const ready = join(root, "child-ready");
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    store.createProject("保留工程");
+    const gone = store.createProject("被占用工程");
+    const dir = store.dir(gone.id);
+
+    // Windows refuses to remove (or rename) a directory that a process uses as its
+    // working directory. This is exactly the reported EPERM, reproduced on purpose.
+    child = spawn(
+      process.execPath,
+      [
+        "-e",
+        `process.chdir(${JSON.stringify(dir)});` +
+          `require("node:fs").writeFileSync(${JSON.stringify(ready)}, "ready");` +
+          `setInterval(() => {}, 1000);`,
+      ],
+      { stdio: "ignore" },
+    );
+    for (let i = 0; i < 200 && !existsSync(ready); i++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(existsSync(ready), "child process must hold the project directory");
+
+    const { project, cleanupPending } = store.deleteProject(gone.id, "被占用工程");
+    assert.equal(project.name, "被占用工程");
+    assert.equal(cleanupPending, true, "the pinned directory cannot be erased yet");
+    // The project is gone from the workbench immediately, and the marker keeps it
+    // out of the list even though bytes are still on disk.
+    assert.equal(store.projects.has(gone.id), false);
+    assert.throws(() => store.project(gone.id), /工程不存在/);
+    assert.ok(existsSync(`${dir}.deleting`), "deletion marker stays until the erase finishes");
+
+    // Release the working directory: the erase is only possible afterwards.
+    await stop(child);
+    child = undefined;
+
+    const reopened = new ProjectStore(projects);
+    try {
+      assert.deepEqual(
+        [...reopened.projects.values()].map((item) => item.name),
+        ["保留工程"],
+      );
+      assert.equal(existsSync(dir), false, "restart finishes the erase");
+      assert.equal(existsSync(`${dir}.deleting`), false);
+    } finally {
+      await reopened.worker.close();
+    }
+  } finally {
+    if (child) await stop(child);
+    await store.worker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a marker left by an interrupted deletion hides and then sweeps the project", async () => {
   const root = mkdtempSync(join(tmpdir(), "studio-project-delete-sweep-"));
   const projects = join(root, "projects");
   let store: ProjectStore | undefined;
@@ -250,17 +324,22 @@ test("a half-erased project directory is swept on start and never loaded as a pr
     await store.worker.close();
     store = undefined;
 
-    // An erase that was interrupted leaves the renamed directory behind.
-    const interrupted = join(projects, `${randomUUID()}.deleting`);
-    mkdirSync(join(interrupted, ".studio"), { recursive: true });
+    // A crash between writing the marker and erasing the files leaves both behind.
+    const interrupted = randomUUID();
+    const dir = join(projects, interrupted);
+    mkdirSync(join(dir, ".studio"), { recursive: true });
     writeFileSync(
-      join(interrupted, "project.json"),
+      join(dir, "project.json"),
       JSON.stringify({
-        id: basename(interrupted),
+        id: interrupted,
         name: "中断删除",
         createdAt: new Date().toISOString(),
         version: 1,
       }),
+    );
+    writeFileSync(
+      join(projects, `${interrupted}.deleting`),
+      JSON.stringify({ projectId: interrupted, name: "中断删除" }),
     );
 
     const reopened = new ProjectStore(projects);
@@ -270,7 +349,8 @@ test("a half-erased project directory is swept on start and never loaded as a pr
         [...reopened.projects.values()].map((project) => project.name),
         ["保留工程"],
       );
-      assert.equal(existsSync(interrupted), false);
+      assert.equal(existsSync(dir), false);
+      assert.equal(existsSync(`${dir}.deleting`), false);
     } finally {
       await reopened.worker.close();
     }

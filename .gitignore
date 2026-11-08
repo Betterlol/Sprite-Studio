@@ -3,3 +3,4 @@ node_modules/
 *.tsbuildinfo
 __pycache__/
 dist/
+*.local.md

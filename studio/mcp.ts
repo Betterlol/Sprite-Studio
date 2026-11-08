@@ -58,7 +58,7 @@ const tools = [
   {
     name: "create_markdown",
     description: "Create a new .md document in the project 文档 category. folder is relative to that category and must exist; empty means category root. Returns actual saved text, ID and revision. Never overwrites another name; reuse requestId only for the identical create request. Does not bind images or tasks.",
-    inputSchema: { type: "object", properties: { name: { type: "string" }, text: { type: "string" }, folder: { type: "string" }, requestId: { type: "string" } }, required: ["name", "text", "requestId"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { name: { type: "string" }, text: { type: "string" }, folder: { type: "string" }, requestId: { type: "string", format: "uuid", description: "New UUID for this exact create request; reuse only for identical retry" } }, required: ["name", "text", "requestId"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
   {
@@ -217,7 +217,7 @@ const tools = [
   {
     name: "list_assets",
     description:
-      "List current project images and clips with stable resource IDs, image kinds and sizes.",
+      "List current project images, clips and Markdown documents with stable resource IDs, revisions, folders, image kinds and sizes. Use this to find existing design/progress documents before reading or updating them.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -293,7 +293,7 @@ const tools = [
   },
   {
     name: "save_clip_draft",
-    description: "Commit the exact full object draft once. Requires approved task direction AND tool permission; inherits save_frame_draft policies. Uses a publish-time intent/session/barrier guard, preserves original pixels and history. Human-draft derivatives return {saved:false,delivered:true,pendingHumanAdoption:true,delivery:{draftId,documentRevision,snapshotId,target}}; they freeze a read-only proposal and NEVER publish the clip. The user explicitly adopts it into the source human draft with CAS, then separately saves the animation (legacy frame-edit sources explicitly start a new unified human session and remain untouched). Normal Agent production still saves autonomously. No model may report success before receipt. Rendering/checking is not dynamic playback acceptance.",
+    description: "Commit the exact full object draft once. Uses configured tool permission; approved task direction is additionally required only when the optional production-task layer is enabled and this session is bound to a task. Inherits save_frame_draft policies. Uses a publish-time intent/session/barrier guard, preserves original pixels and history. Human-draft derivatives return {saved:false,delivered:true,pendingHumanAdoption:true,delivery:{draftId,documentRevision,snapshotId,target}}; they freeze a read-only proposal and NEVER publish the clip. The user explicitly adopts it into the source human draft with CAS, then separately saves the animation (legacy frame-edit sources explicitly start a new unified human session and remain untouched). Normal Agent production still saves autonomously. No model may report success before receipt. Rendering/checking is not dynamic playback acceptance.",
     inputSchema: { type: "object", properties: { draftId: idProperty, documentRevision: { type: "string" } }, required: ["draftId", "documentRevision"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
@@ -332,7 +332,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     else if (request.method === "ping")
       send({ jsonrpc: "2.0", id: request.id, result: {} });
     else if (request.method === "tools/list")
-      send({ jsonrpc: "2.0", id: request.id, result: { tools } });
+      send({ jsonrpc: "2.0", id: request.id, result: { tools: tools.filter(tool => tool.name !== "workflow_task" || process.env.SPRITE_STUDIO_TASKS_ENABLED === "1") } });
     else if (request.method === "tools/call") {
       const id = request.id;
       // Native HTTP has no hidden fetch headers timeout while a person reviews.

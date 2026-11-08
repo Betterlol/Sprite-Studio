@@ -45,7 +45,7 @@ async function fixture() {
   const root = mkdtempSync(join(tmpdir(), "studio-workflow-")), sourcePath = join(root, "synthetic.png");
   const made = spawnSync(process.env.SPRITE_STUDIO_PYTHON || "python", ["-I", "-c", "from PIL import Image,ImageDraw; import sys; im=Image.new('RGBA',(64,32)); d=ImageDraw.Draw(im); d.rectangle((5,5,26,26),fill='red'); d.rectangle((37,5,58,26),fill='blue'); im.save(sys.argv[1])", sourcePath], { windowsHide: true });
   assert.equal(made.status, 0, made.stderr.toString());
-  const store = new ProjectStore(join(root, "projects")), pid = store.createProject("isolated workflow").id;
+  const store = new ProjectStore(join(root, "projects"), { tasksEnabled: true }), pid = store.createProject("isolated workflow").id;
   const image = await store.importImage(pid, "source.png", readFileSync(sourcePath), "reference");
   const runtimes: StubRuntime[] = [];
   const hub: AgentHub = Object.assign(Object.create(AgentHub.prototype), {
@@ -403,7 +403,7 @@ test("new tools inherit old deny/ask policies, and MCP inventory exactly matches
     assert.equal((await f.hub.tool(session.id, "save_clip_draft", { draftId: draft.documentId, documentRevision: draft.documentRevision })).isError, true);
     assert.equal((await f.hub.tool(session.id, "workflow_task", { action: "check" })).isError, true); assert.equal(f.store.tasks.get(f.pid, task.id).checks.length, 0);
     assert.equal((await f.hub.tool(session.id, "review_sequence", { action: "inspect", sequenceId: randomUUID() })).isError, true);
-    const child = spawn(process.execPath, ["studio/mcp.ts", "http://127.0.0.1:9999", session.id], { env: { ...process.env, SPRITE_STUDIO_TOOL_TOKEN: "fixture-only" }, windowsHide: true });
+    const child = spawn(process.execPath, ["studio/mcp.ts", "http://127.0.0.1:9999", session.id], { env: { ...process.env, SPRITE_STUDIO_TOOL_TOKEN: "fixture-only", SPRITE_STUDIO_TASKS_ENABLED: "1" }, windowsHide: true });
     const lines = createInterface({ input: child.stdout }); const received: any[] = []; lines.on("line", line => received.push(JSON.parse(line)));
     try {
       child.stdin.write(JSON.stringify({ id: 1, method: "tools/list" }) + "\n"); await waitFor(() => received.length);
@@ -834,7 +834,7 @@ test("round2 N1: stopped legacy Agent drafts stay read-only through old document
     const standaloneEdited = result(await f.hub.tool(ordinary.id, "write_documents", { documents: [{ documentId: standalone.documentId, expectedDocumentRevision: standalone.documentRevision, text: JSON.stringify(standaloneBody) }] }))[0];
     assert.equal(result(await f.hub.tool(ordinary.id, "create_frame_draft", { clipId: clip.id, revision: current.revision, frameId: clip.frames[1]!.id })).documentId, standalone.documentId);
     assert.equal(result(await f.hub.tool(ordinary.id, "save_frame_draft", { draftId: standalone.documentId, documentRevision: standaloneEdited.documentRevision })).saved, true);
-    await f.hub.close(); await f.store.worker.close(); restored = new ProjectStore(f.store.root);
+    await f.hub.close(); await f.store.worker.close(); restored = new ProjectStore(f.store.root, { tasksEnabled: true });
     await assertHistorical(restored); assert.equal(restored.animation.clip(f.pid, clip.id).frames[0]!.durationUs, 250000);
     assert.notEqual(restored.frameDrafts.get(f.pid, human.documentId).readOnly, true);
   } finally { await restored?.worker.close(); await f.cleanup(); }
@@ -861,7 +861,7 @@ test("round2 N1: new intents create a fresh clean legacy ID, retain old bodies a
     const active = result(await f.hub.tool(session.id, "create_frame_draft", { clipId: clip.id, revision: clip.revision, frameId: clip.frames[1]!.id }));
     const activeBody = JSON.parse(active.text); activeBody.frames[1].durationUs = 230000;
     const activeEdited = result(await f.hub.tool(session.id, "write_documents", { documents: [{ documentId: active.documentId, expectedDocumentRevision: active.documentRevision, text: JSON.stringify(activeBody) }] }))[0];
-    await f.hub.close(); await f.store.worker.close(); restored = new ProjectStore(f.store.root);
+    await f.hub.close(); await f.store.worker.close(); restored = new ProjectStore(f.store.root, { tasksEnabled: true });
     const historical = restored.frameDrafts.get(f.pid, old.documentId), stillActive = restored.frameDrafts.get(f.pid, active.documentId);
     assert.equal(historical.readOnly, true); assert.equal(historical.text, oldEdited.text); assert.equal(historical.mergedInto, undefined);
     assert.notEqual(stillActive.readOnly, true); assert.equal(stillActive.text, activeEdited.text); assert.equal(stillActive.mergedInto, undefined);
@@ -1306,7 +1306,7 @@ test("restart pauses task, retains unknown generation and never replays a runtim
     await f.emit(session.id, "item/completed", { type: "imageGeneration", id: generationId, status: "completed", savedPath: f.sourcePath, inputImages: [] }, staleTurn);
     await Promise.all(f.hub.imports.get(session.id) || []);
     let current = f.store.tasks.get(f.pid, task.id); assert.equal(current.attempts[0]!.status, "unknown"); assert.ok(current.attempts[0]!.generatedId); assert.equal(f.store.generated.list(f.pid).length, 1);
-    restored = new ProjectStore(f.store.root); current = restored.tasks.get(f.pid, task.id); assert.equal(current.status, "paused"); assert.equal(current.attempts[0]!.status, "unknown"); assert.equal(restored.session(session.id).toolApproval, undefined);
+    restored = new ProjectStore(f.store.root, { tasksEnabled: true }); current = restored.tasks.get(f.pid, task.id); assert.equal(current.status, "paused"); assert.equal(current.attempts[0]!.status, "unknown"); assert.equal(restored.session(session.id).toolApproval, undefined);
     assert.throws(() => restored!.tasks.recordAttempt(f.pid, task.id, { expectedRevision: current.revision, id: randomUUID(), status: "reserved" }), /未知|额度/);
     assert.equal(f.runtimes.length, 1);
   } finally { await restored?.worker.close(); await f.cleanup(); }

@@ -42,6 +42,7 @@ export class FrameDrafts {
         const draft = structuredClone(original);
         this.records.set(draft.id, pid);
         if (this.historical(draft)) {
+          if (!store.tasksEnabled) continue;
           const clip = store.indexes.get(pid)?.get(draft.clipId);
           if (clip?.type === "clip" && clip.appliedFrameChangeIds?.includes(draft.id) && draft.status !== "saved") this.persist({ ...draft, status: "saved", changeId: draft.id });
           else if (draft.status === "pending") this.persist({ ...draft, status: "editing" });
@@ -206,7 +207,7 @@ export class FrameDrafts {
       baseSnapshotId: base.id,
       source,
       sessionId,
-      ...(source === "agent" ? owner : {}),
+      ...(source === "agent" ? owner || { taskIndependent: true } : {}),
       status: "editing",
       createdAt: new Date().toISOString(),
       text,

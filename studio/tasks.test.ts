@@ -10,7 +10,7 @@ import type { QualityCheck } from "./workflow-model.ts";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP8z8Dwn4GBgYGJAQoAHxcCAk+Uzr4AAAAASUVORK5CYII=", "base64");
 async function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "studio-tasks-")), store = new ProjectStore(join(root, "projects"));
+  const root = mkdtempSync(join(tmpdir(), "studio-tasks-")), store = new ProjectStore(join(root, "projects"), { tasksEnabled: true });
   const pid = store.createProject("A").id, other = store.createProject("B").id;
   const image = await store.importImage(pid, "one.png", png);
   const clip = store.createClip(pid, "clip", [{ id: randomUUID(), imageId: image.id, durationUs: 100000 }]);
@@ -46,7 +46,7 @@ test("unknown attempts survive restart and never grant unattended retry", async 
   assert.equal(t.attempts[0]!.unattendedAllowed,false);
   t = f.tasks.decideDirection(f.pid,t.id,{expectedRevision:t.revision,accept:true,assetId:f.image.id});
   t = f.tasks.recordAttempt(f.pid,t.id,{expectedRevision:t.revision,id:aid,status:"running"});
-  f.store.worker.close(); restored = new ProjectStore(join(f.root,"projects"));
+  f.store.worker.close(); restored = new ProjectStore(join(f.root,"projects"), { tasksEnabled: true });
   const service = new ProductionTasks(restored); t = service.get(f.pid,t.id);
   assert.equal(t.status,"paused"); assert.match(t.error!,/interrupted/); assert.equal(t.attempts[0]!.status,"unknown");
   assert.throws(() => service.recordAttempt(f.pid,t.id,{expectedRevision:t.revision,id:aid,status:"running"}));
@@ -147,7 +147,7 @@ test("3 derived blocked state resumes at the visible revision and preserves acce
   t = f.tasks.action(f.pid,t.id,{expectedRevision:t.revision,action:"ready",snapshotId:f.snapshot.id});
   t = f.tasks.action(f.pid,t.id,{expectedRevision:t.revision,action:"accept",snapshotId:f.snapshot.id});
   f.store.updateClip(f.pid,f.clip.id,{revision:f.clip.revision,frames:[{...f.clip.frames[0]!,durationUs:200000}],loop:f.clip.loop});
-  f.store.worker.close(); restored = new ProjectStore(join(f.root,"projects"));
+  f.store.worker.close(); restored = new ProjectStore(join(f.root,"projects"), { tasksEnabled: true });
   const service = new ProductionTasks(restored); t = service.get(f.pid,t.id);
   assert.equal(t.status,"blocked"); assert.equal(service.list(f.pid)[0]!.status,"blocked");
   const revision = t.revision;

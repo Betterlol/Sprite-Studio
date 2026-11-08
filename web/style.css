@@ -1,3 +1,11 @@
+.agent-plan { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--ui-color-11); border-radius: 6px; background: var(--ui-color-5); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.agent-plan summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; min-height: 28px; align-items: center; }
+.agent-plan summary small, .agent-plan-note, .agent-plan-state { color: var(--ui-color-10); }
+.agent-plan summary:focus-visible { outline: 2px solid var(--ui-color-4); outline-offset: 3px; }
+.agent-plan ol { list-style: none; margin: 8px 0; padding: 0; }
+.agent-plan li { display: grid; grid-template-columns: 4em minmax(0, 1fr); gap: 8px; padding: 3px 0; }
+.agent-plan li[aria-current="step"] .agent-plan-state { color: var(--ui-color-4); font-weight: 600; }
+.agent-plan p { margin: 6px 0; }
 .markdown-workbench { display:flex; flex-direction:column; flex:1; min-height:0; min-width:0; overflow:hidden; background:var(--ui-color-1); }
 .markdown-toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:12px 16px; border-bottom:1px solid var(--ui-color-11); }
 .markdown-toolbar button, .markdown-tabs button, .markdown-notice button { display:inline-flex; align-items:center; gap:6px; min-height:36px; padding:7px 12px; border:1px solid var(--ui-color-11); border-radius:6px; background:var(--ui-color-5); color:var(--ui-color-0); cursor:pointer; }

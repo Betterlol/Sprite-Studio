@@ -6,7 +6,7 @@ import type { PermissionTool } from "./tool-permissions.ts";
 
 export type TaskIntent = { taskId: string; intentVersion: number; barrierVersion: number };
 export function captureTaskIntent(store: ProjectStore, session: Session): TaskIntent | undefined {
-  if (!session.taskId) return;
+  if (!store.tasksEnabled || !session.taskId) return;
   const intent = session.workflowIntent;
   if (!intent || intent.taskId !== session.taskId) throw new StudioError("任务没有当前回合意图，请显式继续", 409);
   assertTaskIntent(store, session, intent);
@@ -14,7 +14,7 @@ export function captureTaskIntent(store: ProjectStore, session: Session): TaskIn
 }
 export function assertTaskIntent(store: ProjectStore, session: Session, intent?: TaskIntent) {
   assertDraftSourceCurrent(store, session.projectId, session.editingContext);
-  if (!intent) { if (session.taskId) throw new StudioError("旧普通回合不能操作新绑定任务", 409); return; }
+  if (!intent) { if (store.tasksEnabled && session.taskId) throw new StudioError("旧普通回合不能操作新绑定任务", 409); return; }
   const task = store.tasks.get(session.projectId, intent.taskId);
   if (session.taskId !== intent.taskId || task.sessionId !== session.id || session.workflowIntent?.intentVersion !== intent.intentVersion || session.workflowIntent?.barrierVersion !== intent.barrierVersion || task.intentVersion !== intent.intentVersion || task.barrierVersion !== intent.barrierVersion || ["paused", "stopped", "blocked", "failed"].includes(task.status)) throw new StudioError("任务意图/屏障/会话已失效，排队操作未执行", 409);
   assertDraftSourceCurrent(store, session.projectId, task.target);

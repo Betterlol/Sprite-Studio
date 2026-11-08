@@ -108,8 +108,10 @@ export class ProjectStore extends EventEmitter {
   permissions: ToolPermissions;
   metadataPaths = new Map<string, Map<string, string>>();
   resourceReaders = new Map<string, number>();
-  constructor(root: string) {
+  readonly tasksEnabled: boolean;
+  constructor(root: string, options: { tasksEnabled?: boolean } = {}) {
     super();
+    this.tasksEnabled = options.tasksEnabled ?? false;
     this.permissions = new ToolPermissions(root);
     mkdirSync(root, { recursive: true });
     this.root = realpathSync(root);
@@ -758,6 +760,7 @@ export class ProjectStore extends EventEmitter {
       frameChanges: this.animation.listChanges(projectId),
       frameDrafts: this.frameDrafts.list(projectId),
       clipDrafts: this.clipDrafts.list(projectId),
+      tasksEnabled: this.tasksEnabled,
       tasks: this.tasks.list(projectId),
       reviewSequences: this.reviewSequences.list(projectId),
       qualityCapabilities: this.quality.capabilities(),

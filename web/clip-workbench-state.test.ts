@@ -62,11 +62,11 @@ const globals = () => {
 
 test("R6 actual App preview playback preserves saved/legacy/draft editing identity rather than forging saved permission", async () => {
   const restore = globals();
-  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true }, appType: "custom" });
+  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true, hmr: false, watch: null }, appType: "custom" });
   const { App } = await vite.ssrLoadModule("/web/App.tsx"), component = mountedComponent(App);
   const project = { id: id(5), name: "preview context fixture" };
   const snapshot = { id: id(11), projectId: project.id, renderMode: "preview", createdAt: "now", clip: { ...clip, revision: "draft-preview", frames: clip.frames.map(frame => ({ ...frame, durationUs: 170000 })) }, images: {} };
-  const state = { project, assets: [clip, image], tasks: [], sessions: [], frameDrafts: [], clipDrafts: [], reviews: [], frameChanges: [], interpolations: [], generatedImages: [], reviewSequences: [], folders: ["参考图"], libraryRevision: "one", trash: [] };
+  const state = { tasksEnabled: true, project, assets: [clip, image], tasks: [], sessions: [], frameDrafts: [], clipDrafts: [], reviews: [], frameChanges: [], interpolations: [], generatedImages: [], reviewSequences: [], folders: ["参考图"], libraryRevision: "one", trash: [] };
   try {
     globalThis.fetch = async (url: any) => new Response(JSON.stringify(String(url) === "/api/projects" ? [project] : String(url) === "/api/status" ? { connected: false } : String(url).includes("/snapshots/") ? snapshot : state), { status: 200, headers: { "Content-Type": "application/json" } });
     component.render({}); let tree = await component.settle();
@@ -89,9 +89,26 @@ test("R6 actual App preview playback preserves saved/legacy/draft editing identi
   } finally { component.unmount(); await vite.close(); restore(); }
 });
 
+test("disabled task UI ignores historical bindings and keeps ordinary approvals visible", async () => {
+  const restore = globals();
+  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true, hmr: false, watch: null }, appType: "custom" });
+  const { App } = await vite.ssrLoadModule("/web/App.tsx"), component = mountedComponent(App);
+  const project = { id: id(5), name: "disabled task fixture" };
+  const session = { id: id(40), projectId: project.id, taskId: id(41), title: "old session", status: "idle", messages: [], activities: [], toolApproval: { id: id(42), tool: "save_image" } };
+  const task = { id: id(41), sessionId: session.id, phase: "direction", status: "waiting", target: { clipId: clip.id } };
+  const state = { tasksEnabled: false, project, assets: [clip, image], tasks: [task], sessions: [session], frameDrafts: [], clipDrafts: [], reviews: [], frameChanges: [], interpolations: [], generatedImages: [], reviewSequences: [], folders: ["参考图"], libraryRevision: "one", trash: [] };
+  try {
+    globalThis.fetch = async (url: any) => new Response(JSON.stringify(String(url) === "/api/projects" ? [project] : String(url) === "/api/status" ? { connected: false } : state), { status: 200, headers: { "Content-Type": "application/json" } });
+    component.render({}); const tree = await component.settle(), nodes = descendants(tree);
+    assert.ok(!nodes.some(node => node.type?.name === "TaskCenter"));
+    assert.equal(nodes.find(node => node.type?.name === "ToolApprovals").props.sessions.length, 1);
+    assert.deepEqual(nodes.find(node => node.type?.name === "ResourceLibrary").props.blockedAssetIds, []);
+  } finally { component.unmount(); await vite.close(); restore(); }
+});
+
 test("R9 actual TaskCenter creates an explicitly selected mandatory Review contract, never inferring one", async () => {
   const restore = globals();
-  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true }, appType: "custom" });
+  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true, hmr: false, watch: null }, appType: "custom" });
   const { TaskCenter } = await vite.ssrLoadModule("/web/TaskCenter.tsx"), component = mountedComponent(TaskCenter);
   const definition = { id: id(20), projectId: id(5), revision: "review-1", name: "explicit A to B", loop: true, segments: [{ id: id(21), clipId: clip.id, repeat: 1, speed: 1 }] };
   let submitted: any;
@@ -111,7 +128,7 @@ test("R9 actual TaskCenter creates an explicitly selected mandatory Review contr
 
 for (const legacySource of [false, true]) test(`R10 actual ClipWorkbench ${legacySource ? "legacy-to-unified" : "human"} preview/adopt callback uses exact dual-CAS without formal save`, async () => {
   const restore = globals();
-  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true }, appType: "custom" });
+  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true, hmr: false, watch: null }, appType: "custom" });
   const { ClipWorkbench } = await vite.ssrLoadModule("/web/ClipWorkbench.tsx"), component = mountedComponent(ClipWorkbench);
   const humanBody = { ...clipEdit(clip), frames: [{ ...clip.frames[0]!, durationUs: legacySource ? 100000 : 170000 }, clip.frames[1]!] };
   const resultBody = { ...humanBody, frames: [{ ...clip.frames[0]!, durationUs: 190000 }, clip.frames[1]!] };
@@ -146,7 +163,7 @@ for (const legacySource of [false, true]) test(`R10 actual ClipWorkbench ${legac
 
 test("R8 actual ReviewSequences component uses semantic server stale and shows pending dependency reconciliation", async () => {
   const restore = globals();
-  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true }, appType: "custom" });
+  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true, hmr: false, watch: null }, appType: "custom" });
   const { ReviewSequences } = await vite.ssrLoadModule("/web/ReviewSequences.tsx"), component = mountedComponent(ReviewSequences);
   const definition = { id: id(20), projectId: id(5), revision: "definition-1", name: "Review", loop: true, segments: [{ id: id(21), clipId: clip.id, repeat: 1, speed: 1 }] };
   const snapshot = { id: id(22), projectId: id(5), definitionId: definition.id, definitionRevision: definition.revision, snapshotId: id(23), createdAt: new Date().toISOString(), dependencies: [{ clipId: clip.id, revision: clip.revision, snapshotId: id(24) }], segments: [], stale: false };
@@ -169,7 +186,7 @@ test("R8 actual ReviewSequences component uses semantic server stale and shows p
 
 test("R7 actual ClipWorkbench mounted hook/effect path follows new saved props while Agent holds it, and preserves a human dirty document", async () => {
   const restore = globals();
-  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true }, appType: "custom" });
+  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true, hmr: false, watch: null }, appType: "custom" });
   const { ClipWorkbench } = await vite.ssrLoadModule("/web/ClipWorkbench.tsx");
   const component = mountedComponent(ClipWorkbench);
   const contexts: any[] = [];

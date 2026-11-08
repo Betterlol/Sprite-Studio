@@ -31,6 +31,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, store: ProjectStore
     const session = agent.send(uuid.parse(request.params.sessionId), input.text, input.assetIds, input.requestId, undefined, input.clipReferences, input.outputFolder, input.model, input.context, input.taskId, input.feedbackKind, input.markdownReferences);
     return reply.code(202).send(session);
   });
+  if (store.tasksEnabled) {
   app.post("/api/projects/:projectId/tasks", async request => {
     const input = z.object({ requestId: uuid, title: z.string().trim().min(1).max(200), description: z.string().max(10000), target: editingContextSchema.optional(), referenceIds: z.array(uuid).optional(), contract: productionContractSchema.refine(contract => contract.generationLimit <= 1, "当前生成授权上限仍为1，不扩大额度").optional() }).strict().parse(request.body);
     const projectId = pid(request);
@@ -44,6 +45,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, store: ProjectStore
   });
   app.post("/api/projects/:projectId/tasks/:taskId/actions", async request => agent.taskAction(pid(request), id(request, "taskId"), taskActionSchema.parse(request.body)));
   app.post("/api/projects/:projectId/tasks/:taskId/direction", async request => agent.decideTaskDirection(pid(request), id(request, "taskId"), taskDirectionSchema.parse(request.body)));
+  }
   app.get("/api/projects/:projectId/snapshots/:snapshotId", async request => store.animation.snapshot(pid(request), id(request, "snapshotId")));
   app.post("/api/projects/:projectId/clip-drafts", async request => {
     const { source, expectedFromDocumentRevision, ...input } = z.object({ clipId: uuid, revision: z.string(), frameId: uuid.optional(), fromDraftId: uuid.optional(), expectedFromDocumentRevision: z.string().optional(), source: z.literal("human").default("human") }).strict().parse(request.body);

@@ -169,7 +169,7 @@ export class ClipDrafts {
     }
     this.validate(pid, spec.clipId, value);
     const text = bytes(value).toString();
-    const draft: ClipDraft = { id: randomUUID(), projectId: pid, clipId: spec.clipId, baseSnapshotId: base.id, source, sessionId, ...(deliveryTarget ? { deliveryTarget } : {}), ...(source === "agent" ? owner : {}), status: "editing", createdAt: new Date().toISOString() };
+    const draft: ClipDraft = { id: randomUUID(), projectId: pid, clipId: spec.clipId, baseSnapshotId: base.id, source, sessionId, ...(deliveryTarget ? { deliveryTarget } : {}), ...(source === "agent" ? owner || { taskIndependent: true } : {}), status: "editing", createdAt: new Date().toISOString() };
     const files = Object.fromEntries([base.clip.file!, base.clip.file! + ".config.json", this.store.metaPath(pid, base.clip.id)].map(path => {
       const file = this.store.safePath(pid, path);
       return [path, existsSync(file) ? sha256(readFileSync(file)) : null];

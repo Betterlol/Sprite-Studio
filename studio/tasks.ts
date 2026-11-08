@@ -22,6 +22,8 @@ export class ProductionTasks {
   readonly store: ProjectStore;
   constructor(store: ProjectStore) {
     this.store = store;
+    // Disabled tasks are retained as history, not recovered or resumed.
+    if (!store.tasksEnabled) return;
     for (const pid of store.projects.keys()) {
       for (const task of this.rawList(pid)) {
         if (task.status === "running" || (task.status === "waiting" && task.waitReason === "tool_approval") || task.attempts.some(a => a.status === "running" || a.status === "reserved")) {
@@ -47,6 +49,7 @@ export class ProductionTasks {
     return readdirSync(folder).filter(f => /^[0-9a-f-]{36}\.json$/i.test(f)).map(f => this.raw(pid, f.slice(0, -5)));
   }
   private persist(task: ProductionTask) {
+    if (!this.store.tasksEnabled) throw new StudioError("自建制作任务已停用", 409);
     task.updatedAt = now(); const file = this.path(task.projectId, task.id);
     mkdirSync(dirname(file), { recursive: true }); atomicJson(file, task); this.store.changed(task.projectId); return structuredClone(task);
   }
@@ -119,12 +122,14 @@ export class ProductionTasks {
     }
     return task;
   }
-  list(pid: string): ProductionTask[] { return this.rawList(pid).map(t => this.view(t)).sort((a,b) => b.createdAt.localeCompare(a.createdAt)); }
+  list(pid: string): ProductionTask[] { return this.store.tasksEnabled ? this.rawList(pid).map(t => this.view(t)).sort((a,b) => b.createdAt.localeCompare(a.createdAt)) : []; }
   get(pid: string, id: string): ProductionTask { return this.view(this.raw(pid, id)); }
   wasAccepted(pid: string, id: string) { return this.raw(pid, id).status === "accepted"; }
-  protectsSession(pid: string, sessionId: string) { return this.rawList(pid).some(task => task.sessionId === sessionId && !["accepted", "stopped", "failed"].includes(task.status)); }
-  listActive(pid: string): ProductionTask[] { return this.rawList(pid).filter(task => !["accepted", "stopped", "failed"].includes(task.status)).map(task => this.view(task)); }
-  draftHoldsLease(pid: string, draft: { id: string; sessionId?: string; clipId: string; createdAt: string; taskId?: string; intentVersion?: number }) {
+  protectsSession(pid: string, sessionId: string) { return this.store.tasksEnabled && this.rawList(pid).some(task => task.sessionId === sessionId && !["accepted", "stopped", "failed"].includes(task.status)); }
+  listActive(pid: string): ProductionTask[] { return this.store.tasksEnabled ? this.rawList(pid).filter(task => !["accepted", "stopped", "failed"].includes(task.status)).map(task => this.view(task)) : []; }
+  draftHoldsLease(pid: string, draft: { id: string; sessionId?: string; clipId: string; createdAt: string; taskId?: string; intentVersion?: number; taskIndependent?: boolean }) {
+    if (draft.taskIndependent && !draft.taskId) return true;
+    if (!this.store.tasksEnabled && (draft.taskId || this.legacyDraftHasTaskOwner(pid, draft))) return false;
     const tasks = this.rawList(pid);
     if (draft.taskId) {
       const owner = tasks.find(task => task.id === draft.taskId);
@@ -142,11 +147,13 @@ export class ProductionTasks {
     }
     return !owners.length || owners.some(Boolean);
   }
-  legacyDraftHasTaskOwner(pid: string, draft: { id: string; sessionId?: string; clipId: string; createdAt: string }) {
+  legacyDraftHasTaskOwner(pid: string, draft: { id: string; sessionId?: string; clipId: string; createdAt: string; taskIndependent?: boolean }) {
+    if (draft.taskIndependent) return false;
     return this.rawList(pid).some(task => task.sessionId === draft.sessionId && !!draft.sessionId && task.contract.scope?.clipId === draft.clipId &&
       ((task.drafts || []).some(entry => entry.draftId === draft.id) || task.checks.some(check => check.draftId === draft.id) || (!task.drafts && draft.createdAt >= task.createdAt)));
   }
   create(pid: string, input: CreateTaskInput): ProductionTask {
+    if (!this.store.tasksEnabled) throw new StudioError("自建制作任务已停用，请直接在对话中说明目标", 409);
     this.store.project(pid); const spec = createSchema.parse(input), hash = sha256(JSON.stringify(spec));
     const old = this.rawList(pid).find(t => t.requestId === spec.requestId);
     if (old) { if (old.requestHash !== hash) fail("同一请求不能更换任务意图"); return this.view(old); }

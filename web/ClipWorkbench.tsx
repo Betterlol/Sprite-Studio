@@ -44,6 +44,8 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
   const image = assets.find(a => a.id === frame?.imageId);
   const transform = { ...defaults, ...frame?.transform };
   const width = image?.type === "image" ? image.width : 360, height = image?.type === "image" ? image.height : 360;
+  const scaleX = transform.scaleX ?? 1;
+  const renderWidth = Math.max(1, Math.round(width * transform.scale * scaleX)), renderHeight = Math.max(1, Math.round(height * transform.scale));
   const scale = zoom === "fit" ? Math.max(0.02, Math.min(size.width / width, size.height / height, 3)) : zoom;
   const validPreview = preview && sameClipText(preview.text, text) && preview.deps === deps && preview.revision === document?.documentRevision ? preview.value : null;
 
@@ -269,6 +271,8 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
   const [dragOffset, setDragOffset] = useState<{ offsetX: number; offsetY: number } | null>(null);
   useEffect(() => { drag.current = null; setDragOffset(null); }, [frame?.id]);
   const shownTransform = { ...transform, ...dragOffset };
+  const shownScaleX = shownTransform.scaleX ?? 1;
+  const previewScale = shownScaleX === 1 ? `scale(${shownTransform.scale})` : `scale(${shownTransform.scale * shownScaleX}, ${shownTransform.scale})`;
   return <>
     <div className="draft-toolbar" role="status">
       <span title={error}>{locked || busy || (error ? "草稿未就绪 · 请查看属性中的错误" : document?.draft.status === "saved" ? "动画已保存" : conflict ? "草稿冲突 · 内容保留" : document?.draft.source === "agent" ? "助手草稿 · 只读" : validPreview ? "整份草稿 · 已暂存" : "整份草稿 · 等待暂存/预览")}</span>
@@ -288,7 +292,7 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
         onPointerUp={event => { const d = drag.current; drag.current = null; setDragOffset(null); if (d && !readonly) { const edit = finishFrameDrag(current.current.present, current.current.present.frames[latest.current.frameIndex]?.id, d.frameId, { ...d.transform, ...offsetByDrag(d.transform.offsetX, d.transform.offsetY, d.dx, d.dy, d.scale) }); if (edit) act({type:"edit",edit}); } if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
         onPointerCancel={() => { drag.current = null; setDragOffset(null); }}>
         {frame && image?.type === "image" ? <img draggable={false} alt={`${clip.name} 第 ${frameIndex + 1} 帧实例`} src={validPreview && !dragOffset ? snapshotFrameUrl(projectId, validPreview.preview.id, frame.id) : assetUrl(projectId, image.id, image.revision)}
-          style={validPreview && !dragOffset ? undefined : { transform: `translate(${shownTransform.offsetX * scale}px, ${shownTransform.offsetY * scale}px) scale(${shownTransform.scale})` }}/>
+          style={validPreview && !dragOffset ? undefined : { transform: `translate(${shownTransform.offsetX * scale}px, ${shownTransform.offsetY * scale}px) ${previewScale}` }}/>
           : <p className="adjust-note">从素材库拖入静态图片到时间轴；修改只进入当前动画草稿。</p>}
       </div>
       <div className="view-controls"><span>视图缩放</span><button aria-label="缩小视图" onClick={() => setZoom(Math.max(.05, scale / 1.25))}><ZoomOut size={15}/></button><button onClick={() => setZoom(1)}>{Math.round(scale * 100)}%</button><button aria-label="放大视图" onClick={() => setZoom(Math.min(8, scale * 1.25))}><ZoomIn size={15}/></button><button aria-label="适应画布" onClick={() => setZoom("fit")}><Maximize2 size={15}/></button></div>
@@ -302,6 +306,8 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
       {frame && <fieldset disabled={readonly || !!busy}>
         <legend>同一动画草稿中的帧参数</legend>
         <label>素材缩放（不是视图缩放）<input aria-label="帧素材缩放百分比" type="number" min={5} max={400} value={Math.round(transform.scale * 100)} onChange={e => patchFrame({transform:{...transform,scale:Math.max(.05,Math.min(4,Number(e.target.value)/100))}})}/> %</label>
+        <label>横向比例（非等比拉伸）<input aria-label="帧横向比例百分比" type="number" min={5} max={400} value={Math.round(scaleX * 100)} onChange={e => { const value = Math.max(.05, Math.min(4, Number(e.target.value) / 100)); patchFrame({transform:{...transform, scaleX: value === 1 ? undefined : value}}); }}/> %</label>
+        <small>内容尺寸 {renderWidth} × {renderHeight} px；帧画布仍保持 {width} × {height}。横向比例偏离 100% 会改变身体和道具比例，请连播检查。</small>
         {(["offsetX","offsetY"] as const).map(key => <label key={key}>{key === "offsetX" ? "水平偏移 X" : "垂直偏移 Y"}<input type="number" min={-4096} max={4096} value={transform[key]} onChange={e => patchFrame({transform:{...transform,[key]:Math.max(-4096,Math.min(4096,Number(e.target.value)))}})}/></label>)}
         <label>停留时长 ms<input type="number" min={1} max={60000} value={frame.durationUs / 1000} onChange={e => patchFrame({durationUs:Math.max(1000,Math.min(60000000,Math.round(Number(e.target.value)*1000)))})}/></label>
         <label><input type="checkbox" checked={transform.clip} onChange={e => patchFrame({transform:{...transform,clip:e.target.checked}})}/>允许裁切超出画布内容</label>

@@ -65,6 +65,7 @@ export type ImageAsset = {
 };
 export type FrameTransform = {
   scale: number;
+  scaleX?: number;
   offsetX: number;
   offsetY: number;
   clip: boolean;
@@ -72,6 +73,8 @@ export type FrameTransform = {
 export const frameTransformSchema = z
   .object({
     scale: z.number().min(0.05).max(4).default(1),
+    // 横向额外乘数，缺省等于 1。只有真正改变宽高比时才写入，避免给旧帧、旧草稿正文和渲染缓存键平白加字段。
+    scaleX: z.number().min(0.05).max(4).optional(),
     offsetX: z.number().min(-4096).max(4096).default(0),
     offsetY: z.number().min(-4096).max(4096).default(0),
     clip: z.boolean().default(false),

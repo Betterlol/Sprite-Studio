@@ -16,7 +16,6 @@ import { PermissionSettings } from "./PermissionSettings.tsx";
 import { ToolApprovals } from "./ToolApprovals.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
 import type { FramePreview } from "./FrameAdjustmentPanel.tsx";
-import { FrameSaveApprovals } from "./FrameSaveApprovals.tsx";
 import { GeneratedPreview } from "./GeneratedPreview.tsx";
 import type { GeneratedImageInfo } from "../studio/generated.ts";
 import { SliceWorkbench } from "./SliceWorkbench.tsx";
@@ -1800,19 +1799,6 @@ export function App() {
               <ToolApprovals
                 sessions={(state?.sessions || []).filter(s => !(activeTasks).some(t => t.sessionId === s.id && t.phase === "direction" && !(t.direction?.accept && t.direction.intentVersion === t.intentVersion) && s.toolApproval?.tool === "save_image"))}
                 onRefresh={() => refreshRef.current()}
-              />
-              <FrameSaveApprovals
-                sessions={state?.sessions || []}
-                onRefresh={() => refreshRef.current()}
-                onCompare={(value) => {
-                  setSelectedId(value.before.clip.id);
-                  setPlaying(false);
-                  setComparison({
-                    before: value.before,
-                    after: value.preview,
-                    nonce: Date.now(),
-                  });
-                }}
               />
               <div ref={chatEnd} />
             </div>

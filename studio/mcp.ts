@@ -129,7 +129,7 @@ const tools = [
   {
     name: "write_documents",
     description:
-      "Write 1-16 recipe, clip config or frame-edit draft documents atomically from complete JSON text and expected document revisions. Returns normalized documents and stable IDs for new items. Writing frame-edit only updates the draft, not the animation; use inspect_clip then save_frame_draft. Does not slice, generate images or create animations. Re-read on version conflict; never discard another editor's changes.",
+      "Write 1-16 recipe, clip config or frame-edit draft documents atomically from complete JSON text and expected document revisions. Returns normalized documents and stable IDs for new items. Draft writes only update the draft; use inspect_clip then save_clip_draft or save_frame_draft. Direct saved-clip writes also follow animation-save permissions and, when approval is requested, present exact playable candidates before atomic publication. Existing-frame transform edits still use animation drafts. User feedback is returned in the same call. Does not slice, generate images or create animations. Re-read on version conflict; never discard another editor's changes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -206,7 +206,7 @@ const tools = [
   {
     name: "save_frame_draft",
     description:
-      "Save ALL modified frames of the exact previewed animation draft in one commit according to configured project permissions. Returns the actual save result or the reason the operation was not performed, including available user feedback. Preserves unchanged frame instances and source pixels without adding image resources. Reports blocking overflow warnings for correction.",
+      "Save ALL modified frames of the exact animation draft in one commit according to configured project permissions. When approval is requested, the user sees fixed-version animation playback; Accept saves and Deny preserves the draft. Returns the actual save result and available user feedback for either decision. Feedback guides the next edit, not automatic regeneration. Preserves unchanged frame instances and source pixels without adding image resources. Existing explicit-clipping and version checks remain.",
     inputSchema: {
       type: "object",
       properties: { draftId: idProperty, documentRevision: { type: "string" } },
@@ -294,7 +294,7 @@ const tools = [
   },
   {
     name: "save_clip_draft",
-    description: "Save the exact full object draft using configured project tool permissions; inherits save_frame_draft policies. Preserves original pixels and history. Human-draft derivatives return {saved:false,delivered:true,pendingHumanAdoption:true,delivery:{draftId,documentRevision,snapshotId,target}}: this is a fixed result for adoption into the user's source draft, not a saved animation. Ordinary Agent-owned drafts save directly when permitted. The result reports what was actually saved or delivered.",
+    description: "Save the exact full object draft using configured project tool permissions; inherits save_frame_draft policies. When approval is requested, the user reviews fixed-version playback before accepting or rejecting; both decisions return their feedback. Denial leaves the draft available for edits and is not an instruction to regenerate. Preserves original pixels and history. Human-draft derivatives return {saved:false,delivered:true,pendingHumanAdoption:true,delivery:{draftId,documentRevision,snapshotId,target}}: acceptance delivers a fixed result for adoption into the user's source draft, not a saved animation. Ordinary Agent-owned drafts save when permitted. The result reports what was actually saved or delivered; permission-only automatic execution is not human visual acceptance.",
     inputSchema: { type: "object", properties: { draftId: idProperty, documentRevision: { type: "string" } }, required: ["draftId", "documentRevision"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },

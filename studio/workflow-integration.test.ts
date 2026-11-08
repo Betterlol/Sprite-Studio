@@ -46,6 +46,8 @@ async function fixture() {
   const made = spawnSync(process.env.SPRITE_STUDIO_PYTHON || "python", ["-I", "-c", "from PIL import Image,ImageDraw; import sys; im=Image.new('RGBA',(64,32)); d=ImageDraw.Draw(im); d.rectangle((5,5,26,26),fill='red'); d.rectangle((37,5,58,26),fill='blue'); im.save(sys.argv[1])", sourcePath], { windowsHide: true });
   assert.equal(made.status, 0, made.stderr.toString());
   const store = new ProjectStore(join(root, "projects"), { tasksEnabled: true }), pid = store.createProject("isolated workflow").id;
+  // Most task-compatibility cases exercise publication, not human playback review.
+  store.permissions.write({ save_frame_draft: "allow", save_clip_draft: "allow" });
   const image = await store.importImage(pid, "source.png", readFileSync(sourcePath), "reference");
   const runtimes: StubRuntime[] = [];
   const hub: AgentHub = Object.assign(Object.create(AgentHub.prototype), {
@@ -393,7 +395,7 @@ test("new tools inherit old deny/ask policies, and MCP inventory exactly matches
   const f = await fixture();
   try {
     const originalNames = ["save_image", "create_clip", "write_documents", "slice_sheet", "adjust_image", "create_frame_draft", "save_frame_draft", "list_assets", "list_generated_images", "view_image", "get_schema", "read_document", "validate_document", "inspect_clip"];
-    for (const name of originalNames) assert.equal((defaultToolPolicies as any)[name], name === "save_image" ? "ask" : "allow");
+    for (const name of originalNames) assert.equal((defaultToolPolicies as any)[name], ["save_image", "save_frame_draft"].includes(name) ? "ask" : "allow");
     const clip = f.clip(); let task = await f.create({ target: { mode: "saved", clipId: clip.id } }); task = f.approveExisting(task, task.target!.snapshotId); const session = await f.begin(task);
     f.store.permissions.write({ create_frame_draft: "deny", create_clip_draft: "allow" });
     assert.equal((await f.hub.tool(session.id, "create_clip_draft", { clipId: clip.id, revision: clip.revision })).isError, true); assert.equal(f.store.clipDrafts.list(f.pid).length, 0);

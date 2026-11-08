@@ -64,9 +64,15 @@ export function PermissionSettings({ onClose }: { onClose: () => void }) {
         适用于所有工程的助手项目工具；网页手动操作直接执行。更改即时保存，当前待审批请求仍需处理。
       </p>
       <p>
-        默认只有“添加图片到指定目录”需要审批，其余均为 Full
-        access。审批期间助手工具调用保持等待，拒绝时可填写理由。
+        默认图片入库和动画保存需要审批，其余直接执行。已有显式设置不自动改写。
+        动画 ask 会展示可播放候选；allow 只表示免确认保存，不表示你已验收。
       </p>
+      {settings && <button className="secondary" disabled={busy} onClick={async () => {
+        setBusy(true); setError("");
+        try { setSettings(await api<Settings>("/api/tool-permissions", { method: "PUT", body: JSON.stringify({ save_frame_draft: "ask", save_clip_draft: "ask" }) })); }
+        catch (error: any) { setError(error.message); }
+        finally { setBusy(false); }
+      }}>启用动画播放验收</button>}
       {!settings && !error && <p role="status">读取设置…</p>}
       {settings &&
         [true, false].map((writes) => (

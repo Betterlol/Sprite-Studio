@@ -1,3 +1,35 @@
+.animation-acceptance-dialog { width: min(1050px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--ui-color-11); border-radius: 10px; color: var(--ui-color-0); background: var(--ui-color-1); }
+.animation-acceptance-dialog::backdrop { background: #0009; }
+.acceptance-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 22px; border-bottom: 1px solid var(--ui-color-11); }
+.acceptance-heading h2 { margin: 0 0 5px; font-size: 19px; }
+.acceptance-heading small, .acceptance-pane small { color: var(--ui-color-10); }
+.acceptance-body { padding: 16px 22px; }
+.acceptance-body > p { max-width: 75ch; line-height: 1.7; font-size: 13px; }
+.acceptance-body h3 { margin: 16px 0 8px; font-size: 16px; }
+.acceptance-summary { display: flex; flex-wrap: wrap; gap: 6px 24px; padding-left: 18px; font-size: 12px; color: var(--ui-color-10); }
+.acceptance-view-options, .acceptance-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 12px 0; font-size: 12px; }
+.acceptance-view-options label { display: inline-flex; align-items: center; gap: 6px; }
+.acceptance-controls button { display: inline-flex; align-items: center; gap: 4px; min-height: 34px; }
+.acceptance-controls input { flex: 1; min-width: 110px; }
+.acceptance-panes { display: grid; gap: 16px; }
+.acceptance-pane { min-width: 0; }
+.acceptance-pane > strong { display: block; padding: 4px 0 8px; font-size: 13px; }
+.acceptance-stage { display: flex; align-items: flex-start; min-height: 120px; height: 300px; overflow: auto; border: 1px solid var(--ui-color-11); }
+.acceptance-artboard { position: relative; flex: none; margin: auto; }
+.acceptance-artboard img { display: block; max-width: none; max-height: none; }
+.acceptance-stage > span { margin: auto; color: #7c858b; font-size: 13px; }
+.acceptance-background-checker { background-color: #222b30; background-image: conic-gradient(#344149 25%, transparent 0 50%, #344149 0 75%, transparent 0); background-size: 20px 20px; }
+.acceptance-background-light { background: #f5f5f5; }
+.acceptance-background-dark { background: #15191c; }
+.acceptance-parameters { overflow: auto; max-height: 240px; padding: 10px; background: var(--ui-color-5); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.acceptance-feedback { display: block; margin-top: 16px; font-size: 13px; }
+.acceptance-feedback textarea { display: block; box-sizing: border-box; width: 100%; min-height: 80px; resize: vertical; margin-top: 8px; padding: 10px; border: 1px solid var(--ui-color-11); border-radius: 5px; color: var(--ui-color-0); background: var(--ui-color-5); }
+.acceptance-actions { position: sticky; bottom: 0; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; padding: 14px 22px; border-top: 1px solid var(--ui-color-11); background: var(--ui-color-1); }
+.acceptance-actions button { min-height: 38px; padding: 8px 14px; }
+.animation-acceptance-dialog select { margin-left: 6px; padding: 5px 8px; border: 1px solid var(--ui-color-11); border-radius: 4px; color: var(--ui-color-0); background: var(--ui-color-5); }
+.animation-acceptance-dialog :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--ui-color-4); outline-offset: 2px; }
+@media (max-width: 640px) { .animation-acceptance-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); } .acceptance-body, .acceptance-heading, .acceptance-actions { padding: 12px; } }
+
 .agent-plan { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--ui-color-11); border-radius: 6px; background: var(--ui-color-5); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .agent-plan summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; min-height: 28px; align-items: center; }
 .agent-plan summary small, .agent-plan-note, .agent-plan-state { color: var(--ui-color-10); }

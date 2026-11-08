@@ -242,17 +242,6 @@ export class AgentHub {
         approvalPolicy: "on-request",
         developerInstructions: ordinaryAgentInstructions,
       };
-      params.developerInstructions +=
-        "切割使用统一v3 sheet-recipe，先read_document读取来源及expectedDocumentRevision，get_schema查看格式。v3的slicing.items统一为id?/name/enabled/box和可选不可变selection，保存的配置没有method/grid/detection/componentKeys。首次可用inspect_sheet action=generate，method=grid传grid参数，method=components传detection参数；返回recipe只是未保存区域草案，不是正式素材。已有v1/v2先用action=resolve及原text得到保留ID的v3草案，读取不会迁移文件。生成方式是工具参数，微调直接改已有条目的box并保留其他条目与ID；几何改变会将该条目转为矩形取像，未改条目保留冻结像素选区。不要为了微调重新生成整组或重分配ID。新增条目省略ID，write_documents返回规范正文及稳定ID，保留expectedDocumentRevision的CAS。inspect_sheet action=preview传完整草案text，得到真实原帧、输出图、批次和溢出；确认后write_documents保存，再用slice_sheet(assetId,expectedDefinitionRevision,requestId)执行。生成不保存、预览不发布，不能把草案或工具回执当动态验收。统一output只做明确全局缩放和透明补边，不逐帧contain，不硬拆/补造姿势/去白底。已有方向内可改区域，实际缺帧或方向不符仍返回pre-check。动画用create_clip/read_document/write_documents或任务完整草稿编排，使用切割回执outputIds，不把条目ID当图片ID。";
-      params.developerInstructions +=
-        "需要把生成图保存进项目时，调用save_image并自行提供合理的名称和目录，工具本身按权限等待Approve/Deny；不要用额外的用户提问、手动保存表单或结束回合来代替工具审批。审批期间不要结束当前回合；等待工具结果后再继续。用户明确要求仅预览时不保存。";
-      params.developerInstructions +=
-        "所有项目工具的权限由网页设置控制。需要审批时工具调用保持等待，必须等用户决定后再继续；不要把等待请求当作成功，不要尝试并行工具或换工具绕过。拒绝结果附带用户理由，按理由调整后再请求。默认只有save_image需要审批，其他项目工具为full access，用户可逐项更改。";
-      params.developerInstructions +=
-        "动画引用含snapshotId、clipId、版本、帧实例和时长。检查用inspect_clip看实际帧图与相邻叠图，每次最多16帧。动画帧缩放、位移、裁切与时长修复：create_frame_draft取得同一动画草稿documentId，frameId仅指定起始焦点；同一动画后续帧复用这份草稿。read_document读取配置，通过write_documents修改frame-edit v2 JSON的frames数组，每项含frameId、transform、durationUs，transform为相对源图的绝对参数；保留其他条目，不把上次修改丢掉，再用inspect_clip传draftId、documentRevision检查草稿。预览不会修改动画或新增图片资源。可以连续修改多帧，一起预览播放编排，inspect_clip返回越界warnings；有blocking警告先修正，不能把画布内截断图当作未越界。检查后调用save_frame_draft一次保存所有修改；按网页权限设置等待用户Accept/Deny或直接执行，拒绝理由会返回，不能把待审批或拒绝说成已保存。用户要求先看看时停在草稿预览。不要通过直接编辑clip配置或adjust_image绕过单帧修复的草稿与保存流程。其他帧实例不变。边界框变化只是线索，不自动拉平有意运动。向用户用第几帧交流，UUID用于工具。静态图和叠图不代表已观看实际速度播放，不可声称动态验收通过。";
-      if (task) params.developerInstructions +=
-        "制作任务与对话回合生命周期独立。任务方向未通过不得提交制作成果；方向决定与工具权限不是同一授权，allow也不跳过方向。direction阶段只有用户明确要求时可首次生成，默认额度仍1；事件日志不是硬预算，不能无人值守重生成或自动重试未知请求。方向通过后由平台切换到禁用原生image_gen的production runtime，按实际保存回执继续确定性切割、完整对象草稿编排与参数修复，不能以image_gen完成或旧专用补帧的停下作为任务完成。完整动画使用create_clip_draft/read_document/write_documents/inspect_clip/save_clip_draft；人工draft上下文必须用fromDraftId显式派生，保留人工全文，不能直接改人工稿或用旧frame草稿丢掉编排。workflow_task.check由真实renderer记录静态检查和unverified时序，模型不能自报passed；按具体finding修复，遵守修复轮次/无进展停止，无颜色结构修复工具时说明能力缺口，不用shell/安装/生成绕过。workflow_task.ready仅表示静态可交付、待人工动态播放，不代替accept。多动作使用review_sequence得到全部批次coverage与来源，不能把前16帧说成全部检查。不同保存位置被拒后用同generatedId、新requestId重提save_image，不要重生成。";
-
       if (task) params.developerInstructions += `当前制作任务约定与能力边界：${JSON.stringify({ task, capabilities: this.store.quality.capabilities(), nativeGenerationEnabled: generationEnabled, preflightHardControl: false })}`;
       const result = session.threadId
         ? await client.request("thread/resume", {

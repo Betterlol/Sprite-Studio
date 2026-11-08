@@ -63,7 +63,7 @@ const tools = [
   },
   {
     name: "write_markdown",
-    description: "Save the complete UTF-8 body of an existing Markdown document. First read its current revision; expectedRevision prevents overwriting concurrent edits. On conflict preserve your text and re-read/discuss; never substitute a newer revision to force old content through. Normal save, not an animation draft or adoption request.",
+    description: "Save the complete UTF-8 body of an existing Markdown document. First read its current revision; expectedRevision prevents overwriting concurrent edits. On conflict preserve your text, re-read and merge current content before saving with its matching revision. Normal save, not an animation draft or adoption request.",
     inputSchema: { type: "object", properties: { assetId: idProperty, expectedRevision: { type: "string" }, text: { type: "string" } }, required: ["assetId", "expectedRevision", "text"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
@@ -159,7 +159,7 @@ const tools = [
   },
   {
     name: "inspect_sheet",
-    description: "Read-only region operations shared with the editor. action=generate takes method=grid plus grid parameters OR method=components plus optional detection parameters; returns a unified v3 recipe of final boxes and frozen pixel selections. Method is an operation parameter, never saved in v3. action=resolve converts an existing v1/v2 text to an editable v3 draft preserving IDs; it does not save. action=preview takes complete unsaved recipe text and start/limit (max16), returns actual contact PNG plus raw/output frame image references and overflow. Edit boxes directly for refinement; do not rerun a generator or replace IDs to move/resize a region. New item IDs must be omitted. Save returned/edited recipe with write_documents, then slice_sheet executes saved regions without re-detection. Legacy detect remains compatible. No assets/recipes/clips are published; inherits read_document and inspect_clip permissions and task scope on cached calls too.",
+    description: "Read-only region operations shared with the editor. action=generate takes method=grid plus grid parameters OR method=components plus optional detection parameters; returns a unified v3 recipe of final boxes and frozen pixel selections. Method is an operation parameter, never saved in v3. action=resolve converts existing v1/v2 text to an editable v3 draft preserving IDs. action=preview takes complete unsaved recipe text and start/limit (max16), returning actual contact PNG, raw/output frame image references and overflow. Use preview to diagnose individual frames, including flawed generated sheets, without publishing assets. Refine existing boxes while preserving IDs and unaffected selections; omit IDs for new items. Save the recipe with write_documents and execute it with slice_sheet. Inherits read_document and inspect_clip permissions.",
     inputSchema: { type: "object", ...z.toJSONSchema(inspectSheetSchema) },
     annotations: { readOnlyHint: true },
   },
@@ -205,7 +205,7 @@ const tools = [
   {
     name: "save_frame_draft",
     description:
-      "Save ALL modified frames of the exact previewed animation draft in one commit. Default policy asks the user to Accept/Deny in the webpage; waits and returns the decision and denial reason. Never claim saved before this succeeds. No new image resource; preserves unchanged frame instances and source pixels. Resolve blocking overflow warnings before saving.",
+      "Save ALL modified frames of the exact previewed animation draft in one commit. Follows the current configured permission: allow saves directly, ask waits for the webpage decision and returns it with any denial reason, deny does not save. Returns the actual save result. Preserves unchanged frame instances and source pixels without adding image resources. Reports blocking overflow warnings for correction.",
     inputSchema: {
       type: "object",
       properties: { draftId: idProperty, documentRevision: { type: "string" } },
@@ -293,7 +293,7 @@ const tools = [
   },
   {
     name: "save_clip_draft",
-    description: "Commit the exact full object draft once. Uses configured tool permission; approved task direction is additionally required only when the optional production-task layer is enabled and this session is bound to a task. Inherits save_frame_draft policies. Uses a publish-time intent/session/barrier guard, preserves original pixels and history. Human-draft derivatives return {saved:false,delivered:true,pendingHumanAdoption:true,delivery:{draftId,documentRevision,snapshotId,target}}; they freeze a read-only proposal and NEVER publish the clip. The user explicitly adopts it into the source human draft with CAS, then separately saves the animation (legacy frame-edit sources explicitly start a new unified human session and remain untouched). Normal Agent production still saves autonomously. No model may report success before receipt. Rendering/checking is not dynamic playback acceptance.",
+    description: "Save the exact full object draft using configured project tool permissions; inherits save_frame_draft policies. Preserves original pixels and history. Human-draft derivatives return {saved:false,delivered:true,pendingHumanAdoption:true,delivery:{draftId,documentRevision,snapshotId,target}}: this is a fixed result for adoption into the user's source draft, not a saved animation. Ordinary Agent-owned drafts save directly when permitted. The result reports what was actually saved or delivered.",
     inputSchema: { type: "object", properties: { draftId: idProperty, documentRevision: { type: "string" } }, required: ["draftId", "documentRevision"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
@@ -326,7 +326,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           capabilities: { tools: {} },
           serverInfo: { name: "sprite-studio", version: "0.1.0" },
           instructions:
-            "Use stable project resource IDs. Inspect actual images before making visual claims. Image operations preserve originals; frame edits use config drafts, preview before saving and request permission to apply; saved edits record undo history. Every tool follows configurable webpage permissions; an approval request remains pending until the user decides, and denial includes a reason. Wait for that result before continuing.",
+            "Use stable project resource IDs and current document revisions. Tools provide image inspection, slicing, animation editing and saving for complete production workflows. Every project tool follows the current webpage permissions: allow executes directly, ask waits for and returns the user's decision, deny returns without execution. Tool descriptions specify their inputs, outputs and data guarantees.",
         },
       });
     else if (request.method === "ping")

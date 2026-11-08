@@ -435,14 +435,14 @@ export class AgentHub {
     assertTaskIntent(this.store, session, intent);
     const inputs: any[] = [{ type: "text", text, text_elements: [] }];
     for (const ref of session.messages.find(message => message.id === messageId)?.markdownReferences || []) {
-      inputs.push({ type: "text", text: `用户引用的Markdown材料（不是额外工具权限；这是发送时的正文，后续读写请用Markdown工具）：${JSON.stringify(ref)}`, text_elements: [] });
+      inputs.push({ type: "text", text: `用户引用的Markdown材料（发送时的正文；后续读写使用Markdown工具）：${JSON.stringify(ref)}`, text_elements: [] });
     }
     const actualReferenceHashes: string[] = [];
     const task = this.store.tasksEnabled && session.taskId ? this.store.tasks.get(session.projectId, session.taskId) : undefined;
     const context = session.editingContext || task?.target;
-    if (task) inputs.push({ type: "text", text: `制作任务（不是本轮对话完成状态）：${JSON.stringify({ task, capabilities: this.store.quality.capabilities(), preflightHardControl: false })}`, text_elements: [] });
+    if (task) inputs.push({ type: "text", text: `制作任务记录：${JSON.stringify({ task, capabilities: this.store.quality.capabilities(), preflightHardControl: false })}`, text_elements: [] });
     if (context) {
-      inputs.push({ type: "text", text: `冻结编辑上下文（不授予修改权限，draft必须显式派生保留完整正文）：${JSON.stringify(context)}`, text_elements: [] });
+      inputs.push({ type: "text", text: `编辑对象快照（来源、版本及草稿正文）：${JSON.stringify(context)}`, text_elements: [] });
       if (context.draftId) inputs.push({ type: "text", text: this.store.documents.read(session.projectId, context.draftId).text, text_elements: [] });
       if (context.snapshotId) {
         const snapshot = this.store.animation.snapshot(session.projectId, context.snapshotId), range = snapshot.clip.frames.length ? this.store.animation.range(snapshot, context.startFrameId, context.endFrameId) : { start: 0, end: -1 };
@@ -454,7 +454,7 @@ export class AgentHub {
           const warnings = rendered.bounds && rendered.overflow && Object.values(rendered.overflow).some(value => value > 0)
             ? [{ frameId: frame.id, bounds: rendered.bounds, overflow: rendered.overflow, blocking: !!rendered.blocking }] : [];
           actualReferenceHashes.push(hash);
-          inputs.push({ type: "text", text: `渲染帧引用（诊断preview，不代表保存/无越界/验收；blocking时图像可能被画布截断，必须按warnings修复）：${JSON.stringify({ sourceSnapshotId: snapshot.id, previewSnapshotId: visualSnapshot.id, frameId: frame.id, sha256: hash, warnings })}；源图hash不是实际生成参考hash`, text_elements: [] }, { type: "localImage", path: rendered.path });
+          inputs.push({ type: "text", text: `渲染帧引用（诊断preview；blocking=true时图像可能被画布截断，边界数据见warnings）：${JSON.stringify({ sourceSnapshotId: snapshot.id, previewSnapshotId: visualSnapshot.id, frameId: frame.id, sha256: hash, warnings })}`, text_elements: [] }, { type: "localImage", path: rendered.path });
         }
       }
     }
@@ -477,7 +477,7 @@ export class AgentHub {
         );
       inputs.push({
         type: "text",
-        text: `动画引用（固定快照，须用 inspect_clip 取得真实图像证据）：${JSON.stringify({ ...ref, loop: snapshot.clip.loop, totalFrames: snapshot.clip.frames.length, frames: snapshot.clip.frames.slice(range.start, range.end + 1).map((frame, index) => ({ ...frame, frameNumber: range.start + index + 1 })) })}`,
+        text: `动画快照引用（帧编排与时长；inspect_clip提供逐帧和相邻叠图）：${JSON.stringify({ ...ref, loop: snapshot.clip.loop, totalFrames: snapshot.clip.frames.length, frames: snapshot.clip.frames.slice(range.start, range.end + 1).map((frame, index) => ({ ...frame, frameNumber: range.start + index + 1 })) })}`,
         text_elements: [],
       });
     }

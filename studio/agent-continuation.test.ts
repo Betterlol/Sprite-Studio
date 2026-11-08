@@ -97,7 +97,7 @@ test("disabled mode preserves old task files and readonly drafts but removes act
     assert.equal(store.clipDrafts.read(pid, draft.documentId).draft.readOnly, true);
     const instructions = runtime.calls.find(call => call.method === "thread/start")!.params.developerInstructions;
     assert.equal(instructions, ordinaryAgentInstructions);
-    assert.ok(!runtime.calls.find(call => call.method === "turn/start")!.params.input.some((input: any) => input.text?.startsWith("制作任务（")));
+    assert.ok(!runtime.calls.find(call => call.method === "turn/start")!.params.input.some((input: any) => input.text?.startsWith("制作任务记录：")));
     await hub.stop(old.id);
     assert.equal(readFileSync(taskPath, "utf8"), original);
     store.deleteSession(old.id);
@@ -115,7 +115,7 @@ for (const enabled of [false, true]) test(`MCP inventory matches task mode ${ena
   assert.equal(tools.some((tool: any) => tool.name === "workflow_task"), enabled);
   assert.equal(tools.find((tool: any) => tool.name === "create_markdown").inputSchema.properties.requestId.format, "uuid");
   const frameSave = tools.find((tool: any) => tool.name === "save_frame_draft").description;
-  assert.match(frameSave, /allow saves directly/);
+  assert.match(frameSave, /configured project permissions/);
   assert.doesNotMatch(frameSave, /Default policy asks/);
 });
 
@@ -138,14 +138,14 @@ test("native plan updates use current thread/turn, persist, and never fabricate 
   } finally { await hub.close(); await store.worker.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("ordinary instructions default to full production using configured tool permissions", () => {
-  assert.match(ordinaryAgentInstructions, /完整目标为交付单位/);
+test("ordinary instructions organize tools around user goals and available feedback", () => {
+  assert.match(ordinaryAgentInstructions, /根据用户需求理解交付目标/);
+  assert.match(ordinaryAgentInstructions, /自主组织工具/);
   assert.match(ordinaryAgentInstructions, /继续完成待机/);
-  assert.match(ordinaryAgentInstructions, /逐项完成所需的生成、切割、编排、检查、修正和保存/);
-  assert.match(ordinaryAgentInstructions, /按实际制作需要安排/);
-  assert.match(ordinaryAgentInstructions, /allow 直接执行/);
-  assert.match(ordinaryAgentInstructions, /ask 调用后等待工具返回用户决定/);
+  assert.match(ordinaryAgentInstructions, /完成所需的生成、切割、编排、检查、修正和保存/);
+  assert.match(ordinaryAgentInstructions, /按实际需要安排/);
+  assert.match(ordinaryAgentInstructions, /其中已有的用户反馈/);
   assert.match(ordinaryAgentInstructions, /优先更新已有文档/);
   assert.match(ordinaryAgentInstructions, /原生 update_plan/);
-  assert.doesNotMatch(ordinaryAgentInstructions, /默认最多调用一次|首张生成授权|返回\s*pre-check|确认后.*切割/);
+  assert.doesNotMatch(ordinaryAgentInstructions, /\ballow\b|\bask\b|\bdeny\b|pre-check|post-process|默认最多调用一次|首张生成授权|确认后.*切割/);
 });

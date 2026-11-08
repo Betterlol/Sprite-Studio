@@ -136,9 +136,11 @@ def run(method, params):
         if count != 1: raise ValueError('目前仅支持调整静态图片')
         spec = params['transform']
         scale = float(spec.get('scale', 1))
+        # 横向倍率只改变内容宽度，画布仍由 width/height 或原图尺寸决定。
+        scale_x = float(spec.get('scaleX', 1))
         width, height = int(spec.get('width', image.width)), int(spec.get('height', image.height))
-        if not 0.05 <= scale <= 4 or not 1 <= width <= 4096 or not 1 <= height <= 4096: raise ValueError('调整参数超出范围')
-        size = (max(1, round(image.width*scale)), max(1, round(image.height*scale)))
+        if not 0.05 <= scale <= 4 or not 0.05 <= scale_x <= 4 or not 1 <= width <= 4096 or not 1 <= height <= 4096: raise ValueError('调整参数超出范围')
+        size = (max(1, round(image.width*scale*scale_x)), max(1, round(image.height*scale)))
         if size[0]*size[1] > Image.MAX_IMAGE_PIXELS: raise ValueError('缩放后的图片太大')
         resized = image.resize(size, Image.Resampling.LANCZOS)
         x, y = round((width-size[0])/2+spec.get('offsetX', 0)), round((height-size[1])/2+spec.get('offsetY', 0))

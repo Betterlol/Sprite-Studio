@@ -195,6 +195,46 @@ test("one animation draft accumulates multiple frames, previews and saves them t
   }
 });
 
+test("a frame stretches horizontally without changing the shared animation canvas", async () => {
+  const { store, pid, clip } = await fixture();
+  try {
+    const doc = store.frameDrafts.create(
+        pid,
+        { clipId: clip.id, revision: clip.revision, frameId: clip.frames[1]!.id },
+        "human",
+      ),
+      config = JSON.parse(store.documents.read(pid, doc.documentId).text);
+    // 96×96 源图里是 48×48 的实心方块；scale 0.5 + scaleX 2 应得到 48×24 的内容。
+    config.frames[1].transform = { ...config.frames[1].transform, scale: 0.5, scaleX: 2 };
+    const written = store.documents.write(pid, [
+      {
+        documentId: doc.documentId,
+        expectedDocumentRevision: doc.documentRevision,
+        text: JSON.stringify(config),
+      },
+    ])[0]!;
+    const preview = await store.frameDrafts.preview(pid, doc.documentId, written.documentRevision);
+    assert.equal(preview.modifiedFrameIds.length, 1, "未改动的其余帧不因新字段被算作修改");
+    const rendered = await store.animation.renderFrame(pid, preview.preview.id, clip.frames[1]!.id),
+      decoded = await store.worker.run("inspect", { path: rendered.path });
+    assert.deepEqual([decoded.width, decoded.height], [96, 96], "横向拉伸只改内容，不改帧画布");
+    const inspection = await store.animation.inspect(pid, {
+      snapshotId: preview.preview.id,
+      draftId: doc.documentId,
+      documentRevision: written.documentRevision,
+    });
+    assert.ok(Math.abs(inspection.frames[1]!.width - 48) <= 2, `横向内容宽度 ${inspection.frames[1]!.width}`);
+    assert.ok(Math.abs(inspection.frames[1]!.height - 24) <= 2, `纵向内容高度 ${inspection.frames[1]!.height}`);
+    await store.frameDrafts.save(pid, doc.documentId, written.documentRevision);
+    const saved = store.animation.clip(pid, clip.id).frames[1]!.transform!;
+    assert.deepEqual([saved.scale, saved.scaleX], [0.5, 2], "非等比参数按帧落盘");
+    assert.equal(store.animation.clip(pid, clip.id).frames[0]!.transform, undefined);
+    assert.equal(store.assets(pid).length, 2, "拉伸现有像素，不新增素材");
+  } finally {
+    store.worker.close();
+  }
+});
+
 test("Agent edits config, previews, receives denial reason, and only exact Accept saves", async () => {
   const { store, pid, clip, hub } = await fixture();
   const session = store.createSession(pid);

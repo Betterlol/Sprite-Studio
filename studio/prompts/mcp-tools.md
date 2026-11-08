@@ -1,0 +1,31 @@
+# MCP 工具整体说明
+
+根据用户目标组合工具，复用项目中已有的素材、配置和动画。以下说明描述工具之间的数据关系与能力边界，不是每次请求都要逐项执行的固定流程。
+
+## 工程与资源
+
+工程包含参考图、原图素材、动画和文档。工具使用稳定资源 ID、文档修订及快照；名称和目录用于展示与归档。原图、切割配方、切片图片和动画编排是不同对象。普通动画草稿支持完整编排与参数修改；人工来源草稿的派生、交付和采用遵循工具返回的数据语义。
+
+## 工具关系
+
+- 生成图片：image_gen → list_generated_images → save_image。generatedId 是生成产物身份；保存后返回项目图片资源 ID，供后续工具使用。
+- 处理图集：read_document / get_schema → inspect_sheet 生成区域、预览原帧与输出 → write_documents 保存配方 → slice_sheet 执行并返回切片 outputIds。切割条目 ID 表示区域，outputIds 才是图片资源 ID。
+- 新建动画：create_clip → read_document / write_documents，以 imageId、durationUs 编排帧 → inspect_clip 检查实际渲染帧、相邻叠图和时长。帧实例 id 与图片 imageId 不同。
+- 修改动画：create_clip_draft → read_document / write_documents → inspect_clip(draftId, documentRevision) → save_clip_draft。仅帧参数调整也可使用 create_frame_draft / save_frame_draft。
+- write_documents 保存配置，slice_sheet 生成切片；切片还需编排成动画。预览提供检查材料，草稿保存提交实际修改。工具返回真实执行结果及已有的用户反馈。
+
+## 按缺陷类型选择处理方式
+
+| 缺陷类型 | 现有工具与处理倾向 |
+| --- | --- |
+| 人物完整，只是大小、位置或画布余量不合适 | 优先用输出画布、统一缩放、对齐或动画帧的缩放/位移调整。相同画布尺寸不等于人物尺度一致。 |
+| 区域边界轻微重叠、矩形含多余内容，但主体像素仍完整 | 调整区域 box，或用适用的连通域像素选区分离；再预览确认。实际遮挡造成像素缺失时按缺失处理。 |
+| 人物部位缺失、被原图截断或明显结构变形 | 倾向重新生成；缩放和补边只能重新放置已有像素，不能恢复缺失部位。 |
+| 背景不透明、明显杂点、粘连的蓝边或颜色污染 | 倾向重新生成。当前没有通用去底、去色污或智能修补工具；连通域可过滤部分独立小块，但不保证修复粘连边缘。 |
+
+## 关键能力边界
+
+- inspect_sheet 的 grid 只生成网格区域；detection.alphaThreshold / minComponentPixels 用于 components 连通域识别，不会在 grid 模式自动清理杂点。v3 配方保存最终区域和可选像素选区，生成方式只是工具操作参数。
+- 图集 output 提供统一画布、缩放和对齐；逐帧尺度/位置差异通过动画草稿参数处理。adjust_image 对独立图片生成调整后的新资源。
+- 切割与缩放处理现有像素；轮廓缺失、不透明背景和结构/颜色问题需按实际图像判断是否重绘或重新生成。
+- inspect_clip 提供实际静态帧、相邻叠图、边界和时长信息；实际速度播放和交互效果由对应播放环境判断。

@@ -1,3 +1,4 @@
+import { mcpInstructions } from "./mcp-instructions.ts";
 import { z } from "zod";
 import { inspectSheetSchema } from "./sheet-schema.ts";
 import { request as httpRequest } from "node:http";
@@ -325,16 +326,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           protocolVersion: request.params.protocolVersion,
           capabilities: { tools: {} },
           serverInfo: { name: "sprite-studio", version: "0.1.0" },
-          instructions: `Use stable project resource IDs and current document revisions. Tool descriptions specify inputs, outputs and data guarantees; call results report execution outcomes and available user feedback.
-
-Tool relationships:
-- Generated images: image_gen -> list_generated_images -> save_image. generatedId identifies a generated artifact; save_image returns a project image asset ID for subsequent project tools.
-- Sprite sheets: read_document / get_schema -> inspect_sheet (generate regions and preview raw/output frames) -> write_documents (save recipe) -> slice_sheet (execute saved recipe). Recipe item IDs identify regions; slice_sheet outputIds identify the resulting project images used by animation frames.
-- New animations: create_clip -> read_document / write_documents to arrange frames using imageId and durationUs -> inspect_clip to examine actual rendered frames, adjacent onion skins and timings. Each frame instance has its own id, separate from its imageId.
-- Existing animation edits: create_clip_draft -> read_document / write_documents -> inspect_clip with draftId and documentRevision -> save_clip_draft. Frame-only drafts use the analogous create_frame_draft / save_frame_draft tools. Human-source drafts retain the derivation and delivery semantics described by those tools.
-- Writing a recipe saves configuration; slice_sheet produces image resources. Slicing produces images; clip configuration arranges them into animation. Inspection provides evidence; draft saves commit the edited result.
-
-Compose these operations around the requested goal and reuse existing assets, recipes or animations where appropriate. These relationships describe data flow, not a mandatory sequence for every request.`,
+          instructions: mcpInstructions,
         },
       });
     else if (request.method === "ping")

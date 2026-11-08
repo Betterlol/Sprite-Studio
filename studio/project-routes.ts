@@ -17,6 +17,14 @@ export function registerProjectRoutes(
       .parse(request.body);
     return store.createProject(input.name);
   });
+  // Overlay configuration only: it changes what the web canvas draws, not any
+  // frame, snapshot, inspection image or export.
+  app.put("/api/projects/:projectId/idle", async (request) =>
+    store.setIdle(pid(request), request.body),
+  );
+  app.delete("/api/projects/:projectId/idle", async (request) =>
+    store.clearIdle(pid(request)),
+  );
   // Permanent: the exact project name confirms that every asset, conversation,
   // snapshot, export and recycle-bin entry of this one project is meant to be lost.
   app.delete("/api/projects/:projectId", async (request) => {

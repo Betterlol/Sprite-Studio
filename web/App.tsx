@@ -22,6 +22,8 @@ import { SliceWorkbench } from "./SliceWorkbench.tsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InterpolationPanel } from "./InterpolationPanel.tsx";
 import { NewClipDialog } from "./NewClipDialog.tsx";
+import { IdleGuideDialog } from "./IdleGuideDialog.tsx";
+import { resolveIdleGuide } from "./idle-guide.ts";
 import { AnimationPanel } from "./AnimationPanel.tsx";
 import { ComparisonPlayer } from "./ComparisonPlayer.tsx";
 import { api } from "./api.ts";
@@ -255,6 +257,7 @@ export function App() {
   );
   const [newProject, setNewProject] = useState(false);
   const [newClip, setNewClip] = useState(false);
+  const [idleDialog, setIdleDialog] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [promptAnswers, setPromptAnswers] = useState<Record<string, string>>(
     {},
@@ -1107,6 +1110,8 @@ export function App() {
             onContext={updateContext} onBridge={setBridge} onSaved={() => refreshRef.current()}
             legacyDrafts={state?.frameDrafts || []} clipDrafts={state?.clipDrafts || []} onLegacyPreview={id => void playSnapshot(id)}
             onTool={value => { setTool(value); setRightTab(value === "review" ? "checks" : "properties"); }}
+            idle={resolveIdleGuide(state?.project?.idle, state?.assets || [])}
+            onConfigureIdle={() => setIdleDialog(true)}
           /> : currentImage && !currentImage.producer && currentImage.frameCount===1 && tool==="slice" ? <SliceWorkbench
             key={`${projectId}-${currentImage.id}`} projectId={projectId} image={currentImage} propertiesHost={slicePropertiesHost}
             refreshToken={`${state?.configurationRevision}-${state?.libraryRevision}`} onRefresh={()=>refreshRef.current()} disabled={!!operation||!!blocker}
@@ -2005,6 +2010,15 @@ export function App() {
             <X size={14} />
           </button>
         </div>
+      )}
+      {idleDialog && state && (
+        <IdleGuideDialog
+          projectId={projectId}
+          assets={state.assets}
+          guide={state.project.idle}
+          onClose={() => setIdleDialog(false)}
+          onSaved={() => refreshRef.current()}
+        />
       )}
       {newClip && state && (
         <NewClipDialog

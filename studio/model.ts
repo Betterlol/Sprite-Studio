@@ -38,7 +38,24 @@ export type Project = {
   createdAt: string;
   version: 1;
   resourceLayout?: 1;
+  idle?: IdleGuide;
 };
+/**
+ * Character-level IDLE baseline. It is only a web canvas overlay for judging
+ * scale and position, so it never enters frames, inspections or exports.
+ */
+export type IdleGuide = {
+  kind: "clip" | "image";
+  assetId: string;
+  opacity: number;
+};
+export const idleGuideSchema = z
+  .object({
+    kind: z.enum(["clip", "image"]),
+    assetId: z.string().uuid(),
+    opacity: z.number().min(0.05).max(1).default(0.22),
+  })
+  .strict();
 export type ImageAsset = {
   producer?: { sheetId: string; sliceId: string };
   folder?: string;

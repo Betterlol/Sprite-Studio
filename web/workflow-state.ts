@@ -37,6 +37,9 @@ export class DraftQueue {
     this.document = document;
     this.desired = document.text;
   }
+  get settled() {
+    return !this.pending && !this.error && sameClipText(this.desired, this.document.text);
+  }
   enqueue(text: string) {
     if (this.document.draft.source !== "human" || this.document.draft.status !== "editing") throw new Error("此草稿为只读，不能覆盖助手或已结束的草稿");
     this.desired = text;

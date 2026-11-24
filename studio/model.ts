@@ -4,6 +4,7 @@ export const agentModels = [
   "gpt-6.1-sol",
   "gpt-6.1-luna",
   "gpt-6.1-terra",
+  "gpt-6-luna"
 ] as const;
 export const agentModelSchema = z.enum(agentModels);
 export type AgentModel = z.infer<typeof agentModelSchema>;

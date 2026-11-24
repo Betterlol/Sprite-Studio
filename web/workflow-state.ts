@@ -20,7 +20,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
 export function clipTextKey(text: string): string {
   try {
     const edit = clipEditSchema.parse(JSON.parse(text));
-    return `clip:${JSON.stringify({ frames: edit.frames.map(frame => ({ id: frame.id, imageId: frame.imageId, durationUs: frame.durationUs, transform: { scale: frame.transform?.scale ?? 1, offsetX: frame.transform?.offsetX ?? 0, offsetY: frame.transform?.offsetY ?? 0, clip: frame.transform?.clip ?? false } })), loop: edit.loop, initialFps: edit.initialFps ?? 12 })}`;
+    return `clip:${JSON.stringify({ frames: edit.frames.map(frame => ({ id: frame.id, imageId: frame.imageId, durationUs: frame.durationUs, transform: { scale: frame.transform?.scale ?? 1, offsetX: frame.transform?.offsetX ?? 0, offsetY: frame.transform?.offsetY ?? 0, clip: frame.transform?.clip ?? false, anchor: frame.transform?.anchor ?? "center" } })), loop: edit.loop, initialFps: edit.initialFps ?? 12 })}`;
   } catch { return `literal:${text}`; }
 }
 export const sameClipText = (left: string, right: string) => clipTextKey(left) === clipTextKey(right);
@@ -205,6 +205,18 @@ export function legacyDerivation(clip: ClipAsset, draft: FrameDraft) {
   if (draft.clipId !== clip.id || draft.source !== "human" || !["editing", "pending"].includes(draft.status)) throw new Error("只能从此动画的未保存人工旧草稿显式派生");
   return { clipId: clip.id, revision: clip.revision, source: "human" as const, fromDraftId: draft.id, expectedFromDocumentRevision: draft.documentRevision };
 }
+export function adjustAllFrames(edit: ClipEdit, factor: number, dx: number, dy: number, anchor?: "center" | "visible-bottom"): ClipEdit {
+  if (![factor, dx, dy].every(Number.isFinite) || factor <= 0) throw new Error("整组缩放和偏移必须为有效数字");
+  const frames = edit.frames.map(frame => {
+    const transform = { scale: 1, offsetX: 0, offsetY: 0, clip: false, ...frame.transform };
+    const scale = Math.round(transform.scale * factor * 1e6) / 1e6;
+    const offsetX = transform.offsetX + dx, offsetY = transform.offsetY + dy;
+    if (scale < 0.05 || scale > 4 || Math.abs(offsetX) > 4096 || Math.abs(offsetY) > 4096) throw new Error("整组调整超出允许范围，未修改任何帧");
+    return { ...frame, transform: { ...transform, scale, offsetX, offsetY, ...(anchor ? { anchor } : {}) } };
+  });
+  return { ...edit, frames };
+}
+
 export function finishFrameDrag(edit: ClipEdit, selectedFrameId: string | undefined, frameId: string, transform: FrameTransform): ClipEdit | null {
   if (selectedFrameId !== frameId || !edit.frames.some(frame => frame.id === frameId)) return null;
   return { ...edit, frames: edit.frames.map(frame => frame.id === frameId ? { ...frame, transform } : frame) };

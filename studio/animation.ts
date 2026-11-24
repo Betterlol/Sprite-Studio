@@ -191,7 +191,7 @@ export class AnimationStore {
     const preview = snapshot.renderMode === "preview",
       key = sha256(
         JSON.stringify([
-          "visible-alpha16-v2",
+          "visible-alpha16-anchor-v3",
           pid,
           original.image.contentHash,
           transform,

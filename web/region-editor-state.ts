@@ -33,8 +33,17 @@ export function editedRegion(item:RegionItem,box:Box):RegionItem {
   if(item.box.every((v,i)=>v===box[i]))return item;
   const {selection,...rest}=item;return {...rest,box};
 }
-export function regionSignature(item:RegionItem,output:SheetRecipeV3['slicing']['output']) {
-  return JSON.stringify([item.box,item.selection??null,output]);
+export function fitRegionOutput(output:SheetRecipeV3['slicing']['output'],suggested:{width:number;height:number}) {
+  const normalize=output.normalize;
+  if(!normalize)return suggested.width<=4096&&suggested.height<=4096?{...output,...suggested}:null;
+  const width=Math.max(output.width,suggested.width+2*Math.abs(normalize.offsetX));
+  const height=Math.max(output.height,suggested.height+Math.abs(normalize.offsetY));
+  if(width>4096||height>4096)return null;
+  return {...output,width,height,normalize:{...normalize,anchorX:Math.ceil(width/2),anchorY:height-Math.max(0,normalize.offsetY)}};
+}
+export function regionSignature(item:RegionItem,output:SheetRecipeV3['slicing']['output'],items:RegionItem[]) {
+  const group = output.normalize ? items.filter(region=>region.enabled).map(region=>[region.box,region.selection??null]) : null;
+  return JSON.stringify([item.box,item.selection??null,output,group]);
 }
 /** JSON edits can change membership and order; never identify a new region by its index. */
 export function reconcileRegionKeys(previous:RegionItem[],keys:string[],next:RegionItem[],newKey:()=>string):string[] {

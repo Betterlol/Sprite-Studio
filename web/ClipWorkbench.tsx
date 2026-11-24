@@ -5,9 +5,9 @@ import { AnimationEditor } from "./AnimationEditor.tsx";
 import { LegacyFrameDrafts } from "./LegacyFrameDrafts.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
 import { api } from "./api.ts";
-import { assetUrl, snapshotFrameUrl, type Asset, type ClipAsset, type ClipSnapshot, type FrameTransform, type FrameDraft } from "../studio/model.ts";
+import { assetUrl, clipFrameUrl, snapshotFrameUrl, type Asset, type ClipAsset, type ClipSnapshot, type FrameTransform, type FrameDraft } from "../studio/model.ts";
 import { clipEditSchema, type ClipDraftDocument, type ClipDraftPreview, type ClipDraftSave, type ClipDraft, type EditingContext } from "../studio/workflow-model.ts";
-import { clipEdit, contextFor, dependencyKey, dependencyConflicts, sameClipText, samePreview, DraftQueue, editorReducer, editorState, legacyDerivation, finishFrameDrag, offsetByDrag, shortcutAllowed, type EditorAction } from "./workflow-state.ts";
+import { clipEdit, contextFor, dependencyKey, dependencyConflicts, sameClipText, samePreview, DraftQueue, editorReducer, editorState, legacyDerivation, finishFrameDrag, offsetByDrag, adjustAllFrames, shortcutAllowed, type EditorAction } from "./workflow-state.ts";
 import type { IdleGuideTarget } from "./idle-guide.ts";
 
 export type ClipEditorBridge = { clipId: string; stabilize: () => Promise<EditingContext> };
@@ -30,6 +30,8 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
   const [preview, setPreview] = useState<{ value: ClipDraftPreview; text: string; deps: string; revision: string } | null>(null);
   const [busy, setBusy] = useState(""), [error, setError] = useState(""), [conflict, setConflict] = useState(false);
   const [zoom, setZoom] = useState<number | "fit">("fit");
+  const [groupScale, setGroupScale] = useState(100), [groupX, setGroupX] = useState(0), [groupY, setGroupY] = useState(0);
+  const [groupAnchor, setGroupAnchor] = useState<"keep" | "center" | "visible-bottom">("keep");
   const [showOnion, setShowOnion] = useState(false), [showIdle, setIdleVisible] = useState(false);
   const [pendingIdle, setPendingIdle] = useState(false);
   const [size, setSize] = useState({ width: 500, height: 400 });
@@ -52,6 +54,7 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
   const width = image?.type === "image" ? image.width : 360, height = image?.type === "image" ? image.height : 360;
   const scale = zoom === "fit" ? Math.max(0.02, Math.min(size.width / width, size.height / height, 3)) : zoom;
   const validPreview = preview && sameClipText(preview.text, text) && preview.deps === deps && preview.revision === document?.documentRevision ? preview.value : null;
+  const savedRender = sameClipText(text, JSON.stringify(clipEdit(clip)));
   const previous = frameIndex > 0 ? editor.present.frames[frameIndex - 1] : undefined;
   const previousImage = assets.find(a => a.id === previous?.imageId);
   const previousTransform = { ...defaults, ...previous?.transform };
@@ -310,13 +313,17 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
             src={assetUrl(projectId, idleImage.id, idleImage.revision)}
             style={{ left: 0, top: 0, width: idleImage.width * scale, height: idleImage.height * scale, opacity: idle!.opacity }}/>
         )}
-        {showOnion && previous && previousImage?.type === "image" && (
+        {showOnion && previous && previousImage?.type === "image" && (validPreview || savedRender || previousTransform.anchor !== "visible-bottom" || previousTransform.scale === 1) && (
           <img className="guide-layer guide-onion" aria-hidden="true" draggable={false} alt=""
-            src={validPreview ? snapshotFrameUrl(projectId, validPreview.preview.id, previous.id) : assetUrl(projectId, previousImage.id, previousImage.revision)}
-            style={validPreview ? { opacity: ONION_OPACITY } : { opacity: ONION_OPACITY, transform: `translate(${previousTransform.offsetX * scale}px, ${previousTransform.offsetY * scale}px) scale(${previousTransform.scale})` }}/>
+            src={validPreview ? snapshotFrameUrl(projectId, validPreview.preview.id, previous.id) : savedRender ? clipFrameUrl(projectId, clip, previous, previousImage.revision) : assetUrl(projectId, previousImage.id, previousImage.revision)}
+            style={validPreview || savedRender ? { opacity: ONION_OPACITY } : { opacity: ONION_OPACITY, transform: `translate(${previousTransform.offsetX * scale}px, ${previousTransform.offsetY * scale}px) scale(${previousTransform.scale})` }}/>
         )}
-        {frame && image?.type === "image" ? <img className="frame-layer" draggable={false} alt={`${clip.name} 第 ${frameIndex + 1} 帧实例`} src={validPreview && !dragOffset ? snapshotFrameUrl(projectId, validPreview.preview.id, frame.id) : assetUrl(projectId, image.id, image.revision)}
-          style={validPreview && !dragOffset ? undefined : { transform: `translate(${shownTransform.offsetX * scale}px, ${shownTransform.offsetY * scale}px) scale(${shownTransform.scale})` }}/>
+        {frame && image?.type === "image" ? (validPreview || (savedRender && transform.anchor === "visible-bottom" && transform.scale !== 1) ?
+          <img className="frame-layer" draggable={false} alt={`${clip.name} 第 ${frameIndex + 1} 帧实例`} src={validPreview ? snapshotFrameUrl(projectId, validPreview.preview.id, frame.id) : clipFrameUrl(projectId, clip, frame, image.revision)}
+            style={dragOffset ? { transform: `translate(${(dragOffset.offsetX-transform.offsetX)*scale}px, ${(dragOffset.offsetY-transform.offsetY)*scale}px)` } : undefined}/>
+          : transform.anchor === "visible-bottom" && transform.scale !== 1 ? <p className="adjust-note" role="status">正在等待底部锚定的准确预览。</p>
+          : <img className="frame-layer" draggable={false} alt={`${clip.name} 第 ${frameIndex + 1} 帧实例`} src={assetUrl(projectId, image.id, image.revision)}
+            style={{ transform: `translate(${shownTransform.offsetX * scale}px, ${shownTransform.offsetY * scale}px) scale(${shownTransform.scale})` }}/>)
           : <p className="adjust-note">从素材库拖入静态图片到时间轴；修改只进入当前动画草稿。</p>}
       </div>
       <div className="view-controls"><span>叠图</span>
@@ -333,11 +340,22 @@ export function ClipWorkbench({ projectId, clip, assets, frameIndex, onFrame, pl
       {frame && <fieldset disabled={readonly || !!busy}>
         <legend>同一动画草稿中的帧参数</legend>
         <label>素材缩放（不是视图缩放）<input aria-label="帧素材缩放百分比" type="number" min={5} max={400} value={Math.round(transform.scale * 100)} onChange={e => patchFrame({transform:{...transform,scale:Math.max(.05,Math.min(4,Number(e.target.value)/100))}})}/> %</label>
+        <label>缩放锚点<select aria-label="帧缩放锚点" value={transform.anchor ?? "center"} onChange={e => patchFrame({ transform: { ...transform, anchor: e.target.value as "center" | "visible-bottom" } })}><option value="center">画布中心</option><option value="visible-bottom">固定可见轮廓底部</option></select></label>
+        <small>轮廓底部包括尾巴、道具和杂点，不一定是真正的脚；切换锚点可能改变已缩放帧的位置。</small>
         {(["offsetX","offsetY"] as const).map(key => <label key={key}>{key === "offsetX" ? "水平偏移 X" : "垂直偏移 Y"}<input type="number" min={-4096} max={4096} value={transform[key]} onChange={e => patchFrame({transform:{...transform,[key]:Math.max(-4096,Math.min(4096,Number(e.target.value)))}})}/></label>)}
         <label>停留时长 ms<input type="number" min={1} max={60000} value={frame.durationUs / 1000} onChange={e => patchFrame({durationUs:Math.max(1000,Math.min(60000000,Math.round(Number(e.target.value)*1000)))})}/></label>
         <label><input type="checkbox" checked={transform.clip} onChange={e => patchFrame({transform:{...transform,clip:e.target.checked}})}/>允许裁切超出画布内容</label>
         <button className="secondary" onClick={() => patchFrame({transform:defaults})}>重置当前帧参数</button>
       </fieldset>}
+      <fieldset disabled={readonly || !!busy || !editor.present.frames.length}>
+        <legend>整组相对调整</legend>
+        <label>相对缩放 %<input aria-label="整组相对缩放百分比" type="number" min={1} step={1} value={groupScale} onChange={e => setGroupScale(Number(e.target.value))}/></label>
+        <label>水平增量 X<input aria-label="整组水平增量" type="number" value={groupX} onChange={e => setGroupX(Number(e.target.value))}/></label>
+        <label>垂直增量 Y<input aria-label="整组垂直增量" type="number" value={groupY} onChange={e => setGroupY(Number(e.target.value))}/></label>
+        <label>缩放锚点<select aria-label="整组缩放锚点" value={groupAnchor} onChange={e => setGroupAnchor(e.target.value as typeof groupAnchor)}><option value="keep">保留各帧</option><option value="center">画布中心</option><option value="visible-bottom">固定可见轮廓底部</option></select></label>
+        <button className="secondary" onClick={() => { try { const edit = adjustAllFrames(current.current.present, groupScale / 100, groupX, groupY, groupAnchor === "keep" ? undefined : groupAnchor); act({ type: "edit", edit }); setGroupScale(100); setGroupX(0); setGroupY(0); } catch (error) { setError((error as Error).message); } }}>应用到全部帧</button>
+        <small>倍率相乘、偏移相加，保留每帧已有微调；整组操作可一次撤销。</small>
+      </fieldset>
       <section className="guide-settings" aria-label="叠图参考">
         <strong>叠图参考</strong>
         <small>前帧 28%（红）/ IDLE {Math.round((idle?.opacity ?? 0.22) * 100)}%（青）。只用于对照比例和位置，不进入帧、检查图或导出。</small>

@@ -85,6 +85,7 @@ export type FrameTransform = {
   offsetX: number;
   offsetY: number;
   clip: boolean;
+  anchor?: "center" | "visible-bottom";
 };
 export const frameTransformSchema = z
   .object({
@@ -92,6 +93,7 @@ export const frameTransformSchema = z
     offsetX: z.number().min(-4096).max(4096).default(0),
     offsetY: z.number().min(-4096).max(4096).default(0),
     clip: z.boolean().default(false),
+    anchor: z.enum(["center", "visible-bottom"]).optional().describe("缩放锚点；省略时以画布中心为准"),
   })
   .strict();
 export type ClipFrame = {

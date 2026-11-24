@@ -60,6 +60,30 @@ const globals = () => {
   return () => { Object.assign(globalThis, originals); storage.clear(); };
 };
 
+test("group controls update all frame instances together and undo", async () => {
+  const restore = globals();
+  const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true, hmr: false, watch: null }, appType: "custom" });
+  const { ClipWorkbench } = await vite.ssrLoadModule("/web/ClipWorkbench.tsx"), component = mountedComponent(ClipWorkbench);
+  const human: ClipDraftDocument = { documentId: id(9), documentRevision: "human-v1", text: JSON.stringify(clipEdit(clip)), draft: { id: id(9), projectId: id(5), clipId: clip.id, source: "human", status: "editing", baseSnapshotId: id(10), createdAt: "now" } };
+  try {
+    globalThis.fetch = async (url: any) => new Response(JSON.stringify(String(url).includes("/snapshots/") ? { id: id(10), clip } : human), { status: 200 });
+    component.render({ projectId: id(5), clip, assets: [image], frameIndex: 0, onFrame() {}, playing: false, onPlaying() {}, propertiesHost: { nodeType: 1 }, onContext() {}, onBridge() {}, onSaved: async () => {}, onTool() {}, legacyDrafts: [], clipDrafts: [], onLegacyPreview() {} });
+    let tree = await component.settle();
+    const control = (label: string) => descendants(tree).find(node => node.props?.["aria-label"] === label);
+    control("整组相对缩放百分比").props.onChange({ target: { value: "120" } });
+    control("整组垂直增量").props.onChange({ target: { value: "-5" } });
+    control("整组缩放锚点").props.onChange({ target: { value: "visible-bottom" } });
+    tree = component.render();
+    descendants(tree).find(node => node.type === "button" && node.props.children === "应用到全部帧").props.onClick();
+    tree = component.render();
+    assert.deepEqual(editor(tree).props.clip.frames.map((frame: any) => frame.transform), [{ scale: 1.2, offsetX: 0, offsetY: -5, clip: false, anchor: "visible-bottom" }, { scale: 1.2, offsetX: 0, offsetY: -5, clip: false, anchor: "visible-bottom" }]);
+    assert.ok(descendants(tree).some(node => node.props?.role === "status" && node.props.children === "正在等待底部锚定的准确预览。"));
+    control("撤销草稿").props.onClick();
+    tree = component.render();
+    assert.deepEqual(editor(tree).props.clip.frames, clip.frames);
+  } finally { component.unmount(); await vite.close(); restore(); }
+});
+
 test("R6 actual App preview playback preserves saved/legacy/draft editing identity rather than forging saved permission", async () => {
   const restore = globals();
   const vite = await createServer({ configFile: false, root: fileURLToPath(new URL("../", import.meta.url)), server: { middlewareMode: true, hmr: false, watch: null }, appType: "custom" });

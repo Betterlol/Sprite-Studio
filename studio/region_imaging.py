@@ -94,13 +94,29 @@ def generate(method, image, params, folder, native, source_hash):
     return {'items':items,'output':output,'selectionFiles':selection_files,'total':len(items),'diagnostics':diagnostics,'files':overlay(image,items,folder,native)}
 
 
-def frames_for(image, params):
+def frames_for(image, params, native, inside):
     output, items = params['output'], params['items']
     width,height,scale = output['width'],output['height'],output['scale']
     if len(items)>128 or not 1<=width<=4096 or not 1<=height<=4096 or not .05<=scale<=4:
         raise ValueError('无效区域或输出画布')
     if width*height*sum(bool(i['enabled']) for i in items)>MAX_OUTPUT:
         raise ValueError('输出总解码像素预算超限')
+    bounds = {}
+    normalize = output.get('normalize')
+    if normalize:
+        for index,item in enumerate(items):
+            l,t,r,b = item['box']
+            if not (0<=l<r<=image.width and 0<=t<b<=image.height):
+                raise ValueError('矩形超出原图或为空')
+            if not item['enabled']:
+                continue
+            raw = extract(image,item,native,inside)
+            box = raw.getchannel('A').point(lambda value: 255 if value >= 16 else 0).getbbox()
+            if box is None:
+                raise ValueError(f'区域 {item["name"]} 没有可见内容，无法归一化')
+            bounds[index] = box
+        if bounds:
+            scale *= normalize['targetHeight'] / max(box[3]-box[1] for box in bounds.values())
     frames, rectangles = [], []
     for index,item in enumerate(items):
         l,t,r,b = item['box']
@@ -109,18 +125,24 @@ def frames_for(image, params):
         rectangles.append({'index':index,'box':item['box'],'name':item['name'],'enabled':item['enabled']})
         if not item['enabled']:
             continue
-        sw,sh = max(1,math.floor((r-l)*scale+.5)), max(1,math.floor((b-t)*scale+.5))
+        crop = bounds.get(index)
+        source_width,source_height = (crop[2]-crop[0],crop[3]-crop[1]) if crop else (r-l,b-t)
+        sw,sh = max(1,math.floor(source_width*scale+.5)), max(1,math.floor(source_height*scale+.5))
         if sw*sh>MAX_SOURCE:
             raise ValueError('缩放中间画布像素预算超限')
-        x = 0 if output['alignment']=='top-left' else (width-sw)//2
-        y = 0 if output['alignment']=='top-left' else height-sh if output['alignment']=='bottom-center' else (height-sh)//2
+        if normalize:
+            x = normalize['anchorX'] - (sw+1)//2 + normalize['offsetX']
+            y = normalize['anchorY'] - sh + normalize['offsetY']
+        else:
+            x = 0 if output['alignment']=='top-left' else (width-sw)//2
+            y = 0 if output['alignment']=='top-left' else height-sh if output['alignment']=='bottom-center' else (height-sh)//2
         overflow={'left':max(0,-x),'top':max(0,-y),'right':max(0,x+sw-width),'bottom':max(0,y+sh-height)}
-        frames.append({'index':index,'name':item['name'],'box':item['box'],'scaledSize':[sw,sh],'offset':[x,y],'overflow':overflow,'blocking':any(overflow.values())})
+        frames.append({'index':index,'name':item['name'],'box':item['box'],'scaledSize':[sw,sh],'offset':[x,y],'overflow':overflow,'blocking':any(overflow.values()),**({'crop':crop} if crop else {})})
     diagnostics=[]
     if not frames: diagnostics.append({'code':'empty-selection','message':'没有启用的区域'})
     if params.get('expectedFrames') and params['expectedFrames']!=len(frames):
         diagnostics.append({'code':'frame-count','message':f'期望{params["expectedFrames"]}帧，实际{len(frames)}帧'})
-    return frames, {'width':width,'height':height,'total':len(frames),'rectangles':rectangles,'diagnostics':diagnostics,'suggestedOutput':{'width':max((f['scaledSize'][0] for f in frames),default=1),'height':max((f['scaledSize'][1] for f in frames),default=1)}}
+    return frames, {'width':width,'height':height,'total':len(frames),'rectangles':rectangles,'diagnostics':diagnostics,'suggestedOutput':{'width':max((f['scaledSize'][0] for f in frames),default=1),'height':max((f['scaledSize'][1] for f in frames),default=1)},'effectiveScale':scale}
 
 
 def extract(image, item, native, inside):
@@ -142,6 +164,8 @@ def extract(image, item, native, inside):
 
 
 def render(raw, frame, size):
+    if 'crop' in frame:
+        raw = raw.crop(frame['crop'])
     scaled=raw if raw.size==tuple(frame['scaledSize']) else raw.resize(tuple(frame['scaledSize']),Image.Resampling.NEAREST)
     result=Image.new('RGBA',size)
     result.paste(scaled,tuple(frame['offset']))
@@ -153,7 +177,7 @@ def process(method,image,params,folder,native,inside,source_hash):
         raise ValueError('源图像素预算超限')
     if method in ('region_generate','region_resolve'):
         return generate(method,image,params,folder,native,source_hash)
-    frames,info=frames_for(image,params)
+    frames,info=frames_for(image,params,native,inside)
     if method=='recipe_slice':
         if not frames: raise ValueError('请先添加区域')
         if any(f['blocking'] for f in frames): raise ValueError('画布溢出：请调整统一输出设置')

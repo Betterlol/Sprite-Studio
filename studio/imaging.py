@@ -52,7 +52,7 @@ def review_images(params, folder):
     for index in range(start,end+1):
         frame=frames[index];image,n=image_at(frame['path'])
         if n!=1: raise ValueError('检查动画帧需要静态图片')
-        bbox=image.getchannel('A').point(lambda value:255 if value>VISIBLE_ALPHA_THRESHOLD else 0).getbbox()
+        bbox=image.getchannel('A').point(lambda value:255 if value>=VISIBLE_ALPHA_THRESHOLD else 0).getbbox()
         observations.append({'frameId':frame['id'],'index':index,'durationUs':frame['durationUs'],'bbox':bbox,'center':[(bbox[0]+bbox[2])/2,(bbox[1]+bbox[3])/2] if bbox else None,'width':bbox[2]-bbox[0] if bbox else 0,'height':bbox[3]-bbox[1] if bbox else 0})
         place(contact,image,index-start,f'#{index+1}  {frame["durationUs"]/1000:g} ms',f'bounds {observations[-1]["width"]} x {observations[-1]["height"]}')
     pairs=[]
@@ -142,8 +142,11 @@ def run(method, params):
         if size[0]*size[1] > Image.MAX_IMAGE_PIXELS: raise ValueError('缩放后的图片太大')
         resized = image.resize(size, Image.Resampling.LANCZOS)
         x, y = round((width-size[0])/2+spec.get('offsetX', 0)), round((height-size[1])/2+spec.get('offsetY', 0))
-        # Match review_images: near-transparent interpolation fringes are not visible content.
-        local_bounds = resized.getchannel('A').point(lambda value:255 if value>VISIBLE_ALPHA_THRESHOLD else 0).getbbox()
+        local_bounds = resized.getchannel('A').point(lambda value:255 if value>=VISIBLE_ALPHA_THRESHOLD else 0).getbbox()
+        if spec.get('anchor', 'center') == 'visible-bottom' and local_bounds:
+            original_bounds = image.getchannel('A').point(lambda value:255 if value>=VISIBLE_ALPHA_THRESHOLD else 0).getbbox()
+            if original_bounds:
+                y = round((height-image.height)/2 + original_bounds[3] - local_bounds[3] + spec.get('offsetY', 0))
         bounds = [x+local_bounds[0], y+local_bounds[1], x+local_bounds[2], y+local_bounds[3]] if local_bounds else None
         overflow = {'left':max(0,-bounds[0]), 'top':max(0,-bounds[1]), 'right':max(0,bounds[2]-width), 'bottom':max(0,bounds[3]-height)} if bounds else dict.fromkeys(['left','top','right','bottom'],0)
         blocking = any(overflow.values()) and not spec.get('clip', False)

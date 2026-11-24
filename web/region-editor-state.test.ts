@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {moveRegion,createRegionBox,sourcePoint,editedRegion,RegionHistory,hitRegion,reconcileRegionKeys,regionShortcutAllowed} from './region-editor-state.ts';
+import {moveRegion,createRegionBox,sourcePoint,editedRegion,RegionHistory,hitRegion,reconcileRegionKeys,regionShortcutAllowed,regionSignature,fitRegionOutput} from './region-editor-state.ts';
 import type {RegionItem} from '../studio/sheet-schema.ts';
 const item:RegionItem={name:'a',enabled:true,id:'00000000-0000-4000-8000-000000000001',box:[10,10,30,40],selection:'a'.repeat(64)};
 test('region move and eight handles operate in source pixels, clamp and retain positive area',()=>{
@@ -31,6 +31,23 @@ test('JSON key reconciliation follows IDs and unchanged drafts through insertion
   const reconciled=reconcileRegionKeys(previous,keys,next,()=>`new-${++serial}`);
   assert.deepEqual(reconciled,['new-1','draft-a','saved','draft-b']);assert.equal(new Set(reconciled).size,4);
   assert.deepEqual(reconcileRegionKeys(next,reconciled,[next[3]!,next[0]!],()=>`new-${++serial}`),['draft-a','new-1']);
+});
+test('group normalization invalidates other frames when the active regions change',()=>{
+  const output={width:80,height:80,scale:1,alignment:'center' as const,normalize:{targetHeight:60,anchorX:40,anchorY:70,offsetX:0,offsetY:0}};
+  const other:RegionItem={name:'b',enabled:true,box:[40,0,70,70]};
+  const changed={...other,box:[40,0,70,60] as [number,number,number,number]};
+  assert.notEqual(regionSignature(item,output,[item,other]),regionSignature(item,output,[item,changed]));
+  assert.notEqual(regionSignature(item,output,[item,other]),regionSignature(item,output,[item,{...other,enabled:false}]));
+  const {normalize,...plain}=output;
+  assert.equal(regionSignature(item,plain,[item,other]),regionSignature(item,plain,[item,changed]));
+});
+test('fitting normalized output includes offsets and repositions its anchor',()=>{
+  const output={width:20,height:20,scale:1,alignment:'center' as const,normalize:{targetHeight:10,anchorX:10,anchorY:18,offsetX:-3,offsetY:4}};
+  const fit=fitRegionOutput(output,{width:41,height:48})!;
+  assert.deepEqual([fit.width,fit.height,fit.normalize?.anchorX,fit.normalize?.anchorY],[47,52,24,48]);
+  assert.ok(fit.normalize!.anchorX-Math.ceil(41/2)+fit.normalize!.offsetX>=0);
+  assert.equal(fit.normalize!.anchorY+fit.normalize!.offsetY,fit.height);
+  assert.equal(fitRegionOutput(output,{width:4096,height:20}),null);
 });
 test('editing controls and dialogs retain keyboard ownership',()=>{
   assert.equal(regionShortcutAllowed({closest:()=>({})} as any),false);

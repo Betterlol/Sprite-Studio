@@ -55,6 +55,13 @@ export const sheetRecipeV2Schema = z.object({
 // v3 saves the final selection, not the operation which generated it.
 export const regionOutputSchema = sheetOutputSchema.extend({
   alignment: z.enum(["center", "bottom-center", "top-left"]).default("center"),
+  normalize: z.object({
+    targetHeight: z.number().int().min(1).max(4096).describe("Maximum visible height of the group before global scale"),
+    anchorX: z.number().int().min(0).max(4096),
+    anchorY: z.number().int().min(0).max(4096),
+    offsetX: z.number().int().min(-4096).max(4096),
+    offsetY: z.number().int().min(-4096).max(4096),
+  }).strict().optional().describe("Crop alpha bounds and align each visible bottom center to a common anchor using one group scale"),
 }).strict();
 export const regionItemSchema = z.object({
   ...commonItem,

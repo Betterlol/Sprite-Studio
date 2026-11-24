@@ -137,6 +137,43 @@ test('frozen selection tampering fails safely and a stale source stays readable'
   } finally {f.store.worker.close();}
 });
 
+test('visible group normalization preserves relative heights and aligns the same bottom anchor in preview and output',async()=>{
+  const f=await fixture();try {
+    const generated=await f.inspect({action:'generate',method:'grid',grid}),recipe=generated.recipe! as SheetRecipeV3;
+    recipe.slicing.output={width:80,height:80,scale:1,alignment:'center',normalize:{targetHeight:54,anchorX:40,anchorY:65,offsetX:2,offsetY:3}};
+    const saved=f.save(recipe),preview=await f.inspect({action:'preview',text:saved.text});
+    assert.deepEqual(preview.frames!.map(frame=>frame.scaledSize),[[48,48],[32,54]]);
+    assert.deepEqual(preview.frames!.map(frame=>frame.offset),[[18,20],[26,14]]);
+    assert.deepEqual(preview.frames!.map(frame=>frame.offset[1]!+frame.scaledSize[1]!),[68,68]);
+    const page=await f.inspect({action:'preview',text:saved.text,start:0,limit:1});
+    assert.deepEqual(page.frames![0]!.scaledSize,preview.frames![0]!.scaledSize);
+    assert.equal(page.frameImages![0]!.output.hash,preview.frameImages![0]!.output.hash);
+    const result=await f.execute();
+    assert.deepEqual(result.outputIds.map((id:string)=>f.store.image(f.pid,id).contentHash),preview.frameImages!.map(frame=>frame.output.hash));
+    const smaller=structuredClone(saved.recipe) as SheetRecipeV3;smaller.slicing.output.scale=.5;
+    const next=await f.inspect({action:'preview',text:JSON.stringify(smaller)});
+    assert.deepEqual(next.frames!.map(frame=>frame.scaledSize),[[24,24],[16,27]]);
+    assert.deepEqual(next.frames!.map(frame=>frame.offset[1]!+frame.scaledSize[1]!),[68,68]);
+    assert.equal(next.blocking,false);
+  } finally {f.store.worker.close();}
+});
+
+test('visible normalization honors frozen selections and rejects empty enabled regions',async()=>{
+  const f=await fixture();try {
+    const generated=await f.inspect({action:'generate',method:'components'}),recipe=generated.recipe! as SheetRecipeV3;
+    recipe.slicing.items=recipe.slicing.items.slice(0,1);
+    recipe.slicing.output={width:80,height:80,scale:1,alignment:'center',normalize:{targetHeight:48,anchorX:40,anchorY:65,offsetX:0,offsetY:0}};
+    const saved=f.save(recipe),preview=await f.inspect({action:'preview',text:saved.text});
+    const result=await f.execute();
+    assert.equal(f.store.image(f.pid,result.outputIds[0]!).contentHash,preview.frameImages![0]!.output.hash);
+    const p=spawnSync(process.env.SPRITE_STUDIO_PYTHON||'python',['-I','-c',"from PIL import Image;import sys;im=Image.open(sys.argv[1]).convert('RGBA');assert not any(b>0 and r==0 and a>0 for r,g,b,a in im.getdata())",f.store.imagePath(f.pid,result.outputIds[0]!)],{windowsHide:true});
+    assert.equal(p.status,0,p.stderr.toString());
+    const empty=structuredClone(saved.recipe) as SheetRecipeV3;
+    empty.slicing.items[0]!.box=[30,0,31,1];delete empty.slicing.items[0]!.selection;
+    await assert.rejects(f.inspect({action:'preview',text:JSON.stringify(empty)}),/没有可见内容/);
+  } finally {f.store.worker.close();}
+});
+
 test('real Agent dispatch generates regions, edits only boxes, cuts and builds an animation',async()=>{
   const f=await fixture(),hub=Object.assign(Object.create(AgentHub.prototype),{store:f.store,imports:new Map(),timers:new Map(),frameSaves:new Map(),clients:new Map(),prompts:new Map()}) as AgentHub,session=f.store.createSession(f.pid);
   async function call(name:string,input:any){const r=await hub.tool(session.id,name as any,input);assert.ok(!('isError'in r&&r.isError),JSON.stringify(r));return JSON.parse((r.content.find((c:any)=>c.type==='text') as any).text);}

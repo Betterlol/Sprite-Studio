@@ -312,7 +312,7 @@ export class SheetDocuments {
           doc.definitionRevision,
           source.revision,
           source.contentHash,
-          doc.recipe.schemaVersion === 1 ? "grid-v1" : doc.recipe.schemaVersion === 2 ? "sheet-v2-alpha-runs-8-v1" : "regions-v3",
+          doc.recipe.schemaVersion === 1 ? "grid-v1" : doc.recipe.schemaVersion === 2 ? "sheet-v2-alpha-runs-8-v1" : "regions-v3-visible-anchor-2",
         ]),
       ),
       receipt = this.receipt(pid, id);

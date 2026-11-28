@@ -8,7 +8,7 @@ import type {SheetInspection} from '../studio/sheet-inspection.ts';
 import {api} from './api.ts';
 import {SheetEditorState,parseSheet,type SheetToken} from './sheet-state.ts';
 import {SliceConfigPanel} from './SliceConfigPanel.tsx';
-import {RegionHistory,editedRegion,moveRegion,createRegionBox,sourcePoint,hitRegion,regionHandles,regionSignature,reconcileRegionKeys,regionShortcutAllowed,type RegionMode,type RegionSnapshot,type Box,type Handle} from './region-editor-state.ts';
+import {RegionHistory,editedRegion,moveRegion,createRegionBox,sourcePoint,hitRegion,regionHandles,regionSignature,fitRegionOutput,reconcileRegionKeys,regionShortcutAllowed,type RegionMode,type RegionSnapshot,type Box,type Handle} from './region-editor-state.ts';
 
 const textOf=(recipe:SheetRecipeV3)=>JSON.stringify(recipe,null,2)+'\n';
 const localKey=()=>globalThis.crypto?.randomUUID?.() || `local-${Date.now()}-${Math.random()}`;
@@ -142,7 +142,7 @@ export function SliceWorkbench({projectId,image,propertiesHost,refreshToken,onRe
     },350);
     return()=>clearTimeout(timer);
   },[gridVersion,mode,source]);
-  const signature=selectedItem?regionSignature(selectedItem,recipe!.slicing.output):'';
+  const signature=selectedItem?regionSignature(selectedItem,recipe!.slicing.output,recipe!.slicing.items):'';
   const outputKey=recipe?JSON.stringify(recipe.slicing.output):'';
   useEffect(()=>{
     if(!recipe)return;
@@ -151,14 +151,14 @@ export function SliceWorkbench({projectId,image,propertiesHost,refreshToken,onRe
     const enabledItems=recipe.slicing.items.filter(item=>item.enabled);
     const enabledBefore=recipe.slicing.items.slice(0,selected).filter(i=>i.enabled).length;
     const position=selectedItem?.enabled?enabledBefore:0,page=Math.floor(position/16)*16;
-    const missing=enabledItems.slice(page,page+16).filter(item=>!frameCache.current.has(regionSignature(item,recipe.slicing.output))).length;
+    const missing=enabledItems.slice(page,page+16).filter(item=>!frameCache.current.has(regionSignature(item,recipe.slicing.output,recipe.slicing.items))).length;
     const start=missing>1?page:position,limit=missing>1?16:1;
     const timer=setTimeout(()=>{
       if(!alive(epoch)||!state.current(token)||sequence!==previewSequence.current)return;
       setPreviewLoading(true);
       void api<SheetInspection>(`/api/projects/${projectId}/sheet-inspections`,{method:'POST',body:JSON.stringify({action:'preview',assetId:image.id,expectedSourceRevision:image.revision,text:textOf(captured),start,limit})}).then(value=>{
         if(!alive(epoch)||!state.current(token)||sequence!==previewSequence.current)return;validResponse(value);
-        for(const frame of value.frameImages||[]){const item=captured.slicing.items[frame.index];if(item)frameCache.current.set(regionSignature(item,captured.slicing.output),frame);}
+        for(const frame of value.frameImages||[]){const item=captured.slicing.items[frame.index];if(item)frameCache.current.set(regionSignature(item,captured.slicing.output,captured.slicing.items),frame);}
         while(frameCache.current.size>512)frameCache.current.delete(frameCache.current.keys().next().value!);
         setPreview({text:token.text,value});setError('');
       }).catch(e=>{if(alive(epoch)&&state.current(token)&&sequence===previewSequence.current)setError(e.message);})
@@ -281,10 +281,10 @@ export function SliceWorkbench({projectId,image,propertiesHost,refreshToken,onRe
     </div>
     <div className="region-strip-header"><strong>原帧预览</strong><span>{selectedItem?`${selected+1} / ${recipe?.slicing.items.length} · ${selectedItem.box[2]-selectedItem.box[0]} × ${selectedItem.box[3]-selectedItem.box[1]}`:'在原图上加框开始'}</span><span role="status">{ghost?'拖动中，松开更新预览':previewLoading?'更新预览…':currentPreview?.blocking?'输出存在溢出':dirty?'区域草案 · 未保存':state.document?.status==='ready'?'切片已更新':'预览不改写素材'}</span><div className="region-toolbar-spacer"/><button disabled={!selectedItem||selected===0} onClick={()=>reorder(-1)}>前移</button><button disabled={!selectedItem||selected===(recipe?.slicing.items.length||0)-1} onClick={()=>reorder(1)}>后移</button><button aria-label="删除所选切割区域" disabled={!selectedItem} onClick={remove}><Trash2 size={14}/></button>{onOpenFrame&&<button disabled={!savedImageId||dirty||state.document?.status!=='ready'} onClick={()=>savedImageId&&onOpenFrame(savedImageId)}>调整此帧 →</button>}</div>
     <div className="region-filmstrip" role="listbox" aria-label="切割原帧列表" onKeyDown={e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();e.stopPropagation();select(Math.min((recipe?.slicing.items.length||1)-1,selected+(e.key==='ArrowLeft'?-1:1)));}}}>
-      {recipe?.slicing.items.map((item,index)=>{const cached=frameCache.current.get(regionSignature(item,recipe.slicing.output));return <button key={keys.current[index]||index} role="option" aria-selected={index===selected} aria-label={`选择原帧 ${index+1}`} className={`region-thumb ${index===selected?'selected':''} ${item.enabled?'':'disabled'}`} onClick={()=>select(index)}>{cached?<img src={view==='output'?cached.output.url:cached.raw.url} alt={`原帧 ${index+1}`}/>:<span className="region-thumb-placeholder">{item.enabled?'待预览':'停用'}</span>}<span>{String(index+1).padStart(2,'0')} · {item.name}</span></button>;})}
+      {recipe?.slicing.items.map((item,index)=>{const cached=frameCache.current.get(regionSignature(item,recipe.slicing.output,recipe.slicing.items));return <button key={keys.current[index]||index} role="option" aria-selected={index===selected} aria-label={`选择原帧 ${index+1}`} className={`region-thumb ${index===selected?'selected':''} ${item.enabled?'':'disabled'}`} onClick={()=>select(index)}>{cached?<img src={view==='output'?cached.output.url:cached.raw.url} alt={`原帧 ${index+1}`}/>:<span className="region-thumb-placeholder">{item.enabled?'待预览':'停用'}</span>}<span>{String(index+1).padStart(2,'0')} · {item.name}</span></button>;})}
       {!recipe?.slicing.items.length&&<p className="adjust-note">用网格、自动识别生成区域，或直接在画布上拖拽加框。</p>}
     </div>
-    {(error||notice||currentPreview?.diagnostics.length||currentPreview?.blocking||disabled)&&<div className={`region-message ${error?'error':''}`} role={error?'alert':'status'}>{error||notice||currentPreview?.diagnostics.map(d=>d.message).join('；')||(currentPreview?.blocking?'部分区域超出统一输出画布，原始框仍可自由编辑。':'当前对象被任务占用；可本地编辑，接手后再保存。')}{currentPreview?.blocking&&recipe&&currentPreview.suggestedOutput&&currentPreview.suggestedOutput.width<=4096&&currentPreview.suggestedOutput.height<=4096&&<button onClick={()=>commit({...recipe,slicing:{...recipe.slicing,output:{...recipe.slicing.output,...currentPreview.suggestedOutput!}}},modeRef.current)}>按区域补齐透明画布</button>}</div>}
+    {(error||notice||currentPreview?.diagnostics.length||currentPreview?.blocking||disabled)&&<div className={`region-message ${error?'error':''}`} role={error?'alert':'status'}>{error||notice||currentPreview?.diagnostics.map(d=>d.message).join('；')||(currentPreview?.blocking?'部分区域超出统一输出画布，原始框仍可自由编辑。':'当前对象被任务占用；可本地编辑，接手后再保存。')}{currentPreview?.blocking&&recipe&&currentPreview.suggestedOutput&&fitRegionOutput(recipe.slicing.output,currentPreview.suggestedOutput)&&<button onClick={()=>{const output=fitRegionOutput(recipe.slicing.output,currentPreview.suggestedOutput!);if(output)commit({...recipe,slicing:{...recipe.slicing,output}},modeRef.current);}}>{recipe.slicing.output.normalize?'补齐画布并重设锚点':'按区域补齐透明画布'}</button>}</div>}
     {propertiesHost&&createPortal(<SliceConfigPanel recipe={recipe} selected={selected} width={image.width} height={image.height} text={jsonText} external={state.external} error={error} busy={!!busy} disabled={disabled} onItem={editItem} onBox={editBox} onDelete={remove} onDuplicate={duplicate} onRecipe={next=>commit(next)} onText={editText} onSave={()=>void save(false)} onReload={()=>void reload()}/>,propertiesHost)}
   </div>;
 }

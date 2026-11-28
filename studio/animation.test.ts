@@ -38,6 +38,26 @@ async function fixture(longPath = false) {
   return { store, pid: project.id, clip };
 }
 
+test("visible-bottom scaling retains each source baseline across preview and export", async () => {
+  const { store, pid } = await fixture();
+  try {
+    const first = join(store.root, "baseline-a.png"), second = join(store.root, "baseline-b.png"), empty = join(store.root, "baseline-empty.png");
+    const made = spawnSync(python, ["-c", "from PIL import Image,ImageDraw;import sys\nfor path,box in zip(sys.argv[1:],[(30,20,50,71),(30,8,50,61),None]):\n im=Image.new('RGBA',(96,96));\n if box: ImageDraw.Draw(im).rectangle(box,fill=(80,160,240,255))\n im.save(path)", first, second, empty], { windowsHide: true });
+    assert.equal(made.status, 0, made.stderr.toString());
+    const images = await Promise.all([first, second, empty].map((file, i) => store.importImage(pid, `baseline-${i}.png`, readFileSync(file))));
+    const clip = store.createClip(pid, "baseline", images.map((image, i) => ({ id: randomUUID(), imageId: image.id, durationUs: 100000 + i * 1000, transform: { scale: i === 1 ? 0.5 : 1.5, offsetX: 0, offsetY: 2, clip: true, anchor: "visible-bottom" } })));
+    const snapshot = store.animation.capture(pid, clip.id), preview = store.animation.captureClip(pid, snapshot.clip, snapshot.images, true);
+    const saved = await Promise.all(clip.frames.map(frame => store.animation.renderFrame(pid, snapshot.id, frame.id)));
+    const draft = await Promise.all(clip.frames.map(frame => store.animation.renderFrame(pid, preview.id, frame.id)));
+    assert.deepEqual(saved.map(frame => frame.bounds?.[3] ?? null), [74, 64, null]);
+    for (let i = 0; i < saved.length; i++) assert.deepEqual(readFileSync(saved[i]!.path), readFileSync(draft[i]!.path));
+    const exported = await store.exportClip(pid, clip.id);
+    const check = spawnSync(python, ["-c", "from PIL import Image,ImageChops;import sys\na=Image.open(sys.argv[1]).convert('RGBA');b=Image.open(sys.argv[2]).convert('RGBA');print(ImageChops.difference(a,b).getbbox())", saved[0]!.path, exported.path], { windowsHide: true });
+    assert.equal(check.status, 0, check.stderr.toString());
+    assert.equal(check.stdout.toString().trim(), "None");
+  } finally { store.worker.close(); }
+});
+
 test("direct edits and immutable comparisons work in deep Windows paths without creating another animation", async () => {
   const { store, pid, clip } = await fixture(true);
   try {

@@ -80,7 +80,7 @@ export class SheetInspectionService {
     }
     if(spec.action==="generate"&&spec.method==="grid"&&!spec.grid) throw new StudioError("网格生成需要grid参数");
     const {expectedSourceRevision,...keyInput}=spec;
-    const id=sha256(JSON.stringify(["region-inspect-v3-preserve-settings-3",source.contentHash,keyInput,spec.action!=="preview"&&!spec.text?original:undefined]));
+    const id=sha256(JSON.stringify(["region-inspect-v3-visible-anchor-4",source.contentHash,keyInput,spec.action!=="preview"&&!spec.text?original:undefined]));
     let cached=this.cached(pid,id);
     if(!cached) {
       const stage=this.store.stage(pid);

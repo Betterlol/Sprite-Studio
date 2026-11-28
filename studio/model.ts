@@ -4,6 +4,7 @@ export const agentModels = [
   "gpt-6.1-sol",
   "gpt-6.1-luna",
   "gpt-6.1-terra",
+  "gpt-6-luna"
 ] as const;
 export const agentModelSchema = z.enum(agentModels);
 export type AgentModel = z.infer<typeof agentModelSchema>;
@@ -38,7 +39,24 @@ export type Project = {
   createdAt: string;
   version: 1;
   resourceLayout?: 1;
+  idle?: IdleGuide;
 };
+/**
+ * Character-level IDLE baseline. It is only a web canvas overlay for judging
+ * scale and position, so it never enters frames, inspections or exports.
+ */
+export type IdleGuide = {
+  kind: "clip" | "image";
+  assetId: string;
+  opacity: number;
+};
+export const idleGuideSchema = z
+  .object({
+    kind: z.enum(["clip", "image"]),
+    assetId: z.string().uuid(),
+    opacity: z.number().min(0.05).max(1).default(0.22),
+  })
+  .strict();
 export type ImageAsset = {
   producer?: { sheetId: string; sliceId: string };
   folder?: string;
@@ -68,6 +86,7 @@ export type FrameTransform = {
   offsetX: number;
   offsetY: number;
   clip: boolean;
+  anchor?: "center" | "visible-bottom";
 };
 export const frameTransformSchema = z
   .object({
@@ -75,6 +94,7 @@ export const frameTransformSchema = z
     offsetX: z.number().min(-4096).max(4096).default(0),
     offsetY: z.number().min(-4096).max(4096).default(0),
     clip: z.boolean().default(false),
+    anchor: z.enum(["center", "visible-bottom"]).optional().describe("缩放锚点；省略时以画布中心为准"),
   })
   .strict();
 export type ClipFrame = {

@@ -28,6 +28,24 @@ export function SliceConfigPanel(p:RegionProperties) {
       <div className="region-property-actions"><button onClick={p.onDuplicate}>复制区域</button><button className="danger" onClick={p.onDelete}>删除区域</button></div>
       <p className="adjust-note">在画布上拖动或调整边角；方向键微移，Shift 加速，Esc 取消。{item.selection?' 当前保留自动识别的像素归属，改框后转为矩形取像。':''}</p>
     </>:p.recipe&&<p className="adjust-note">点击下方原帧选择区域，或在原图空白处拖拽新增。</p>}
+    {p.recipe&&<fieldset>
+      <legend>整组主体整理</legend>
+      <label className="region-check"><input type="checkbox" checked={!!p.recipe.slicing.output.normalize} onChange={e=>{
+        if(e.target.checked){const o=p.recipe!.slicing.output;output({normalize:{targetHeight:Math.max(1,Math.round(o.height*.75)),anchorX:Math.round(o.width/2),anchorY:Math.round(o.height*.9),offsetX:0,offsetY:0}});}
+        else {const {normalize,...rest}=p.recipe!.slicing.output;p.onRecipe({...p.recipe!,slicing:{...p.recipe!.slicing,output:rest}});}
+      }}/>按可见轮廓统一缩放并对齐底部</label>
+      {p.recipe.slicing.output.normalize&&<>
+        <div className="region-coordinate-grid">
+          {number('组目标高度',p.recipe.slicing.output.normalize.targetHeight,n=>output({normalize:{...p.recipe!.slicing.output.normalize!,targetHeight:n}}),1,4096)}
+          {number('组缩放',p.recipe.slicing.output.scale,n=>output({scale:n}),.05,4,.05)}
+          {number('锚点 X',p.recipe.slicing.output.normalize.anchorX,n=>output({normalize:{...p.recipe!.slicing.output.normalize!,anchorX:n}}),0,4096)}
+          {number('锚点 Y',p.recipe.slicing.output.normalize.anchorY,n=>output({normalize:{...p.recipe!.slicing.output.normalize!,anchorY:n}}),0,4096)}
+          {number('组偏移 X',p.recipe.slicing.output.normalize.offsetX,n=>output({normalize:{...p.recipe!.slicing.output.normalize!,offsetX:n}}),-4096,4096)}
+          {number('组偏移 Y',p.recipe.slicing.output.normalize.offsetY,n=>output({normalize:{...p.recipe!.slicing.output.normalize!,offsetY:n}}),-4096,4096)}
+        </div>
+        <small>以整组最大可见高度计算共同倍率，保留各帧相对高度；对齐轮廓底部而非识别真实脚底。</small>
+      </>}
+    </fieldset>}
     <details className="region-advanced"><summary>高级输出与配置</summary>
       {p.recipe&&<>
         <label>输出目录<input aria-label="切片输出目录" value={p.recipe.slicing.outputFolder} onChange={e=>p.onRecipe({...p.recipe!,slicing:{...p.recipe!.slicing,outputFolder:e.target.value}})}/></label>
@@ -36,7 +54,7 @@ export function SliceConfigPanel(p:RegionProperties) {
           {number('输出高',p.recipe.slicing.output.height,n=>output({height:n}),1,4096)}
           {number('全局缩放',p.recipe.slicing.output.scale,n=>output({scale:n}),.05,4,.05)}
           <label>放置方式<select aria-label="输出放置" value={p.recipe.slicing.output.alignment} onChange={e=>output({alignment:e.target.value as 'center'|'bottom-center'|'top-left'})}><option value="center">居中</option><option value="bottom-center">底部居中</option><option value="top-left">左上（保留切片坐标）</option></select></label>
-        </div><button onClick={()=>{const active=p.recipe!.slicing.items.filter(i=>i.enabled),s=p.recipe!.slicing.output.scale;output({width:Math.min(4096,Math.max(1,...active.map(i=>Math.floor((i.box[2]-i.box[0])*s+.5)))),height:Math.min(4096,Math.max(1,...active.map(i=>Math.floor((i.box[3]-i.box[1])*s+.5))))});}}>按区域建议画布</button><small>默认保留像素尺度，只补透明边；不会逐帧拉伸，超出画布会阻止执行。</small></fieldset>
+        </div><button disabled={!!p.recipe.slicing.output.normalize} onClick={()=>{const active=p.recipe!.slicing.items.filter(i=>i.enabled),s=p.recipe!.slicing.output.scale;output({width:Math.min(4096,Math.max(1,...active.map(i=>Math.floor((i.box[2]-i.box[0])*s+.5)))),height:Math.min(4096,Math.max(1,...active.map(i=>Math.floor((i.box[3]-i.box[1])*s+.5))))});}}>按区域建议画布</button><small>默认保留像素尺度，只补透明边；不会逐帧拉伸，超出画布会阻止执行。</small></fieldset>
         <label>期望帧数<input aria-label="期望帧数" type="number" min={1} max={128} value={p.recipe.slicing.expectedFrames??''} onChange={e=>{const next=structuredClone(p.recipe!);if(e.target.value)next.slicing.expectedFrames=Number(e.target.value);else delete next.slicing.expectedFrames;p.onRecipe(next);}}/></label>
       </>}
       <label>区域配置 JSON<textarea aria-label="切割配置正文" value={p.text} onChange={e=>p.onText(e.target.value)} spellCheck={false}/></label>

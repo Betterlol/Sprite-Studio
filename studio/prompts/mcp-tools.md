@@ -32,6 +32,6 @@
 ## 关键能力边界
 
 - inspect_sheet 的 grid 只生成网格区域；detection.alphaThreshold / minComponentPixels 用于 components 连通域识别，不会在 grid 模式自动清理杂点。v3 配方保存最终区域和可选像素选区，生成方式只是工具操作参数。
-- 图集 output 提供统一画布、缩放和对齐；逐帧尺度/位置差异通过动画草稿参数处理。adjust_image 对独立图片生成调整后的新资源。
+- 图集 output 可使用 normalize 设置 targetHeight、anchorX、anchorY 和 offsetX/Y，按可见轮廓整组缩放并将各帧轮廓底部中心对齐锚点；scale 是额外组级倍率。轮廓底部不一定是脚，跳跃等动作可不用此模式。逐帧尺度/位置差异通过动画草稿参数处理。adjust_image 对独立图片生成调整后的新资源。
 - 切割与缩放处理现有像素；轮廓缺失、不透明背景和结构/颜色问题需按实际图像判断是否重绘或重新生成。
 - inspect_clip 提供实际静态帧、相邻叠图、边界和时长信息；实际速度播放和交互效果由对应播放环境判断。

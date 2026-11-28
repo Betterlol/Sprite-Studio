@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { clipEdit, editorReducer, editorState, DraftQueue, contextFor, dependencyKey, dependencyConflicts, editingBlock, offsetByDrag, sameClipText, samePreview, shortcutAllowed } from "./workflow-state.ts";
+import { clipEdit, editorReducer, editorState, DraftQueue, contextFor, dependencyKey, dependencyConflicts, editingBlock, offsetByDrag, adjustAllFrames, sameClipText, samePreview, shortcutAllowed } from "./workflow-state.ts";
 import type { ClipAsset, ImageAsset } from "../studio/model.ts";
 import type { ClipDraftDocument, ProductionTask } from "../studio/workflow-model.ts";
 const ids = Array.from({length:9},(_,i)=>`00000000-0000-4000-8000-${String(i+1).padStart(12,"0")}`);
@@ -8,6 +8,22 @@ const clip: ClipAsset = { id:ids[0]!,type:"clip",name:"test",revision:"saved-1",
 const image: ImageAsset = {id:ids[3]!,type:"image",name:"pixels",kind:"image",revision:"pixels-1",createdAt:"now",width:360,height:360,frameCount:1,mime:"image/png",file:"test.png",contentHash:"hash"};
 function document(source:"human"|"agent"="human"): ClipDraftDocument {return {documentId:ids[4]!,documentRevision:"doc-1",text:"initial",draft:{id:ids[4]!,projectId:ids[5]!,clipId:clip.id,baseSnapshotId:ids[6]!,source,status:"editing",createdAt:"now"}};}
 function task(): ProductionTask {return {id:ids[7]!,projectId:ids[5]!,requestId:ids[8]!,requestHash:"hash",revision:3,intentVersion:1,barrierVersion:4,title:"task",description:"description",phase:"production",status:"running",target:{clipId:clip.id,revision:clip.revision,mode:"saved"},referenceIds:[],contract:{roleReferenceIds:[],immutable:[],generationLimit:1,repairLimit:3,requiredChecks:["static"]},attempts:[],directionHistory:[],findings:[],checks:[],acceptanceHistory:[],createdAt:"now",updatedAt:"now"};}
+
+test("group adjustments preserve per-frame differences and undo atomically", () => {
+  const original = { ...clipEdit(clip), frames: clip.frames.map((frame, i) => ({ ...frame, transform: { scale: i ? 0.8 : 1, offsetX: i * 3, offsetY: -i * 2, clip: i === 1, anchor: "visible-bottom" as const } })) };
+  const changed = adjustAllFrames(original, 1.5, 4, -6);
+  assert.deepEqual(changed.frames.map(frame => frame.transform), [
+    { scale: 1.5, offsetX: 4, offsetY: -6, clip: false, anchor: "visible-bottom" },
+    { scale: 1.2, offsetX: 7, offsetY: -8, clip: true, anchor: "visible-bottom" },
+  ]);
+  let state = editorReducer(editorState(original), { type: "edit", edit: changed });
+  assert.equal(state.past.length, 1);
+  state = editorReducer(state, { type: "undo" });
+  assert.deepEqual(state.present, original);
+  assert.throws(() => adjustAllFrames(original, 5, 0, 0), /未修改任何帧/);
+  assert.equal(original.frames[0]!.transform.scale, 1);
+  assert.equal(sameClipText(JSON.stringify(original), JSON.stringify({ ...original, frames: original.frames.map(f => ({ ...f, transform: { ...f.transform, anchor: "center" } })) })), false);
+});
 
 test("one history covers frame transform, timing, order, loop and defaults",()=>{
   let state=editorState(clipEdit(clip));const before=structuredClone(state.present);

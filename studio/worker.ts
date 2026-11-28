@@ -78,7 +78,11 @@ export class ImagingWorker {
       }
     });
   }
-  run(method: string, params: Record<string, unknown>): Promise<any> {
+  run(
+    method: string,
+    params: Record<string, unknown>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<any> {
     const task = this.queue
       .catch(() => {})
       .then(
@@ -89,7 +93,7 @@ export class ImagingWorker {
             const timer = setTimeout(() => {
               this.close();
               reject(new Error("图像处理超时"));
-            }, 45_000);
+            }, options.timeoutMs ?? 45_000);
             this.pending.set(id, { resolve, reject, timer });
             this.child!.stdin!.write(
               JSON.stringify({ id, method, params }) + "\n",

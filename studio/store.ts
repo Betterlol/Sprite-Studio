@@ -33,6 +33,7 @@ import { GeneratedImages } from "./generated.ts";
 import { FrameDrafts } from "./frame-drafts.ts";
 import { SheetDocuments } from "./sheets.ts";
 import { SheetInspectionService } from "./sheet-inspection.ts";
+import { ProjectExports } from "./export.ts";
 import {
   resourceCategories,
   resourceCategory,
@@ -96,6 +97,7 @@ export class ProjectStore extends EventEmitter {
   reviewSequences: ReviewSequences;
   tasks: ProductionTasks;
   quality: WorkflowQuality;
+  exports: ProjectExports;
   private writeGuards = new AsyncLocalStorage<() => void>();
   guarded<T>(guard: () => void, operation: () => T): T { return this.writeGuards.run(guard, operation); }
   assertWriteAllowed() { this.writeGuards.getStore()?.(); }
@@ -192,6 +194,7 @@ export class ProjectStore extends EventEmitter {
     this.clipDrafts = new ClipDrafts(this);
     this.reviewSequences = new ReviewSequences(this);
     this.quality = new WorkflowQuality(this);
+    this.exports = new ProjectExports(this);
   }
   project(id: string) {
     const project = this.projects.get(id);
@@ -355,6 +358,7 @@ export class ProjectStore extends EventEmitter {
       if (projectId === id) this.frameDrafts.records.delete(draftId);
     this.clipDrafts.purgeProject(id);
     this.reviewSequences.purgeProject(id);
+    this.exports.purgeProject(id);
   }
   private purgeProjectEntries<T extends { projectId: string }>(
     map: Map<string, T>,
